@@ -80,14 +80,16 @@ impl Drop for RecoverableAttempt {
             log_openai_stream_lifecycle(
                 jcode_base::logging::LogLevel::Info,
                 "persistent_cancel_recovery",
-                vec![
-                    ("transport_retained", recovered.to_string()),
-                    ("response_chain_retained", "false".to_string()),
-                    (
-                        "drain_timeout_ms",
-                        CANCEL_DRAIN_TIMEOUT.as_millis().to_string(),
-                    ),
-                ],
+                || {
+                    vec![
+                        ("transport_retained", recovered.to_string()),
+                        ("response_chain_retained", "false".to_string()),
+                        (
+                            "drain_timeout_ms",
+                            CANCEL_DRAIN_TIMEOUT.as_millis().to_string(),
+                        ),
+                    ]
+                },
             );
         });
     }
@@ -177,6 +179,8 @@ mod tests {
             last_response_completed_at: Instant::now(),
             message_count: 2,
             last_input_item_count: 1,
+            last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
             last_input_item_hashes: vec![42],
             last_response_output: vec![serde_json::json!({"type":"function_call"})],
         };

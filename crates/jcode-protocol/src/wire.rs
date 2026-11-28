@@ -22,6 +22,9 @@ pub struct SessionToolDefinition {
 /// Replaces the session SDK overlay. None inherits normal selection.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionToolConfig {
+    /// Session-only instructions owned by the configuring connection, not persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_append: Option<String>,
     #[serde(default)]
     pub enabled: Option<Vec<String>>,
     #[serde(default)]
@@ -30,10 +33,120 @@ pub struct SessionToolConfig {
     pub custom: Vec<SessionToolDefinition>,
 }
 
+/// Delivery phase for a queued user prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptMode {
+    Steer,
+    AfterYield,
+    Queue,
+}
+
+/// Result of attempting to remove a prompt at the queue's delivery boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptRemovalOutcome {
+    Removed,
+    InFlight,
+    AlreadyDelivered,
+    NotFound,
+}
+
+/// Result of replacing a still-queued prompt's content in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptEditOutcome {
+    Edited,
+    InFlight,
+    AlreadyDelivered,
+    NotFound,
+}
+
+/// Why the daemon rejected a queued prompt before accepting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedPromptRejection {
+    UnknownSkill,
+}
+
+/// One user-authored message still owned by the daemon queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "QueuedPromptWire", into = "QueuedPromptWire")]
+pub struct QueuedPrompt {
+    pub client_id: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<jcode_session_types::Attachment>,
+    pub mode: QueuedPromptMode,
+    /// Skill name resolved by the daemon when this item is delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_skill: Option<String>,
+    /// True while a client holds this prompt open for editing. Held prompts
+    /// stay in place (position and mode preserved) but are never delivered.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub editing: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct QueuedPromptWire {
+    client_id: String,
+    content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<jcode_session_types::Attachment>,
+    mode: QueuedPromptMode,
+    #[serde(default, skip_serializing_if = "is_false")]
+    fifo_queue: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_skill: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    editing: bool,
+}
+
+impl From<QueuedPrompt> for QueuedPromptWire {
+    fn from(prompt: QueuedPrompt) -> Self {
+        let fifo_queue = prompt.mode == QueuedPromptMode::Queue;
+        Self {
+            client_id: prompt.client_id,
+            content: prompt.content,
+            images: prompt.images,
+            attachments: prompt.attachments,
+            mode: if fifo_queue { QueuedPromptMode::AfterYield } else { prompt.mode },
+            fifo_queue,
+            active_skill: prompt.active_skill,
+            editing: prompt.editing,
+        }
+    }
+}
+
+impl From<QueuedPromptWire> for QueuedPrompt {
+    fn from(prompt: QueuedPromptWire) -> Self {
+        Self {
+            client_id: prompt.client_id,
+            content: prompt.content,
+            images: prompt.images,
+            attachments: prompt.attachments,
+            mode: if prompt.fifo_queue { QueuedPromptMode::Queue } else { prompt.mode },
+            active_skill: prompt.active_skill,
+            editing: prompt.editing,
+        }
+    }
+}
+
 /// Client request to server
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    /// Passive latest-state metadata. Never starts a turn or cancels generation.
+    #[serde(rename = "screen_context")]
+    ScreenContext {
+        id: u64,
+        session_id: String,
+        action: ScreenContextAction,
+    },
     #[serde(rename = "configure_tools")]
     ConfigureTools { id: u64, tools: SessionToolConfig },
     #[serde(rename = "list_tools")]
@@ -51,8 +164,13 @@ pub enum Request {
     Message {
         id: u64,
         content: String,
+        /// Out-of-band client provenance for rendering. Never part of provider input.
+        #[serde(default, skip_serializing_if = "is_false")]
+        jarvis_voice: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_reminder: Option<String>,
         /// Skill selected by the client for this and subsequent turns. The
@@ -69,15 +187,114 @@ pub enum Request {
     #[serde(rename = "cancel")]
     Cancel { id: u64 },
 
+    /// Abort the current turn of the attached session, without waiting for it.
+    #[serde(rename = "force_stop_turn")]
+    ForceStopTurn { id: u64, session_id: String },
+
     /// Move the currently executing tool to background
     #[serde(rename = "background_tool")]
     BackgroundTool { id: u64 },
+
+    #[serde(rename = "background_tasks")]
+    BackgroundTasks {
+        id: u64,
+        session_id: String,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        cancel: bool,
+        /// Keep a dedicated read-only control stream open for subsequent snapshots.
+        #[serde(default)]
+        keep_open: bool,
+    },
+
+    /// Queue a user prompt with a stable caller id. Acknowledged only after
+    /// the queue has accepted and persisted it.
+    #[serde(rename = "queue_prompt")]
+    QueuePrompt {
+        id: u64,
+        client_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
+        mode: QueuedPromptMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_reminder: Option<String>,
+        /// Requires the `queued_prompt_active_skill` capability. Unknown names are rejected.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_skill: Option<String>,
+    },
+
+    /// Change the delivery phase of a prompt that is still queued.
+    #[serde(rename = "set_queued_prompt_mode")]
+    SetQueuedPromptMode {
+        id: u64,
+        client_id: String,
+        mode: QueuedPromptMode,
+    },
+
+    /// Stop the current turn and deliver the selected queued prompt next.
+    #[serde(rename = "interrupt_queued_prompt")]
+    InterruptQueuedPrompt { id: u64, client_id: String },
+
+    /// Interrupt and deliver these queued prompts together, in queue order.
+    #[serde(rename = "interrupt_queued_prompts")]
+    InterruptQueuedPrompts { id: u64, ids: Vec<String> },
+
+    /// Obtain a fresh queue snapshot after reconnecting.
+    #[serde(rename = "get_queued_prompts")]
+    GetQueuedPrompts { id: u64 },
+
+    #[serde(rename = "remove_queued_prompt")]
+    RemoveQueuedPrompt {
+        id: u64,
+        client_id: String,
+        prompt_id: String,
+    },
+
+    #[serde(rename = "reorder_queued_prompts")]
+    ReorderQueuedPrompts {
+        id: u64,
+        client_id: String,
+        order: Vec<String>,
+    },
+
+    /// Hold a queued prompt open for editing so the drain skips it until it is
+    /// saved, cancelled, or the holding client disconnects. Requires the
+    /// `queued_prompt_editing` capability.
+    #[serde(rename = "set_queued_prompt_editing")]
+    SetQueuedPromptEditing {
+        id: u64,
+        client_id: String,
+        prompt_id: String,
+        editing: bool,
+    },
+
+    /// Replace a still-queued prompt's content and images in place, keeping its
+    /// queue position, delivery mode, and active skill. Requires the
+    /// `queued_prompt_editing` capability.
+    #[serde(rename = "edit_queued_prompt")]
+    EditQueuedPrompt {
+        id: u64,
+        client_id: String,
+        prompt_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<jcode_session_types::Attachment>,
+    },
 
     /// Soft interrupt: inject message at next safe point without cancelling
     #[serde(rename = "soft_interrupt")]
     SoftInterrupt {
         id: u64,
         content: String,
+        /// Out-of-band client provenance for rendering. Never part of provider input.
+        #[serde(default, skip_serializing_if = "is_false")]
+        jarvis_voice: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
         /// If true, can skip remaining tools at injection point C
@@ -109,6 +326,12 @@ pub enum Request {
     #[serde(rename = "rewind")]
     Rewind { id: u64, message_index: usize },
 
+    #[serde(rename = "rewind_transcript")]
+    RewindTranscript {
+        id: u64,
+        target: jcode_session_types::RewindAnchor,
+    },
+
     /// Undo the most recent rewind, if one is available.
     #[serde(rename = "rewind_undo")]
     RewindUndo { id: u64 },
@@ -116,6 +339,9 @@ pub enum Request {
     /// Health check
     #[serde(rename = "ping")]
     Ping { id: u64 },
+    /// Read the local OpenRig identity from the serving daemon, if available.
+    #[serde(rename = "openrig_host_identity")]
+    OpenrigHostIdentity { id: u64 },
 
     /// Get current state (debug)
     #[serde(rename = "state")]
@@ -170,6 +396,9 @@ pub enum Request {
         /// Desktop can render user_response tool calls as inline answers.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_user_response: bool,
+        /// Explicit applet renderer capability. Absent retains legacy behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supports_applets: Option<bool>,
         /// The client has no account-router countdown of its own (Desktop,
         /// SDK). On a usage/rate-limit failure the server switches to the next
         /// pool-approved account and retries the turn itself.
@@ -228,6 +457,51 @@ pub enum Request {
     /// Get full conversation history (for TUI sync on connect)
     #[serde(rename = "get_history")]
     GetHistory { id: u64 },
+
+    /// Cursor-based, byte-bounded transcript fragments.
+    #[serde(rename = "get_history_page")]
+    GetHistoryPage {
+        id: u64,
+        before: Option<String>,
+        limit: usize,
+    },
+
+    /// A bounded slice of a lazily loaded history image (base64 bytes).
+    #[serde(rename = "get_history_image_chunk")]
+    GetHistoryImageChunk { id: u64, key: String, offset: usize },
+
+    /// List durable image references in the attached session.
+    #[serde(rename = "list_session_images")]
+    ListSessionImages { id: u64, session_id: String },
+
+    #[serde(rename = "session_context_breakdown")]
+    SessionContextBreakdown {
+        id: u64,
+        session_id: Option<String>,
+        model: Option<String>,
+        cwd: Option<String>,
+        #[serde(default)]
+        summary_only: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_snapcompact: bool,
+    },
+
+    #[serde(rename = "session_shake_tools")]
+    SessionShakeTools {
+        id: u64,
+        session_id: String,
+        action: jcode_session_types::ShakeToolsAction,
+    },
+
+    /// Retrieve a bounded chunk of one session image by its stable ID.
+    #[serde(rename = "get_session_image")]
+    GetSessionImage {
+        id: u64,
+        session_id: String,
+        image_id: String,
+        #[serde(default)]
+        offset: usize,
+    },
 
     /// Get only provider/model metadata and available models.
     #[serde(rename = "get_model_catalog")]
@@ -371,6 +645,11 @@ pub enum Request {
     #[serde(rename = "set_model")]
     SetModel { id: u64, model: String },
 
+    /// Withdraw the model switch the daemon accepted but deferred until the
+    /// running turn ends. Answered with `model_change_cancelled`.
+    #[serde(rename = "cancel_pending_model_change")]
+    CancelPendingModelChange { id: u64 },
+
     /// Set a session context budget override. Null or zero clears the override.
     #[serde(rename = "set_context_cap")]
     SetContextCap {
@@ -434,6 +713,11 @@ pub enum Request {
     /// Set service tier for OpenAI models (priority|fast|flex|off)
     #[serde(rename = "set_service_tier")]
     SetServiceTier { id: u64, service_tier: String },
+    #[serde(rename = "set_speed_mode")]
+    SetSpeedMode {
+        id: u64,
+        speed_mode: jcode_message_types::SpeedMode,
+    },
 
     /// Set connection transport for OpenAI models (auto|https|websocket)
     #[serde(rename = "set_transport")]
@@ -503,6 +787,18 @@ pub enum Request {
     #[serde(rename = "split")]
     Split { id: u64 },
 
+    #[serde(rename = "split_side_question")]
+    SplitSideQuestion { id: u64 },
+
+    #[serde(rename = "list_side_questions")]
+    ListSideQuestions { id: u64, parent_session_id: String },
+
+    #[serde(rename = "get_side_question_history")]
+    GetSideQuestionHistory { id: u64, session_id: String },
+
+    #[serde(rename = "promote_side_question")]
+    PromoteSideQuestion { id: u64, session_id: String },
+
     /// Transfer the current session into a compacted handoff session
     #[serde(rename = "transfer")]
     Transfer { id: u64 },
@@ -568,12 +864,71 @@ pub enum Request {
         account_label: Option<String>,
     },
 
+    /// Ask the daemon that owns a provider login to renew it now. Only that
+    /// daemon may rotate the refresh grant, so one-shot clients (`jcode run`,
+    /// `review`, ...) send this and re-read the credential store once `Done`
+    /// arrives. The reply never carries tokens.
+    #[serde(rename = "refresh_auth")]
+    RefreshAuth {
+        id: u64,
+        /// Provider whose login to renew (`claude`).
+        provider: String,
+        /// Stored account label; `None` means the active account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
+    },
+
     /// Answer an `ask_user_request` from the `ask` tool.
     #[serde(rename = "ask_user_response")]
     AskUserResponse {
         id: u64,
         request_id: String,
         response: AskResponse,
+    },
+
+    /// Answer a `routing_gate` the daemon raised for the attached session.
+    #[serde(rename = "routing_gate_answer")]
+    RoutingGateAnswer {
+        id: u64,
+        gate_id: String,
+        choice: RoutingGateChoice,
+    },
+
+    /// Set or read account routing intents for the attached session.
+    /// Answered with `routing_status`.
+    #[serde(rename = "routing_intent")]
+    RoutingIntent {
+        id: u64,
+        action: RoutingIntentAction,
+    },
+
+    /// Read the routing configuration with live usage, for a settings page.
+    /// Answered with `routing_view`. Needs no attached session.
+    #[serde(rename = "routing_view")]
+    RoutingView { id: u64 },
+
+    /// Read one Desktop state space. First frame of a dedicated connection that
+    /// then serves only `desktop_state_*` requests; advertised by
+    /// [`crate::DESKTOP_STATE_CAPABILITY`].
+    #[serde(rename = "desktop_state_get")]
+    DesktopStateGet { id: u64, space: String },
+
+    /// Like `desktop_state_get`, and push `desktop_state_changed` for this
+    /// space for the life of the connection.
+    #[serde(rename = "desktop_state_subscribe")]
+    DesktopStateSubscribe { id: u64, space: String },
+
+    /// Apply `changes` on top of `expected_rev`. Answered with
+    /// `desktop_state_applied`, `desktop_state_conflict` or
+    /// `desktop_state_rejected`.
+    #[serde(rename = "desktop_state_put")]
+    DesktopStatePut {
+        id: u64,
+        space: String,
+        /// Writer label, echoed on pushes to other subscribers.
+        device: String,
+        expected_rev: u64,
+        changes: Vec<DesktopStateChange>,
     },
 
     /// Send stdin input to a running command that requested it
@@ -673,6 +1028,22 @@ pub enum Request {
     #[serde(rename = "comm_list_swarms")]
     CommListSwarms { id: u64, session_id: String },
 
+    /// List every live root session on the daemon (any swarm), so an agent can
+    /// find sessions to message or raise. Answered with `comm_members`.
+    #[serde(rename = "comm_list_sessions")]
+    CommListSessions { id: u64, session_id: String },
+
+    /// Ask the clients attached to another live session to raise/focus it
+    /// (Desktop selects the tab, TUI rings the bell, and the server runs the
+    /// configured terminal focus hook). `target_session` is an exact session
+    /// id or unique friendly name.
+    #[serde(rename = "comm_focus_session")]
+    CommFocusSession {
+        id: u64,
+        session_id: String,
+        target_session: String,
+    },
+
     /// Set (or clear, with an empty label) the human-readable label of the
     /// caller's swarm. Labels are unique across swarms.
     #[serde(rename = "comm_set_swarm_label")]
@@ -750,11 +1121,18 @@ pub enum Request {
         /// `low`, `medium`, `high`, `xhigh`, `max`). Unset = provider default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
+        /// Optional worker speed. Unset uses the lane, then owner config.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speed: Option<jcode_message_types::SpeedMode>,
         /// Optional short human-readable label for the spawned agent shown in
         /// swarm UI (gallery chips, member lists). Overrides the task label
         /// otherwise derived from the first line of `initial_message`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        /// Optional agent profile for the worker (see `agents.profiles`).
+        /// Unset uses the lane's `lane_profile`, then no profile.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
     },
 
     /// List models/routes available for spawning swarm agents
@@ -769,6 +1147,14 @@ pub enum Request {
         target_session: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         force: Option<bool>,
+    },
+
+    #[serde(rename = "comm_worker_control")]
+    CommWorkerControl {
+        id: u64,
+        session_id: String,
+        target_session: String,
+        control: SwarmWorkerControl,
     },
 
     /// Assign a role to an agent (coordinator only)
@@ -934,7 +1320,9 @@ pub enum Request {
 }
 
 mod events;
-pub use events::{AccountUsageSnapshot, AccountUsageWindow, ServerEvent, TurnIdentity};
+pub use events::{
+    AccountUsageSnapshot, AccountUsageWindow, DaemonIdentity, ServerEvent, TurnIdentity,
+};
 
 impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -953,21 +1341,4 @@ impl std::fmt::Debug for Request {
 }
 
 #[cfg(test)]
-mod session_env_tests {
-    use super::*;
-
-    #[test]
-    fn session_environment_roundtrips_without_debug_secrets() {
-        let request = Request::SetSessionEnv {
-            id: 42,
-            env: [("TOKEN".into(), "private-secret".into())].into(),
-        };
-        let json = serde_json::to_value(&request).unwrap();
-        assert_eq!(json["type"], "set_session_env");
-        assert_eq!(json["env"]["TOKEN"], "private-secret");
-        let decoded: Request = serde_json::from_value(json).unwrap();
-        assert_eq!(decoded.id(), 42);
-        assert!(!format!("{decoded:?}").contains("private-secret"));
-        assert!(!format!("{decoded:?}").contains("TOKEN"));
-    }
-}
+mod session_env_tests;

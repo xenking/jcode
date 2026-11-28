@@ -1,0 +1,653 @@
+use crate::bus::FileOp;
+use crate::plan::VersionedPlan;
+use crate::protocol::ServerEvent;
+use jcode_agent_runtime::SoftInterruptQueue;
+use jcode_swarm_core::{SwarmLifecycleStatus, SwarmMemberRecord, SwarmRole};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::{RwLock, mpsc};
+
+/// Record of a file access by an agent
+#[derive(Clone, Debug)]
+pub struct FileAccess {
+    pub session_id: String,
+    pub op: FileOp,
+    pub timestamp: Instant,
+    pub absolute_time: std::time::SystemTime,
+    pub intent: Option<String>,
+    pub summary: Option<String>,
+    pub detail: Option<String>,
+    /// Lines added/removed by this access (0 for reads).
+    pub added: u64,
+    pub removed: u64,
+}
+
+pub(super) fn latest_peer_touches(
+    accesses: &[FileAccess],
+    current_session_id: &str,
+    swarm_session_ids: &HashSet<String>,
+) -> Vec<FileAccess> {
+    let mut latest_by_session: HashMap<&str, &FileAccess> = HashMap::new();
+
+    for access in accesses.iter().filter(|access| {
+        access.session_id != current_session_id
+            && swarm_session_ids.contains(&access.session_id)
+            && access.op.is_modification()
+    }) {
+        latest_by_session
+            .entry(&access.session_id)
+            .and_modify(|existing| {
+                if access.timestamp > existing.timestamp {
+                    *existing = access;
+                }
+            })
+            .or_insert(access);
+    }
+
+    let mut latest: Vec<FileAccess> = latest_by_session.into_values().cloned().collect();
+    latest.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    latest
+}
+
+/// Shared ownership of the core persisted swarm coordination state.
+///
+/// Lock order: client connections and sessions precede swarm registries, which
+/// must be acquired in this order: members, swarms_by_id, plans, coordinators.
+/// Never hold a registry guard across any other await. Snapshot before awaiting
+/// unrelated work, and release guards before calling async helpers.
+#[derive(Clone)]
+pub struct SwarmState {
+    pub members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    pub swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    pub plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
+    pub coordinators: Arc<RwLock<HashMap<String, String>>>,
+}
+
+/// First-class snapshot of a single swarm's logical runtime state.
+#[derive(Clone, Debug)]
+pub struct SwarmRuntime {
+    pub swarm_id: String,
+    pub coordinator_session_id: Option<String>,
+    pub member_session_ids: HashSet<String>,
+    pub members: Vec<SwarmMember>,
+    pub plan: Option<VersionedPlan>,
+}
+
+impl SwarmRuntime {
+    pub fn has_any_state(&self) -> bool {
+        self.plan.is_some() || self.coordinator_session_id.is_some() || !self.members.is_empty()
+    }
+}
+
+/// Live transport attachment for a connected session.
+#[derive(Clone, Debug)]
+pub struct LiveSessionAttachment {
+    pub connection_id: String,
+    pub event_tx: mpsc::UnboundedSender<ServerEvent>,
+}
+
+impl SwarmState {
+    pub fn new(
+        members: HashMap<String, SwarmMember>,
+        swarms_by_id: HashMap<String, HashSet<String>>,
+        plans: HashMap<String, VersionedPlan>,
+        coordinators: HashMap<String, String>,
+    ) -> Self {
+        let members = Arc::new(RwLock::new(members));
+        crate::cache_keepalive::register_workers(members.clone());
+        Self {
+            members,
+            swarms_by_id: Arc::new(RwLock::new(swarms_by_id)),
+            plans: Arc::new(RwLock::new(plans)),
+            coordinators: Arc::new(RwLock::new(coordinators)),
+        }
+    }
+
+    pub async fn load_runtime(&self, swarm_id: &str) -> SwarmRuntime {
+        let plan = {
+            let plans = self.plans.read().await;
+            plans.get(swarm_id).cloned()
+        };
+        let coordinator_session_id = {
+            let coordinators = self.coordinators.read().await;
+            coordinators.get(swarm_id).cloned()
+        };
+        let member_session_ids = {
+            let swarms = self.swarms_by_id.read().await;
+            swarms.get(swarm_id).cloned().unwrap_or_default()
+        };
+        let mut members = {
+            let members = self.members.read().await;
+            members
+                .values()
+                .filter(|member| member.swarm_id.as_deref() == Some(swarm_id))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        members.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+
+        SwarmRuntime {
+            swarm_id: swarm_id.to_string(),
+            coordinator_session_id,
+            member_session_ids,
+            members,
+            plan,
+        }
+    }
+}
+
+/// Information about a session in a swarm
+#[derive(Clone, Debug)]
+pub struct SwarmMember {
+    pub session_id: String,
+    /// Primary channel to send events to this session.
+    ///
+    /// This remains for backward-compatible single-sender call sites and for
+    /// headless sessions that do not maintain a live attachment map.
+    pub event_tx: mpsc::UnboundedSender<ServerEvent>,
+    /// Live client attachments for this session keyed by connection id.
+    pub event_txs: HashMap<String, mpsc::UnboundedSender<ServerEvent>>,
+    /// Working directory (used to derive swarm id)
+    pub working_dir: Option<PathBuf>,
+    /// Swarm identifier (shared across worktrees)
+    pub swarm_id: Option<String>,
+    /// Whether swarm coordination is enabled for this member
+    pub swarm_enabled: bool,
+    /// Lifecycle status (ready, running, completed, failed, stopped, etc.)
+    pub status: String,
+    /// Optional detail (current task, error, etc.)
+    pub detail: Option<String>,
+    /// Stable, human-readable label of the task/role this member was spawned
+    /// or assigned for (compacted from the spawn prompt or plan item). Unlike
+    /// `detail`, this is not overwritten by transient status updates.
+    pub task_label: Option<String>,
+    /// Friendly name like "fox"
+    pub friendly_name: Option<String>,
+    /// Session that should receive direct completion report-back for this member, if any.
+    pub report_back_to_session_id: Option<String>,
+    /// Latest automatically captured output tail (or a legacy explicit report).
+    pub latest_completion_report: Option<String>,
+    /// Role: "agent" or "coordinator"
+    pub role: String,
+    /// When this member joined the swarm
+    pub joined_at: Instant,
+    /// When status was last changed
+    pub last_status_change: Instant,
+    /// Whether this is a headless (spawned) session vs a TUI-connected session.
+    /// Headless sessions should not be automatically elected as coordinator.
+    pub is_headless: bool,
+    /// Recent streamed output tail (last few lines of in-progress assistant
+    /// text), captured for inline swarm gallery rendering. Updated by the bus
+    /// monitor from worker streaming taps; not persisted.
+    pub output_tail: Option<String>,
+    /// Aggregate todo progress (completed, total) for this member's session,
+    /// updated from `TodoUpdated` bus events. Surfaced on the inline swarm
+    /// strip; not persisted.
+    pub todo_progress: Option<(u32, u32)>,
+    /// Compact snapshot of this member's todo list (content + status), capped
+    /// at a few entries by the bus monitor. Rendered in the focused inline
+    /// swarm panel; not persisted.
+    pub todo_items: Vec<crate::protocol::SwarmTodoItem>,
+    /// Ephemeral model/timing metadata for the inline swarm card.
+    pub runtime: crate::protocol::SwarmMemberRuntime,
+}
+
+#[async_trait::async_trait]
+impl crate::cache_keepalive::Workers for RwLock<HashMap<String, SwarmMember>> {
+    async fn has_live_workers(&self, session_id: &str) -> bool {
+        self.read()
+            .await
+            .values()
+            .any(|member| member.is_live_worker_of(session_id))
+    }
+}
+
+impl SwarmMember {
+    /// Whether this is a worker the session spawned that is still working.
+    pub(crate) fn is_live_worker_of(&self, coordinator_session_id: &str) -> bool {
+        self.report_back_to_session_id.as_deref() == Some(coordinator_session_id)
+            && matches!(
+                self.status.as_str(),
+                "spawned" | "queued" | "running" | "running_stale" | "streaming" | "thinking"
+            )
+    }
+
+    pub fn durable_record(&self) -> SwarmMemberRecord {
+        SwarmMemberRecord {
+            session_id: self.session_id.clone(),
+            working_dir: self.working_dir.clone(),
+            swarm_id: self.swarm_id.clone(),
+            swarm_enabled: self.swarm_enabled,
+            status: SwarmLifecycleStatus::from(self.status.clone()),
+            detail: self.detail.clone(),
+            task_label: self.task_label.clone(),
+            friendly_name: self.friendly_name.clone(),
+            report_back_to_session_id: self.report_back_to_session_id.clone(),
+            latest_completion_report: self.latest_completion_report.clone(),
+            role: SwarmRole::from(self.role.clone()),
+            is_headless: self.is_headless,
+        }
+    }
+
+    pub fn live_attachments(&self) -> Vec<LiveSessionAttachment> {
+        self.event_txs
+            .iter()
+            .map(|(connection_id, event_tx)| LiveSessionAttachment {
+                connection_id: connection_id.clone(),
+                event_tx: event_tx.clone(),
+            })
+            .collect()
+    }
+
+    pub fn from_record(
+        record: SwarmMemberRecord,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Self {
+        Self {
+            session_id: record.session_id,
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: record.working_dir,
+            swarm_id: record.swarm_id,
+            swarm_enabled: record.swarm_enabled,
+            status: record.status.as_str().into_owned(),
+            detail: record.detail,
+            task_label: record.task_label,
+            friendly_name: record.friendly_name,
+            report_back_to_session_id: record.report_back_to_session_id,
+            latest_completion_report: record.latest_completion_report,
+            role: record.role.as_str().into_owned(),
+            joined_at: Instant::now(),
+            last_status_change: Instant::now(),
+            is_headless: record.is_headless,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+        }
+    }
+}
+
+/// A shared context entry stored by the server
+#[derive(Clone, Debug)]
+pub struct SharedContext {
+    pub key: String,
+    pub value: String,
+    pub from_session: String,
+    pub from_name: Option<String>,
+    /// When this context was created
+    pub created_at: Instant,
+    /// When this context was last updated
+    pub updated_at: Instant,
+}
+
+/// Event types for real-time event subscription
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SwarmEventType {
+    /// A file was touched (read/write/edit)
+    FileTouch {
+        path: String,
+        op: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intent: Option<String>,
+        summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    /// A notification was broadcast
+    Notification {
+        notification_type: String,
+        message: String,
+    },
+    /// A swarm plan was updated
+    PlanUpdate { swarm_id: String, item_count: usize },
+    /// A plan proposal was submitted
+    PlanProposal {
+        swarm_id: String,
+        proposer_session: String,
+        item_count: usize,
+    },
+    /// Shared context was updated
+    ContextUpdate { swarm_id: String, key: String },
+    /// Session status changed
+    StatusChange {
+        old_status: String,
+        new_status: String,
+    },
+    /// Session joined/left swarm
+    MemberChange {
+        action: String, // "joined" or "left"
+    },
+}
+
+/// A swarm event with metadata
+#[derive(Clone, Debug)]
+pub struct SwarmEvent {
+    pub id: u64,
+    pub session_id: String,
+    pub session_name: Option<String>,
+    pub swarm_id: Option<String>,
+    pub event: SwarmEventType,
+    pub timestamp: Instant,
+    pub absolute_time: std::time::SystemTime,
+}
+
+/// Ring buffer for recent swarm events
+pub(super) const MAX_EVENT_HISTORY: usize = 5000;
+
+pub(super) type SessionInterruptQueues = Arc<RwLock<HashMap<String, SoftInterruptQueue>>>;
+
+pub(super) async fn register_session_event_sender(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    connection_id: &str,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) {
+    let mut members = swarm_members.write().await;
+    if let Some(member) = members.get_mut(session_id) {
+        member.event_tx = event_tx.clone();
+        member.event_txs.insert(connection_id.to_string(), event_tx);
+    }
+}
+
+pub(super) async fn unregister_session_event_sender(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    connection_id: &str,
+) {
+    let mut members = swarm_members.write().await;
+    if let Some(member) = members.get_mut(session_id) {
+        member.event_txs.remove(connection_id);
+        if let Some((_, tx)) = member.event_txs.iter().next() {
+            member.event_tx = tx.clone();
+        }
+    }
+}
+
+/// Send synchronously, moving the original payload into the final live queue.
+/// In particular, a closed queue must not cause a large swarm snapshot clone.
+pub(super) fn send_event_to_targets<'a>(
+    targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
+    event: ServerEvent,
+) -> usize {
+    send_event_to_targets_recover(targets, event).unwrap_or(0)
+}
+
+/// Return the original payload when every queue is closed or rejects delivery.
+/// A caller can then use its fallback without cloning successful events first.
+#[allow(clippy::result_large_err)]
+fn send_event_to_targets_recover<'a>(
+    targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
+    event: ServerEvent,
+) -> Result<usize, Box<ServerEvent>> {
+    let mut targets = targets.into_iter().filter(|tx| !tx.is_closed()).peekable();
+    let mut delivered = 0;
+    while let Some(tx) = targets.next() {
+        if targets.peek().is_none() {
+            return match tx.send(event) {
+                Ok(()) => Ok(delivered + 1),
+                Err(error) if delivered == 0 => Err(Box::new(error.0)),
+                Err(_) => Ok(delivered),
+            };
+        }
+        delivered += usize::from(tx.send(event.clone()).is_ok());
+    }
+    Err(Box::new(event))
+}
+
+// Keep sends outside the session lock without allocating for the usual single
+// attachment. Multiple recipients retain their original iteration order.
+enum RecipientSnapshot {
+    Empty,
+    One(mpsc::UnboundedSender<ServerEvent>),
+    Many(Vec<mpsc::UnboundedSender<ServerEvent>>),
+}
+
+impl FromIterator<mpsc::UnboundedSender<ServerEvent>> for RecipientSnapshot {
+    fn from_iter<T: IntoIterator<Item = mpsc::UnboundedSender<ServerEvent>>>(iter: T) -> Self {
+        let mut iter = iter.into_iter();
+        let Some(first) = iter.next() else {
+            return Self::Empty;
+        };
+        let Some(second) = iter.next() else {
+            return Self::One(first);
+        };
+        let mut targets = Vec::with_capacity(iter.size_hint().0.saturating_add(2).max(4));
+        targets.push(first);
+        targets.push(second);
+        targets.extend(iter);
+        Self::Many(targets)
+    }
+}
+
+impl RecipientSnapshot {
+    fn as_slice(&self) -> &[mpsc::UnboundedSender<ServerEvent>] {
+        match self {
+            Self::Empty => &[],
+            Self::One(tx) => std::slice::from_ref(tx),
+            Self::Many(targets) => targets,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "state_fanout_tests.rs"]
+mod fanout_tests;
+
+#[cfg(test)]
+#[path = "state_turn_delivery_tests.rs"]
+mod turn_delivery_tests;
+
+pub(super) async fn fanout_session_event(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    event: ServerEvent,
+) -> usize {
+    fanout_session_event_recover(swarm_members, session_id, event)
+        .await
+        .unwrap_or(0)
+}
+
+/// Returns the undelivered event by value (like `send_event_to_targets_recover`)
+/// so callers can fall back without cloning on the hot path.
+#[allow(clippy::result_large_err)]
+async fn fanout_session_event_recover(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    event: ServerEvent,
+) -> Result<usize, Box<ServerEvent>> {
+    super::live_status::observe(session_id, &event);
+    let targets = {
+        let mut members = swarm_members.write().await;
+        let Some(member) = members.get_mut(session_id) else {
+            return Err(Box::new(event));
+        };
+
+        member.event_txs.retain(|_, tx| !tx.is_closed());
+        crate::stream_batching::note_session_targets(session_id, member.event_txs.keys());
+
+        if member.event_txs.is_empty() {
+            RecipientSnapshot::One(member.event_tx.clone())
+        } else {
+            if let Some((_, tx)) = member.event_txs.iter().next() {
+                member.event_tx = tx.clone();
+            }
+            member
+                .event_txs
+                .values()
+                .cloned()
+                .collect::<RecipientSnapshot>()
+        }
+    };
+
+    send_event_to_targets_recover(targets.as_slice(), event)
+}
+
+pub(super) async fn fanout_live_client_event(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    event: ServerEvent,
+) -> usize {
+    let targets = {
+        let mut members = swarm_members.write().await;
+        let Some(member) = members.get_mut(session_id) else {
+            return 0;
+        };
+
+        member.event_txs.retain(|_, tx| !tx.is_closed());
+        member
+            .event_txs
+            .values()
+            .cloned()
+            .collect::<RecipientSnapshot>()
+    };
+
+    send_event_to_targets(targets.as_slice(), event)
+}
+
+/// Deliver `event` to every live attachment of `session_id` except the
+/// connection that caused it.
+pub(super) async fn fanout_peer_client_event(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    exclude_connection_id: &str,
+    event: ServerEvent,
+) -> usize {
+    let targets = {
+        let mut members = swarm_members.write().await;
+        let Some(member) = members.get_mut(session_id) else {
+            return 0;
+        };
+        member.event_txs.retain(|_, tx| !tx.is_closed());
+        member
+            .event_txs
+            .iter()
+            .filter(|(connection_id, _)| connection_id.as_str() != exclude_connection_id)
+            .map(|(_, tx)| tx.clone())
+            .collect::<RecipientSnapshot>()
+    };
+    send_event_to_targets(targets.as_slice(), event)
+}
+
+#[path = "../../execution/turns/assistant_text.rs"]
+mod assistant_text;
+#[path = "../../execution/turns/turn_stop_log.rs"]
+pub(super) mod turn_stop_log;
+
+/// Owns one turn's event queue. Closing or aborting the producer drains all
+/// accepted events before releasing the runtime's publication reservation.
+pub(super) struct TurnEventChannel {
+    tx: mpsc::UnboundedSender<ServerEvent>,
+    close: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl TurnEventChannel {
+    pub(super) fn new(
+        session_id: String,
+        members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+        fallback: mpsc::UnboundedSender<ServerEvent>,
+        lease: &crate::agent::TurnLease,
+    ) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (close, mut closed) = tokio::sync::oneshot::channel();
+        let publication = lease.publication_pin();
+        let identity = lease.identity().clone();
+        let task = tokio::spawn(async move {
+            let _publication = publication;
+            let mut stop_log = turn_stop_log::StopLog::default();
+            let mut assistant_text = assistant_text::AssistantText::default();
+            turn_stop_log::begin_turn(&session_id);
+            // A hard process termination cannot emit TURN_STOP. This paired
+            // marker lets investigators detect a turn with no terminal record.
+            crate::logging::event_info(
+                "TURN_START",
+                [
+                    ("session", session_id.clone()),
+                    ("runtime", identity.runtime_generation.clone()),
+                    ("turn", identity.turn_id.to_string()),
+                ],
+            );
+            let started = ServerEvent::TurnStarted {
+                identity: identity.clone(),
+            };
+            if let Err(started) = fanout_session_event_recover(&members, &session_id, started).await
+                && fallback.send(*started).is_err()
+            {
+                crate::logging::debug("Turn started without connected event receivers");
+            }
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    _ = &mut closed => { rx.close(); break; }
+                    event = rx.recv() => event,
+                };
+                let Some(event) = event else {
+                    break;
+                };
+                stop_log.observe(&session_id, &identity, &event);
+                match &event {
+                    ServerEvent::ToolExec { name, .. } => {
+                        crate::agents_status::tool_started(&session_id, name)
+                    }
+                    ServerEvent::ToolDone { .. } => crate::agents_status::tool_done(&session_id),
+                    _ => {}
+                }
+                let event = ServerEvent::TurnEvent {
+                    identity: identity.clone(),
+                    text_frames: assistant_text.frames(&identity, &event),
+                    event: Box::new(event),
+                };
+                if let Err(event) = fanout_session_event_recover(&members, &session_id, event).await
+                    && fallback.send(*event).is_err()
+                {
+                    crate::logging::debug("Turn event has no connected receivers");
+                }
+            }
+            while let Some(event) = rx.recv().await {
+                stop_log.observe(&session_id, &identity, &event);
+                let event = ServerEvent::TurnEvent {
+                    identity: identity.clone(),
+                    text_frames: assistant_text.frames(&identity, &event),
+                    event: Box::new(event),
+                };
+                if let Err(event) = fanout_session_event_recover(&members, &session_id, event).await
+                    && fallback.send(*event).is_err()
+                {
+                    crate::logging::debug("Turn event has no connected receivers");
+                }
+            }
+            stop_log.finish(&session_id, &identity);
+        });
+        Self {
+            tx,
+            close: Some(close),
+            task: Some(task),
+        }
+    }
+
+    pub(super) fn sender(&self) -> mpsc::UnboundedSender<ServerEvent> {
+        self.tx.clone()
+    }
+
+    pub(super) async fn finish(mut self) {
+        self.close.take();
+        if let Some(task) = self.task.take()
+            && let Err(error) = task.await
+        {
+            crate::logging::warn(&format!("Turn event drain failed: {error}"));
+        }
+    }
+}
+
+impl Drop for TurnEventChannel {
+    fn drop(&mut self) {
+        // Dropping JoinHandle detaches the drain task. It must not be aborted:
+        // already queued events still own the runtime publication reservation.
+        self.close.take();
+    }
+}

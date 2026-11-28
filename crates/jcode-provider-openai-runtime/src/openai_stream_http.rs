@@ -1,32 +1,37 @@
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_response(
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
     account_label: Option<String>,
-    request: Value,
+    request: &Value,
+    turn_state: Arc<StdMutex<Option<String>>>,
     initial_status_detail: String,
     tx: mpsc::Sender<Result<StreamEvent>>,
+    premium_route: Option<&str>,
 ) -> Result<(), OpenAIStreamFailure> {
     use jcode_message_types::ConnectionPhase;
     let requested_tier = request
         .get("service_tier")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let request_model = openai_request_model(&request);
+    let request_model = openai_request_model(request);
     let stream_started_at = Instant::now();
     log_openai_stream_lifecycle(
-        jcode_base::logging::LogLevel::Info,
+        jcode_base::logging::LogLevel::Debug,
         "https_request_start",
-        vec![
-            ("model", request_model.clone()),
-            ("transport", "https".to_string()),
-        ],
+        || {
+            vec![
+                ("model", request_model.clone()),
+                ("transport", "https".to_string()),
+            ]
+        },
     );
     let (usage_diag, usage_exhausted) = serving_account_diag(&*credentials.read().await);
-    jcode_base::logging::info(&format!(
-        "OpenAI limit diag: starting fresh HTTPS request usage=({usage_diag})"
-    ));
+    jcode_base::logging::debug_lazy(|| {
+        format!("OpenAI limit diag: starting fresh HTTPS request usage=({usage_diag})")
+    });
     emit_status_detail(&tx, initial_status_detail).await;
     emit_connection_phase(&tx, ConnectionPhase::Authenticating).await;
     if tx.is_closed() {
@@ -37,6 +42,7 @@ pub(crate) async fn stream_response(
         return Ok(());
     }
     let creds = credentials.read().await;
+    OpenAIProvider::verify_speed_route(&creds, premium_route)?;
     // Account switching can race token refresh. Never combine an old bearer
     // with a new account header or attribute that request to the new account.
     if access_token != creds.access_token {
@@ -44,7 +50,7 @@ pub(crate) async fn stream_response(
             "OpenAI credentials changed before request, retrying"
         )));
     }
-    let mut usage_recorder = OAuthUsageRecorder::capture(&creds, &request);
+    let mut usage_recorder = OAuthUsageRecorder::capture(&creds, request);
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
     let catalog_scope = OpenAIProvider::catalog_scope_for(&creds);
     let url = OpenAIProvider::responses_url(&creds);
@@ -53,7 +59,7 @@ pub(crate) async fn stream_response(
 
     let usage_generation = jcode_base::usage::openai_response_generation();
 
-    let builder = response_http_request(
+    let mut builder = response_http_request(
         &client,
         &url,
         &access_token,
@@ -63,14 +69,22 @@ pub(crate) async fn stream_response(
         request.get("model").and_then(Value::as_str),
         request.get("service_tier").and_then(Value::as_str),
     );
+    if is_chatgpt_mode
+        && let Some(value) = turn_state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+    {
+        builder = builder.header("x-codex-turn-state", value);
+    }
 
     emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
     let connect_start = std::time::Instant::now();
-    let idle_timeout = effective_https_idle_timeout(&request);
+    let idle_timeout = effective_https_idle_timeout(request);
     let builder = jcode_provider_core::request_compression::json_body(
         builder,
         &url,
-        &request,
+        request,
         jcode_base::provider::request_compression_mode(),
     )
     .map_err(OpenAIStreamFailure::Other)?;
@@ -86,6 +100,15 @@ pub(crate) async fn stream_response(
     let response = response
         .context("Failed to send request to OpenAI API")
         .map_err(OpenAIStreamFailure::Other)?;
+    if is_chatgpt_mode {
+        capture_turn_state(
+            &turn_state,
+            response
+                .headers()
+                .get("x-codex-turn-state")
+                .and_then(|value| value.to_str().ok()),
+        );
+    }
 
     if is_chatgpt_mode && (response.status().is_success() || response.status().as_u16() == 429) {
         jcode_base::usage::record_openai_response_limits(
@@ -97,25 +120,29 @@ pub(crate) async fn stream_response(
     }
 
     let connect_ms = connect_start.elapsed().as_millis();
-    jcode_base::logging::info(&format!(
-        "HTTP connection established in {}ms (status={})",
-        connect_ms,
-        response.status()
-    ));
+    jcode_base::logging::debug_lazy(|| {
+        format!(
+            "HTTP connection established in {}ms (status={})",
+            connect_ms,
+            response.status()
+        )
+    });
     // Correlation ids let a stalled request be looked up provider-side
     // without logging any content (issue #1759). Carried into every later
     // lifecycle event for this stream.
     let response_ids = reqwest_header_fields(response.headers());
-    let mut connected_fields = vec![
-        ("model", request_model.clone()),
-        ("status", response.status().as_u16().to_string()),
-        ("connect_ms", connect_ms.to_string()),
-    ];
-    connected_fields.extend(response_ids.iter().cloned());
     log_openai_stream_lifecycle(
-        jcode_base::logging::LogLevel::Info,
+        jcode_base::logging::LogLevel::Debug,
         "https_connected",
-        connected_fields,
+        || {
+            let mut fields = vec![
+                ("model", request_model.clone()),
+                ("status", response.status().as_u16().to_string()),
+                ("connect_ms", connect_ms.to_string()),
+            ];
+            fields.extend(response_ids.iter().cloned());
+            fields
+        },
     );
     if response.status().is_success() && usage_exhausted {
         jcode_base::logging::warn(&format!(
@@ -138,24 +165,31 @@ pub(crate) async fn stream_response(
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
             "https_http_error",
-            vec![
-                ("model", request_model.clone()),
-                ("status", status.as_u16().to_string()),
-                (
-                    "retry_after_secs",
-                    retry_after
-                        .map(|hint| hint.remaining().as_secs().to_string())
-                        .unwrap_or_else(|| "none".to_string()),
-                ),
-                ("body", body.clone()),
-                (
-                    "elapsed_ms",
-                    stream_started_at.elapsed().as_millis().to_string(),
-                ),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("status", status.as_u16().to_string()),
+                    (
+                        "retry_after_secs",
+                        retry_after
+                            .map(|hint| hint.remaining().as_secs().to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                    ),
+                    ("body", body.clone()),
+                    (
+                        "elapsed_ms",
+                        stream_started_at.elapsed().as_millis().to_string(),
+                    ),
+                ]
+            },
         );
 
-        if let Some(reason) = classify_unavailable_model_error(status, &body)
+        let speed_denial = requested_tier.as_deref().is_some_and(|tier| {
+            matches!(tier, "fast" | "priority" | "ultrafast")
+                && (status == StatusCode::FORBIDDEN || status == StatusCode::BAD_REQUEST)
+        });
+        if !speed_denial
+            && let Some(reason) = classify_unavailable_model_error(status, &body)
             && let Some(model_name) = request.get("model").and_then(|m| m.as_str())
         {
             jcode_base::provider::record_model_unavailable_for_scope(
@@ -170,7 +204,7 @@ pub(crate) async fn stream_response(
         }
 
         // Check if we need to refresh token
-        if should_refresh_token(status, &body) {
+        if !speed_denial && should_refresh_token(status, &body) {
             if tx.is_closed() {
                 return Ok(());
             }
@@ -282,7 +316,7 @@ pub(crate) async fn stream_response(
                 log_openai_stream_lifecycle(
                     jcode_base::logging::LogLevel::Warn,
                     "https_stream_idle_timeout",
-                    fields,
+                    || fields,
                 );
                 return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
                     "Stream read timeout: no data received for {} seconds",
@@ -309,14 +343,16 @@ pub(crate) async fn stream_response(
                         log_openai_stream_lifecycle(
                             jcode_base::logging::LogLevel::Warn,
                             "https_stream_retryable_error",
-                            vec![
-                                ("model", request_model.clone()),
-                                ("error", message.clone()),
-                                (
-                                    "elapsed_ms",
-                                    stream_started_at.elapsed().as_millis().to_string(),
-                                ),
-                            ],
+                            || {
+                                vec![
+                                    ("model", request_model.clone()),
+                                    ("error", message.clone()),
+                                    (
+                                        "elapsed_ms",
+                                        stream_started_at.elapsed().as_millis().to_string(),
+                                    ),
+                                ]
+                            },
                         );
                         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
                             "Stream error: {}",
@@ -330,14 +366,16 @@ pub(crate) async fn stream_response(
                     log_openai_stream_lifecycle(
                         jcode_base::logging::LogLevel::Warn,
                         "consumer_dropped",
-                        vec![
-                            ("model", request_model.clone()),
-                            ("transport", "https".to_string()),
-                            (
-                                "elapsed_ms",
-                                stream_started_at.elapsed().as_millis().to_string(),
-                            ),
-                        ],
+                        || {
+                            vec![
+                                ("model", request_model.clone()),
+                                ("transport", "https".to_string()),
+                                (
+                                    "elapsed_ms",
+                                    stream_started_at.elapsed().as_millis().to_string(),
+                                ),
+                            ]
+                        },
                     );
                     return Ok(());
                 }
@@ -361,7 +399,7 @@ pub(crate) async fn stream_response(
                 log_openai_stream_lifecycle(
                     jcode_base::logging::LogLevel::Warn,
                     "https_stream_error",
-                    fields,
+                    || fields,
                 );
                 return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
                     "Stream error: {}",
@@ -375,13 +413,15 @@ pub(crate) async fn stream_response(
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
             "https_eof_before_message_end",
-            vec![
-                ("model", request_model.clone()),
-                (
-                    "elapsed_ms",
-                    stream_started_at.elapsed().as_millis().to_string(),
-                ),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    (
+                        "elapsed_ms",
+                        stream_started_at.elapsed().as_millis().to_string(),
+                    ),
+                ]
+            },
         );
         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
             "OpenAI HTTPS stream ended before message completion marker"
@@ -389,15 +429,17 @@ pub(crate) async fn stream_response(
     }
 
     log_openai_stream_lifecycle(
-        jcode_base::logging::LogLevel::Info,
+        jcode_base::logging::LogLevel::Debug,
         "https_stream_complete",
-        vec![
-            ("model", request_model),
-            (
-                "elapsed_ms",
-                stream_started_at.elapsed().as_millis().to_string(),
-            ),
-        ],
+        || {
+            vec![
+                ("model", request_model),
+                (
+                    "elapsed_ms",
+                    stream_started_at.elapsed().as_millis().to_string(),
+                ),
+            ]
+        },
     );
     Ok(())
 }

@@ -245,14 +245,14 @@ pub(super) fn anthropic_recommended_model_from_error(error_str: &str) -> Option<
 /// Pick the next Anthropic model to try after a "model not found" failure.
 ///
 /// Strategy (most authoritative first):
-///   1. Honor any server "Please use X" recommendation parsed from the error.
+///   1. Honor an eligible server "Please use X" recommendation parsed from the error.
 ///   2. Otherwise pick the highest-quality untried model from the curated
-///      flagship-first catalog, skipping retired families so we never downgrade
-///      to a cheaper tier (e.g. Haiku) while a stronger model is available.
+///      flagship-first catalog, skipping retired and configured excluded models.
 ///
 /// Returns `None` once every viable candidate is exhausted so the caller can
 /// surface the original error.
 pub(super) fn anthropic_fallback_model(tried: &[String], error_str: &str) -> Option<String> {
+    let config = jcode_base::config::Config::load().provider;
     let already_tried = |candidate: &str| {
         tried.iter().any(|model| {
             AnthropicProvider::normalized_model_key(model)
@@ -265,6 +265,7 @@ pub(super) fn anthropic_fallback_model(tried: &[String], error_str: &str) -> Opt
     if let Some(recommended) = anthropic_recommended_model_from_error(error_str)
         && !already_tried(&recommended)
         && !anthropic_model_is_retired(&recommended)
+        && !config.failover_model_excluded(&recommended)
     {
         return Some(recommended);
     }
@@ -272,7 +273,11 @@ pub(super) fn anthropic_fallback_model(tried: &[String], error_str: &str) -> Opt
     // 2. Best available by curated quality order, skipping retired and tried.
     jcode_base::provider::known_anthropic_model_ids()
         .into_iter()
-        .filter(|candidate| !already_tried(candidate) && !anthropic_model_is_retired(candidate))
+        .filter(|candidate| {
+            !already_tried(candidate)
+                && !anthropic_model_is_retired(candidate)
+                && !config.failover_model_excluded(candidate)
+        })
         .min_by_key(|candidate| anthropic_model_quality_rank(candidate))
 }
 

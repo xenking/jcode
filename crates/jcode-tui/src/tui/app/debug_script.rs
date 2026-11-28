@@ -29,10 +29,10 @@ impl App {
                 "model": self.provider.name(),
                 "connection_type": self.connection_type,
                 "remote_transport": self.remote_transport,
-                "diagram_mode": format!("{:?}", self.diagram_mode),
-                "diagram_pane_enabled": self.diagram_pane_enabled,
-                "diagram_pane_position": format!("{:?}", self.diagram_pane_position),
-                "diagram_zoom": self.diagram_zoom,
+                "diagram_mode": format!("{:?}", self.diagram.view().mode),
+                "diagram_pane_enabled": self.diagram.view().enabled,
+                "diagram_pane_position": format!("{:?}", self.diagram.view().position),
+                "diagram_zoom": self.diagram.view().zoom,
                 "version": jcode_build_meta::version(),
             }),
             frame,
@@ -485,24 +485,6 @@ impl App {
             };
         }
         format!("ERR: unknown step '{}'", trimmed)
-    }
-
-    pub(in crate::tui::app) fn check_debug_command(&mut self) -> Option<String> {
-        let cmd_path = debug_cmd_path();
-        if let Ok(cmd) = std::fs::read_to_string(&cmd_path) {
-            // Remove command file immediately
-            let _ = std::fs::remove_file(&cmd_path);
-            let cmd = cmd.trim();
-
-            self.debug_trace.record("cmd", cmd.to_string());
-
-            let response = self.handle_debug_command(cmd);
-
-            // Write response
-            let _ = std::fs::write(debug_response_path(), &response);
-            return Some(response);
-        }
-        None
     }
 
     pub(in crate::tui::app) fn parse_key_spec(

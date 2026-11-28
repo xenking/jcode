@@ -1,0 +1,134 @@
+{
+  "id": "session_legacy_ask_fixture_1794000000000_0000000000000001",
+  "parent_id": null,
+  "title": "Legacy ask answers",
+  "created_at": "2026-11-20T10:00:00Z",
+  "updated_at": "2026-11-20T10:01:30Z",
+  "messages": [
+    {
+      "id": "message_1794000000001_1",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Plan the migration."
+        }
+      ],
+      "timestamp": "2026-11-20T10:00:00Z"
+    },
+    {
+      "id": "message_1794000000002_1",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_ask_1",
+          "name": "ask",
+          "input": {
+            "questions": [
+              {
+                "question": "Which database?",
+                "header": "Database",
+                "options": [
+                  {
+                    "label": "Postgres (Recommended)",
+                    "description": "Default"
+                  },
+                  {
+                    "label": "SQLite"
+                  }
+                ],
+                "multi_select": true,
+                "allow_other": true
+              },
+              {
+                "question": "When?",
+                "header": "Timing",
+                "options": [
+                  {
+                    "label": "Now"
+                  },
+                  {
+                    "label": "Later"
+                  }
+                ],
+                "multi_select": false,
+                "allow_other": false
+              }
+            ]
+          }
+        }
+      ],
+      "timestamp": "2026-11-20T10:00:05Z"
+    },
+    {
+      "id": "message_1794000000003_1",
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_ask_1",
+          "content": "User answers:\n1. Which database? -> Postgres (comment: reliable; battle tested); SQLite; Other: maybe libsql\n2. When? -> unanswered (user skipped)\n"
+        }
+      ],
+      "timestamp": "2026-11-20T10:01:00Z",
+      "tool_duration_ms": 55000
+    },
+    {
+      "id": "message_1794000000004_1",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_ask_2",
+          "name": "ask",
+          "input": {
+            "questions": [
+              {
+                "question": "Proceed?",
+                "options": [
+                  {
+                    "label": "Yes"
+                  },
+                  {
+                    "label": "No"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "timestamp": "2026-11-20T10:01:10Z"
+    },
+    {
+      "id": "message_1794000000005_1",
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_ask_2",
+          "content": "User declined to answer the questions."
+        }
+      ],
+      "timestamp": "2026-11-20T10:01:20Z",
+      "tool_duration_ms": 10000
+    },
+    {
+      "id": "message_1794000000006_1",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Understood, continuing without a decision."
+        }
+      ],
+      "timestamp": "2026-11-20T10:01:30Z"
+    }
+  ],
+  "model": "fixture-model",
+  "status": "Closed",
+  "saved": false,
+  "is_debug": false,
+  "is_canary": false
+}

@@ -1,8 +1,15 @@
-use crate::ambient_runner::AmbientRunnerHandle;
 use crate::config::SafetyConfig;
 use crate::logging;
 use async_trait::async_trait;
 use std::sync::Arc;
+
+/// Where a channel delivers a reply the user sent back to the agent.
+#[async_trait]
+pub trait InboundMessages: Send + Sync {
+    /// Returns true when the text reached a running cycle, false when it was
+    /// queued for the next one.
+    async fn inject_message(&self, text: &str, source: &str) -> bool;
+}
 
 #[async_trait]
 pub trait MessageChannel: Send + Sync {
@@ -14,7 +21,7 @@ pub trait MessageChannel: Send + Sync {
 
     async fn send(&self, text: &str) -> anyhow::Result<()>;
 
-    async fn reply_loop(&self, runner: AmbientRunnerHandle);
+    async fn reply_loop(&self, inbound: Arc<dyn InboundMessages>);
 }
 
 #[derive(Clone)]
@@ -119,13 +126,13 @@ impl ChannelRegistry {
         }
     }
 
-    pub fn spawn_reply_loops(&self, runner: &AmbientRunnerHandle) {
+    pub fn spawn_reply_loops(&self, inbound: Arc<dyn InboundMessages>) {
         for ch in self.channels.iter().filter(|c| c.is_reply_enabled()) {
             let ch = Arc::clone(ch);
-            let runner = runner.clone();
+            let inbound = Arc::clone(&inbound);
             tokio::spawn(async move {
                 logging::info(&format!("{} reply loop spawned", ch.name()));
-                ch.reply_loop(runner).await;
+                ch.reply_loop(inbound).await;
             });
         }
     }
@@ -195,7 +202,7 @@ impl MessageChannel for TelegramChannel {
         crate::telegram::send_message(&self.client, &self.token, &self.chat_id, text).await
     }
 
-    async fn reply_loop(&self, runner: AmbientRunnerHandle) {
+    async fn reply_loop(&self, inbound: Arc<dyn InboundMessages>) {
         let mut offset: Option<i64> = None;
 
         loop {
@@ -229,9 +236,9 @@ impl MessageChannel for TelegramChannel {
                             continue;
                         }
 
-                        if let Some(req_id) = crate::notifications::extract_permission_id(trimmed) {
+                        if let Some(req_id) = jcode_notify_email::extract_permission_id(trimmed) {
                             let (approved, message) =
-                                crate::notifications::parse_permission_reply(trimmed);
+                                jcode_notify_email::parse_permission_reply(trimmed);
                             if let Err(e) = crate::safety::record_permission_via_file(
                                 &req_id,
                                 approved,
@@ -257,7 +264,7 @@ impl MessageChannel for TelegramChannel {
                                     .await;
                             }
                         } else {
-                            let injected = runner.inject_message(trimmed, "telegram").await;
+                            let injected = inbound.inject_message(trimmed, "telegram").await;
                             logging::info(&format!(
                                 "telegram reply injected into session injected={}",
                                 injected
@@ -394,7 +401,7 @@ impl MessageChannel for DiscordChannel {
         Ok(())
     }
 
-    async fn reply_loop(&self, runner: AmbientRunnerHandle) {
+    async fn reply_loop(&self, inbound: Arc<dyn InboundMessages>) {
         let mut last_seen_id: Option<String> = None;
 
         // Get the latest message ID on startup so we don't replay old messages
@@ -438,9 +445,9 @@ impl MessageChannel for DiscordChannel {
                             continue;
                         }
 
-                        if let Some(req_id) = crate::notifications::extract_permission_id(trimmed) {
+                        if let Some(req_id) = jcode_notify_email::extract_permission_id(trimmed) {
                             let (approved, message) =
-                                crate::notifications::parse_permission_reply(trimmed);
+                                jcode_notify_email::parse_permission_reply(trimmed);
                             if let Err(e) = crate::safety::record_permission_via_file(
                                 &req_id,
                                 approved,
@@ -466,7 +473,7 @@ impl MessageChannel for DiscordChannel {
                                     .await;
                             }
                         } else {
-                            let injected = runner.inject_message(trimmed, "discord").await;
+                            let injected = inbound.inject_message(trimmed, "discord").await;
                             logging::info(&format!(
                                 "discord reply injected into session injected={}",
                                 injected
@@ -664,7 +671,7 @@ impl MessageChannel for JadeRelayChannel {
         self.post_response(text, 0).await
     }
 
-    async fn reply_loop(&self, runner: AmbientRunnerHandle) {
+    async fn reply_loop(&self, inbound: Arc<dyn InboundMessages>) {
         let host = std::env::var("HOSTNAME")
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .unwrap_or_else(|_| "laptop".to_string());
@@ -699,9 +706,9 @@ impl MessageChannel for JadeRelayChannel {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        if let Some(req_id) = crate::notifications::extract_permission_id(trimmed) {
+                        if let Some(req_id) = jcode_notify_email::extract_permission_id(trimmed) {
                             let (approved, message) =
-                                crate::notifications::parse_permission_reply(trimmed);
+                                jcode_notify_email::parse_permission_reply(trimmed);
                             if let Err(e) = crate::safety::record_permission_via_file(
                                 &req_id,
                                 approved,
@@ -726,7 +733,7 @@ impl MessageChannel for JadeRelayChannel {
                             }
                             continue;
                         }
-                        let injected = runner.inject_message(trimmed, "jade_relay").await;
+                        let injected = inbound.inject_message(trimmed, "jade_relay").await;
                         logging::info(&format!(
                             "jade relay prompt injected seq={} injected={}",
                             ev.seq, injected

@@ -5,7 +5,9 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 pub fn local_access_seconds() -> i64 {
@@ -377,23 +379,49 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::fd::{AsRawFd, FromRawFd};
-        let (dir, name) = open_parent(base, relative, true)?;
-        let fd = unsafe {
-            libc::openat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR
-                    | libc::O_CREAT
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC
-                    | libc::O_NONBLOCK,
-                0o600,
-            )
-        };
-        ensure!(fd >= 0, "cannot lock private state");
+        let (mut dir, mut name) = open_parent(base, relative, true)?;
+        let mut fd = -1;
+        let mut last_error = None;
+        // APFS can transiently answer ENOENT for O_CREAT under concurrent
+        // writers racing to create the same private directory, even though the
+        // directory fd is valid. Re-resolve the parent and retry instead of
+        // failing a save that has no logical conflict.
+        for attempt in 0..5 {
+            fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK,
+                    0o600,
+                )
+            };
+            if fd >= 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            last_error = Some(error.to_string());
+            if error.kind() != std::io::ErrorKind::NotFound {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1)));
+            (dir, name) = open_parent(base, relative, true)?;
+        }
+        ensure!(
+            fd >= 0,
+            "cannot lock private state {}: {}",
+            base.join(relative).display(),
+            last_error.unwrap_or_else(|| "open failed".to_string())
+        );
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         ensure!(file.metadata()?.is_file(), "invalid private lock");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // A peer can legitimately hold this while fsync-ing on a busy disk;
+        // five seconds was short enough that a loaded test machine (and a slow
+        // external volume) timed out instead of waiting.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 break;
@@ -493,6 +521,16 @@ fn replace_private(base: &Path, relative: &Path, bytes: &[u8]) -> Result<()> {
     }
 }
 
+/// The jcode home with its own symlinks resolved. [`checked_path`] rejects a
+/// symlink at any component, which is meant for what lives under the home. The
+/// home itself is chosen by the owner (`JCODE_HOME`, a symlinked `~/.jcode`, or
+/// macOS's `/var` temp dir), so rejecting it made every bash call fail with
+/// "could not load saved cloud environment".
+fn resolved_home() -> Result<PathBuf> {
+    let home = crate::storage::jcode_dir()?;
+    Ok(home.canonicalize().unwrap_or(home))
+}
+
 fn environment_relative(root: &Path) -> Result<PathBuf> {
     use sha2::{Digest, Sha256};
     let canonical = root.canonicalize()?;
@@ -513,12 +551,12 @@ fn environment_relative(root: &Path) -> Result<PathBuf> {
 /// is bounded to five seconds; dropping it (including process exit) releases it.
 /// This is separate from the map locks acquired during publication.
 pub fn lock_workspace_hydration(root: &Path) -> Result<std::fs::File> {
-    let home = crate::storage::jcode_dir()?;
+    let home = resolved_home()?;
     let relative = environment_relative(root)?.with_extension("hydrate.lock");
     lock_private(&home, &relative)
 }
 pub fn load_environment(root: &Path) -> Result<BTreeMap<String, String>> {
-    let home = crate::storage::jcode_dir()?;
+    let home = resolved_home()?;
     let relative = environment_relative(root)?;
     if !checked_path(&home, &relative)?.exists() {
         return Ok(BTreeMap::new());
@@ -543,7 +581,7 @@ pub fn save_environment(root: &Path, name: &str, value: &str) -> Result<bool> {
         name: name.to_owned(),
     })?;
     validate_environment_value(value)?;
-    let home = crate::storage::jcode_dir()?;
+    let home = resolved_home()?;
     let relative = environment_relative(root)?;
     let _lock = lock_private(&home, &relative.with_extension("lock"))?;
     let mut vars = load_environment(root)?;
@@ -553,11 +591,7 @@ pub fn save_environment(root: &Path, name: &str, value: &str) -> Result<bool> {
     vars.insert(name.to_owned(), value.to_owned());
     let bytes = serde_json::to_vec(&vars)?;
     ensure!(bytes.len() <= MAX_PAYLOAD_BYTES, "environment too large");
-    replace_private(
-        &crate::storage::jcode_dir()?,
-        &environment_relative(root)?,
-        &bytes,
-    )?;
+    replace_private(&resolved_home()?, &environment_relative(root)?, &bytes)?;
     Ok(true)
 }
 
@@ -634,6 +668,10 @@ pub fn replacement_guidance(host: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // checked_path rejects symlinks; macOS TMPDIR is under the /var symlink.
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
+    }
     fn root() -> PathBuf {
         let p = std::env::temp_dir().join(format!("jcode-env-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&p).unwrap();
@@ -659,9 +697,9 @@ mod tests {
     #[test]
     fn environment_root_subdirectory_and_invalid_values() {
         let _guard = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         let _home = HomeGuard::set(home.path());
-        let project = tempfile::tempdir().unwrap();
+        let project = tempdir();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         let subdirectory = project.path().join("src/nested");
         std::fs::create_dir_all(&subdirectory).unwrap();
@@ -687,11 +725,30 @@ mod tests {
         assert!(load_environment(&subdirectory).is_err());
     }
     #[test]
+    #[cfg(unix)]
+    fn a_symlinked_jcode_home_still_loads_and_saves_the_environment() {
+        let _guard = crate::storage::lock_test_env();
+        let real = tempdir();
+        let link = real.path().with_extension("link");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        let _home = HomeGuard::set(&link);
+        let project = tempdir();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        assert!(load_environment(project.path()).unwrap().is_empty());
+        assert!(save_environment(project.path(), "TEST_TOKEN", "opaque-test-value").unwrap());
+        assert_eq!(
+            load_environment(project.path()).unwrap().len(),
+            1,
+            "the saved environment must be readable back through the symlinked home"
+        );
+        std::fs::remove_file(link).unwrap();
+    }
+    #[test]
     fn concurrent_manifest_and_environment_updates_are_not_lost() {
         let _guard = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         let _home = HomeGuard::set(home.path());
-        let project = tempfile::tempdir().unwrap();
+        let project = tempdir();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         let barrier = std::sync::Barrier::new(12);
         std::thread::scope(|scope| {
@@ -735,9 +792,9 @@ mod tests {
     fn workspace_hydration_lock_is_shared_and_released() {
         use std::os::fd::AsRawFd;
         let _guard = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
+        let home = tempdir();
         let _home = HomeGuard::set(home.path());
-        let project = tempfile::tempdir().unwrap();
+        let project = tempdir();
         std::fs::create_dir(project.path().join(".git")).unwrap();
         let nested = project.path().join("nested");
         std::fs::create_dir(&nested).unwrap();

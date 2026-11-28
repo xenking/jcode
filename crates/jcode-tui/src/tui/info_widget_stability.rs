@@ -15,8 +15,8 @@
 //! * [`simulate_scroll`] - drive the real layout algorithm over a synthetic content
 //!   width profile, one scroll line at a time, producing the frame sequence.
 
+use super::info_widget::layout::{Margins, WidgetAnchor, calculate_placements_anchored};
 use super::info_widget::{InfoWidgetData, WidgetPlacement};
-use super::info_widget_layout::{Margins, WidgetAnchor, calculate_placements_anchored};
 use ratatui::layout::Rect;
 use serde::Serialize;
 use std::collections::BTreeMap;

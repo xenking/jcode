@@ -7,14 +7,15 @@ use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
-use crate::{browser, gateway, memory, session, storage, tui};
+use crate::{browser, gateway, memory, session, storage};
 
-use super::{output::terminal_title, terminal::init_tui_runtime};
+mod ambient;
 
 mod menubar;
 mod provider_setup;
 mod report_info;
 mod restart;
+mod titles;
 
 pub(crate) use super::auth_test::run_post_login_validation;
 #[cfg(test)]
@@ -31,14 +32,9 @@ pub use restart::{
     maybe_run_pending_restart_restore_on_startup, run_restart_clear_command,
     run_restart_restore_command, run_restart_save_command, run_restart_status_command,
 };
+pub(crate) use titles::run_titles_command;
 
-pub enum AmbientSubcommand {
-    Status,
-    Log,
-    Trigger,
-    Stop,
-    RunVisible,
-}
+pub use ambient::{AmbientSubcommand, run_ambient_command};
 
 pub enum CloudSubcommand {
     Sessions(CloudSessionsSubcommand),
@@ -1399,22 +1395,6 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-pub async fn run_ambient_command(cmd: AmbientSubcommand) -> Result<()> {
-    if let AmbientSubcommand::RunVisible = cmd {
-        return run_ambient_visible().await;
-    }
-
-    let debug_cmd = match cmd {
-        AmbientSubcommand::Status => "ambient:status",
-        AmbientSubcommand::Log => "ambient:log",
-        AmbientSubcommand::Trigger => "ambient:trigger",
-        AmbientSubcommand::Stop => "ambient:stop",
-        AmbientSubcommand::RunVisible => unreachable!(),
-    };
-
-    super::debug::run_debug_command(debug_cmd, "", None, None, false).await
-}
-
 pub async fn run_transcript_command(
     text: Option<String>,
     mode: crate::protocol::TranscriptMode,
@@ -1461,6 +1441,8 @@ pub struct CompanionFlags {
     pub no_voice: bool,
     pub no_voice_waveform: bool,
     pub no_voice_notifications: bool,
+    pub no_jarvis_fn_key: bool,
+    pub no_jarvis_fn_launch: bool,
     pub no_open: bool,
     pub no_spawn_terminal: bool,
     pub no_lid: bool,
@@ -1472,6 +1454,8 @@ impl CompanionFlags {
         options.voice &= !self.no_voice;
         options.voice_waveform &= !self.no_voice_waveform;
         options.voice_notifications &= !self.no_voice_notifications;
+        options.jarvis_fn_key &= !self.no_jarvis_fn_key;
+        options.jarvis_fn_launch &= !self.no_jarvis_fn_launch;
         options.open &= !self.no_open;
         options.spawn_terminal &= !self.no_spawn_terminal;
         options.lid &= !self.no_lid;
@@ -1540,7 +1524,7 @@ pub fn run_session_rename_command(
     crate::tui::session_picker::invalidate_session_list_cache();
 
     let output = SessionRenameOutput {
-        session_id: session.id.clone(),
+        session_id: session.id().to_owned(),
         display_name: session.display_name().to_string(),
         title: session.display_title().map(ToOwned::to_owned),
         cleared: clear,
@@ -1560,51 +1544,6 @@ pub fn run_session_rename_command(
         );
     }
 
-    Ok(())
-}
-
-async fn run_ambient_visible() -> Result<()> {
-    use crate::ambient::VisibleCycleContext;
-
-    let context = VisibleCycleContext::load().map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to load visible cycle context: {}\nIs the ambient runner running?",
-            e
-        )
-    })?;
-
-    let (provider, registry) = super::provider_init::init_provider_and_registry(
-        &super::provider_init::ProviderChoice::Auto,
-        None,
-    )
-    .await?;
-
-    registry.register_ambient_tools().await;
-
-    let safety = std::sync::Arc::new(crate::safety::SafetySystem::new());
-    crate::tool::ambient::init_safety_system(safety);
-
-    let (terminal, tui_runtime) = init_tui_runtime()?;
-
-    let mut app = tui::App::new(provider, registry);
-    app.set_ambient_mode(context.system_prompt, context.initial_message);
-
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::terminal::SetTitle(terminal_title("🤖 jcode ambient cycle"))
-    );
-
-    let result = app.run(terminal).await;
-
-    tui_runtime.finish(true);
-
-    if let Some(cycle_result) = crate::tool::ambient::take_cycle_result() {
-        let result_path = VisibleCycleContext::result_path()?;
-        crate::storage::write_json(&result_path, &cycle_result)?;
-        eprintln!("Ambient cycle result saved.");
-    }
-
-    result?;
     Ok(())
 }
 
@@ -1883,7 +1822,8 @@ async fn run_memory_command_for_dir(
     Ok(())
 }
 
-pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
+pub fn run_pair_command(list: bool, revoke: Option<String>, harness: bool) -> Result<()> {
+    let _lock = gateway::DeviceRegistry::lock_for_update()?;
     let mut registry = gateway::DeviceRegistry::load();
 
     if list {
@@ -1919,6 +1859,22 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
     }
 
     let gw_config = &crate::config::config().gateway;
+
+    if harness {
+        let is_loopback = gw_config
+            .bind_addr
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+        if !gw_config.enabled || !gw_config.harness_enabled || !is_loopback {
+            anyhow::bail!(
+                "Harness pairing requires [gateway] enabled = true, harness_enabled = true, and a loopback bind_addr"
+            );
+        }
+        let code = registry.generate_pairing_code_scoped(gateway::DeviceScope::Harness);
+        registry.save()?;
+        eprintln!("Desktop pairing code: {code} (expires in 5 minutes)");
+        return Ok(());
+    }
 
     if !gw_config.enabled {
         eprintln!("\x1b[33m⚠\x1b[0m  Gateway is disabled. Enable it in ~/.jcode/config.toml:\n");
@@ -2205,7 +2161,17 @@ pub fn run_version_command(emit_json: bool) -> Result<()> {
     report_info::run_version_command(emit_json)
 }
 
-pub async fn run_usage_command(emit_json: bool) -> Result<()> {
+pub async fn run_usage_command(
+    emit_json: bool,
+    requests: bool,
+    dump_redacted: Option<std::path::PathBuf>,
+) -> Result<()> {
+    if let Some(path) = dump_redacted {
+        return report_info::run_usage_dump(&path).await;
+    }
+    if requests {
+        return report_info::run_request_usage_command(emit_json);
+    }
     report_info::run_usage_command(emit_json).await
 }
 
@@ -2624,55 +2590,10 @@ Re-run with `--force` if you really want to stop the server.";
     Ok(())
 }
 
-pub async fn run_single_message_command(
-    choice: &super::provider_init::ProviderChoice,
-    model: Option<&str>,
-    resume_session: Option<&str>,
-    message: &str,
-    emit_json: bool,
-    emit_ndjson: bool,
-) -> Result<()> {
-    let provider =
-        super::provider_init::init_provider_for_run(choice, model, emit_json || emit_ndjson)
-            .await?;
-    // Older model caches contain names but no account-scoped speed capabilities.
-    // Hydrate those before the first headless request so an unsupported saved
-    // tier cannot slip through the backward-compatible unknown-catalog path.
-    if provider.model_capabilities_need_refresh()
-        && let Err(error) = provider.prefetch_models().await
-    {
-        crate::logging::warn(&format!(
-            "Could not refresh model capabilities before headless run: {error}"
-        ));
-    }
-    let registry = crate::tool::Registry::new(provider.clone()).await;
-    // Load MCP servers from ~/.jcode/mcp.json so headless `jcode run` has the
-    // same `mcp__*` tools as interactive/server sessions. This is non-blocking:
-    // `register_mcp_tools` advertises cached tool schemas synchronously (so the
-    // first locked tool snapshot already contains MCP tools, for zero
-    // prompt-cache miss) and connects in the background (connect-on-first-call).
-    // For a short single-message run, startup latency is unchanged.
-    // (#390, #206 Phase 2)
-    if run_command_mcp_enabled() {
-        registry.register_mcp_tools(None, None, None).await;
-        // Cold-cache gap: when a configured MCP server has no cached schema yet
-        // (first ever use, or reconfigured), advertise-early registers nothing
-        // for it, and a single-turn `jcode run` locks its tool snapshot before
-        // the background connection finishes, so the model would never see those
-        // tools. Long-lived sessions recover on a later turn, but `jcode run`
-        // has no later turn. So, only when the cache is cold for some configured
-        // server, briefly wait for the first connection to register tools before
-        // the agent runs. Warm runs skip this entirely and stay instant. (#390)
-        wait_for_cold_cache_mcp_tools(&registry).await;
-    }
-    let mut agent = crate::agent::Agent::new(provider.clone(), registry);
-    if let Err(error) = restore_agent_session_if_requested(&mut agent, resume_session) {
-        agent.mark_closed();
-        return Err(error);
-    }
-
-    run_single_message_with_agent(&mut agent, provider, message, emit_json, emit_ndjson).await
-}
+mod run_options;
+pub(super) use run_options::{
+    RunFormat, RunInput, RunOutput, RunPersistence, run_single_message_command,
+};
 
 /// Provider id for `jcode run --json`/`--ndjson` output.
 ///
@@ -2701,8 +2622,7 @@ async fn run_single_message_with_agent(
     agent: &mut crate::agent::Agent,
     provider: std::sync::Arc<dyn crate::provider::Provider>,
     message: &str,
-    emit_json: bool,
-    emit_ndjson: bool,
+    output: RunOutput<'_>,
 ) -> Result<()> {
     // A detached dependency can outlive a model turn without holding an
     // in-process activity guard. Keep this CLI continuation alive across the
@@ -2710,27 +2630,38 @@ async fn run_single_message_with_agent(
     // run_once's nested read reservations are deliberately safe.
     let result: Result<()> = async {
         let _runtime_activity = crate::runtime_activity::global().try_enter()?;
-        if emit_json {
-            let text = run_single_message_command_capture_with_auto_poke(agent, message).await?;
-            let report = RunCommandReport {
-                session_id: agent.session_id().to_string(),
-                provider: run_report_provider_name(
-                    provider.as_ref(),
-                    agent.session_provider_key().as_deref(),
-                ),
-                model: provider.model(),
-                text,
-                usage: agent.last_usage().clone(),
-            };
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        } else if emit_ndjson {
-            run_single_message_command_ndjson(agent, provider, message).await?;
-        } else {
-            run_single_message_command_plain_with_auto_poke(agent, message).await?;
+        crate::server::route_unattached_turn(agent).await?;
+        let start_index = agent.message_count();
+        match output.format {
+            RunFormat::Json => {
+                let text =
+                    run_single_message_command_capture_with_auto_poke(agent, message).await?;
+                let report = RunCommandReport {
+                    session_id: agent.session_id().to_string(),
+                    provider: run_report_provider_name(
+                        provider.as_ref(),
+                        agent.session_provider_key().as_deref(),
+                    ),
+                    model: provider.model(),
+                    text,
+                    usage: agent.last_usage_report(),
+                };
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+            RunFormat::Ndjson => {
+                run_single_message_command_ndjson(agent, provider, message).await?;
+            }
+            RunFormat::Plain => {
+                run_single_message_command_plain_with_auto_poke(agent, message).await?;
+            }
+        }
+        if let Some(path) = output.last_message {
+            run_options::write_last_message(path, agent.iter_messages_from(start_index))?;
         }
         Ok(())
     }
-    .await;
+    .await
+    .map_err(run_options::explain_run_error);
 
     // `Agent::new` and session restore both register this process as the active
     // owner. Unlike the interactive lifecycle, `jcode run` has no later quit
@@ -2858,9 +2789,10 @@ fn run_command_auto_poke_limit_reached(turns_completed: usize, max_turns: Option
 
 mod todo_followup;
 use todo_followup::{
-    RunAutoPokeFollowUp, build_run_auto_poke_follow_up_from_todos, prepare_run_todo_follow_up,
-    run_actionable_poke_message, run_blocked_notice, run_cannot_complete_notice, run_goals,
-    run_todos, run_user_auth_notice, take_run_gate_digest_if_turn_ended,
+    RunAutoPokeFollowUp, RunSwarmWait, build_run_auto_poke_follow_up_from_todos,
+    prepare_run_todo_follow_up, run_actionable_poke_message, run_blocked_notice,
+    run_cannot_complete_notice, run_goals, run_todos, run_turn_had_tool_calls,
+    run_user_auth_notice, take_run_gate_digest_if_turn_ended, wait_for_run_swarm_members_live,
 };
 #[cfg(test)]
 use todo_followup::{run_actionable_todos, take_run_gate_digest};
@@ -2876,7 +2808,9 @@ async fn run_single_message_command_plain_with_auto_poke(
     let mut gate_digest_delivered = false;
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
+        let messages_before = agent.message_count();
         agent.run_once(&next_message).await?;
+        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.iter_messages_since(messages_before)));
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
@@ -2888,17 +2822,39 @@ async fn run_single_message_command_plain_with_auto_poke(
             &todos,
             !run_command_auto_poke_limit_reached(turns_completed, max_turns),
         )
-        .await;
+        .await?;
         if let Some(message) = dependency_resume {
             incomplete_budget = crate::todo::IncompleteTodoBudget::default();
             gate_digest_delivered = false;
             next_message = message;
             continue;
         }
+        match wait_for_run_swarm_members_live(
+            agent.session_id(),
+            &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await
+        {
+            RunSwarmWait::Resume(message) => {
+                incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+                gate_digest_delivered = false;
+                next_message = message;
+                continue;
+            }
+            RunSwarmWait::Blocked(members) => {
+                eprintln!(
+                    "Stopped at the turn limit while swarm member(s) {} are still working.",
+                    members.join(", ")
+                );
+                break;
+            }
+            RunSwarmWait::Clear => {}
+        }
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
         {
-            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())).unwrap_or_else(||
+            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())?).unwrap_or_else(||
                 "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
             ));
             break;
@@ -2994,7 +2950,9 @@ async fn run_single_message_command_capture_with_auto_poke(
     let mut gate_digest_delivered = false;
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
+        let messages_before = agent.message_count();
         outputs.push(agent.run_once_capture(&next_message).await?);
+        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.iter_messages_since(messages_before)));
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
@@ -3006,17 +2964,39 @@ async fn run_single_message_command_capture_with_auto_poke(
             &todos,
             !run_command_auto_poke_limit_reached(turns_completed, max_turns),
         )
-        .await;
+        .await?;
         if let Some(message) = dependency_resume {
             incomplete_budget = crate::todo::IncompleteTodoBudget::default();
             gate_digest_delivered = false;
             next_message = message;
             continue;
         }
+        match wait_for_run_swarm_members_live(
+            agent.session_id(),
+            &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await
+        {
+            RunSwarmWait::Resume(message) => {
+                incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+                gate_digest_delivered = false;
+                next_message = message;
+                continue;
+            }
+            RunSwarmWait::Blocked(members) => {
+                outputs.push(format!(
+                    "Stopped at the turn limit while swarm member(s) {} are still working.",
+                    members.join(", ")
+                ));
+                break;
+            }
+            RunSwarmWait::Clear => {}
+        }
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
         {
-            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())).unwrap_or_else(||
+            eprintln!("{}", run_blocked_notice(&todos, &run_goals(agent.session_id())?).unwrap_or_else(||
                 "Stopped at the turn limit with unfinished todos waiting on background dependencies.".into()
             ));
             break;
@@ -3093,16 +3073,6 @@ async fn run_single_message_command_capture_with_auto_poke(
     Ok(outputs.join("\n\n"))
 }
 
-fn restore_agent_session_if_requested(
-    agent: &mut crate::agent::Agent,
-    resume_session: Option<&str>,
-) -> Result<()> {
-    if let Some(session_id) = resume_session {
-        agent.restore_session(session_id)?;
-    }
-    Ok(())
-}
-
 async fn run_single_message_command_ndjson(
     agent: &mut crate::agent::Agent,
     provider: std::sync::Arc<dyn crate::provider::Provider>,
@@ -3135,6 +3105,7 @@ async fn run_single_message_command_ndjson(
     let mut gate_digest_delivered = false;
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
+        let messages_before = agent.message_count();
         let turn_result = {
             let mut run_future = std::pin::pin!(agent.run_once_streaming_mpsc(
                 &next_message,
@@ -3169,6 +3140,7 @@ async fn run_single_message_command_ndjson(
             result = Err(err);
             break;
         }
+        incomplete_budget.record_turn(run_turn_had_tool_calls(agent.iter_messages_since(messages_before)));
         turns_completed += 1;
         if !run_command_auto_poke_enabled() {
             break;
@@ -3180,7 +3152,7 @@ async fn run_single_message_command_ndjson(
             &todos,
             !run_command_auto_poke_limit_reached(turns_completed, max_turns),
         )
-        .await;
+        .await?;
         if let Some(message) = dependency_resume {
             incomplete_budget = crate::todo::IncompleteTodoBudget::default();
             gate_digest_delivered = false;
@@ -3195,6 +3167,42 @@ async fn run_single_message_command_ndjson(
             )?;
             continue;
         }
+        match wait_for_run_swarm_members_live(
+            &session_id,
+            &todos,
+            !run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        )
+        .await
+        {
+            RunSwarmWait::Resume(message) => {
+                incomplete_budget = crate::todo::IncompleteTodoBudget::default();
+                gate_digest_delivered = false;
+                next_message = message;
+                write_json_line(
+                    &mut stdout,
+                    &serde_json::json!({
+                        "type": "auto_poke_swarm_resolved",
+                        "session_id": session_id,
+                        "message": next_message,
+                    }),
+                )?;
+                continue;
+            }
+            RunSwarmWait::Blocked(members) => {
+                write_json_line(
+                    &mut stdout,
+                    &serde_json::json!({
+                        "type": "auto_poke_stopped",
+                        "session_id": session_id,
+                        "reason": "swarm_members_working",
+                        "members": members,
+                        "max_turns": max_turns,
+                    }),
+                )?;
+                break;
+            }
+            RunSwarmWait::Clear => {}
+        }
         if todos.iter().any(crate::todo::is_incomplete_todo)
             && !actionable_todos.iter().any(crate::todo::is_incomplete_todo)
         {
@@ -3203,8 +3211,8 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "auto_poke_stopped",
                     "session_id": session_id,
-                    "reason": if run_user_auth_notice(&todos).is_some() { "requires_user_auth" } else if run_cannot_complete_notice(&todos, &run_goals(&session_id)).is_some() { "cannot_complete" } else { "turn_limit" },
-                    "message": run_blocked_notice(&todos, &run_goals(&session_id)),
+                    "reason": if run_user_auth_notice(&todos).is_some() { "requires_user_auth" } else if run_cannot_complete_notice(&todos, &run_goals(&session_id)?).is_some() { "cannot_complete" } else { "turn_limit" },
+                    "message": run_blocked_notice(&todos, &run_goals(&session_id)?),
                     "requires_user_auth": todos.iter().any(crate::todo::todo_requires_user_auth),
                     "waiting_on_background": todos.iter().any(|todo| !todo.waiting_on.is_empty()),
                     "max_turns": max_turns,
@@ -3370,227 +3378,9 @@ pub(super) fn unwrap_turn_event(
     event
 }
 
-fn emit_ndjson_event(
-    stdout: &mut impl Write,
-    state: &mut NdjsonRunState,
-    event: crate::protocol::ServerEvent,
-) -> Result<()> {
-    use crate::protocol::ServerEvent;
-
-    match unwrap_turn_event(event) {
-        ServerEvent::TextDelta { text } => {
-            state.text.push_str(&text);
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "text_delta", "text": text }),
-            )
-        }
-        ServerEvent::TextReplace { text } => {
-            state.text = text.clone();
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "text_replace", "text": text }),
-            )
-        }
-        ServerEvent::TextSuffixReplace { old_text, new_text } => {
-            crate::message::replace_text_suffix(&mut state.text, &old_text, &new_text);
-            write_json_line(
-                stdout,
-                &serde_json::json!({
-                    "type": "text_suffix_replace", "old_text": old_text, "new_text": new_text,
-                }),
-            )
-        }
-        ServerEvent::ToolStart { id, name } => write_json_line(
-            stdout,
-            &serde_json::json!({ "type": "tool_start", "id": id, "name": name }),
-        ),
-        ServerEvent::ToolInput { delta, .. } => write_json_line(
-            stdout,
-            &serde_json::json!({ "type": "tool_input", "delta": delta }),
-        ),
-        ServerEvent::ToolExec { id, name } => write_json_line(
-            stdout,
-            &serde_json::json!({ "type": "tool_exec", "id": id, "name": name }),
-        ),
-        ServerEvent::ToolDone {
-            id,
-            name,
-            output,
-            error,
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
-                "type": "tool_done",
-                "id": id,
-                "name": name,
-                "output": output,
-                "error": error,
-            }),
-        ),
-        ServerEvent::TokenUsage {
-            input,
-            output,
-            cache_read_input,
-            cache_creation_input,
-            ..
-        } => {
-            state.usage = crate::agent::TokenUsage {
-                input_tokens: input,
-                output_tokens: output,
-                cache_read_input_tokens: cache_read_input,
-                cache_creation_input_tokens: cache_creation_input,
-            };
-            write_json_line(
-                stdout,
-                &serde_json::json!({
-                    "type": "tokens",
-                    "input": input,
-                    "output": output,
-                    "cache_read_input": cache_read_input,
-                    "cache_creation_input": cache_creation_input,
-                }),
-            )
-        }
-        ServerEvent::ServiceTierReported { requested, tier } => {
-            state.requested_service_tier = requested.clone();
-            state.served_service_tier = Some(tier.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({
-                    "type": "service_tier",
-                    "requested": requested,
-                    "tier": tier,
-                    "report_status": state.service_tier_report_status(),
-                }),
-            )
-        }
-        ServerEvent::ConnectionType { connection } => {
-            state.connection_type = Some(connection.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "connection_type", "connection": connection }),
-            )
-        }
-        ServerEvent::ConnectionPhase { phase } => {
-            state.connection_phase = Some(phase.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "connection_phase", "phase": phase }),
-            )
-        }
-        ServerEvent::StatusDetail { detail } => {
-            state.status_detail = Some(detail.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "status_detail", "detail": detail }),
-            )
-        }
-        ServerEvent::MessageEnd { stop_reason } => write_json_line(
-            stdout,
-            &serde_json::json!({ "type": "message_end", "stop_reason": stop_reason }),
-        ),
-        ServerEvent::UpstreamProvider { provider } => {
-            state.upstream_provider = Some(provider.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "upstream_provider", "provider": provider }),
-            )
-        }
-        ServerEvent::SessionId { session_id } => {
-            state.session_id = Some(session_id.clone());
-            write_json_line(
-                stdout,
-                &serde_json::json!({ "type": "session", "session_id": session_id }),
-            )
-        }
-        ServerEvent::Compaction {
-            trigger,
-            pre_tokens,
-            messages_dropped,
-            post_tokens,
-            tokens_saved,
-            duration_ms,
-            messages_compacted,
-            summary_chars,
-            active_messages,
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
-                "type": "compaction",
-                "trigger": trigger,
-                "pre_tokens": pre_tokens,
-                "messages_dropped": messages_dropped,
-                "post_tokens": post_tokens,
-                "tokens_saved": tokens_saved,
-                "duration_ms": duration_ms,
-                "messages_compacted": messages_compacted,
-                "summary_chars": summary_chars,
-                "active_messages": active_messages,
-            }),
-        ),
-        ServerEvent::MemoryInjected {
-            count,
-            prompt_chars,
-            computed_age_ms,
-            ..
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
-                "type": "memory_injected",
-                "count": count,
-                "prompt_chars": prompt_chars,
-                "computed_age_ms": computed_age_ms,
-            }),
-        ),
-        ServerEvent::Interrupted => {
-            write_json_line(stdout, &serde_json::json!({ "type": "interrupted" }))
-        }
-        ServerEvent::SoftInterruptInjected {
-            content,
-            display_role,
-            point,
-            tools_skipped,
-            client_ids,
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
-                "type": "soft_interrupt_injected",
-                "content": content,
-                "display_role": display_role,
-                "point": point,
-                "tools_skipped": tools_skipped,
-                "client_ids": client_ids,
-            }),
-        ),
-        ServerEvent::BatchProgress { progress } => write_json_line(
-            stdout,
-            &serde_json::json!({ "type": "batch_progress", "progress": progress }),
-        ),
-        ServerEvent::Error {
-            message,
-            retry_after_secs,
-            ..
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
-                "type": "error",
-                "message": message,
-                "retry_after_secs": retry_after_secs,
-            }),
-        ),
-        ServerEvent::Ack { .. } | ServerEvent::Done { .. } | ServerEvent::Pong { .. } => Ok(()),
-        _ => Ok(()),
-    }
-}
-
-fn write_json_line(stdout: &mut impl Write, value: &impl Serialize) -> Result<()> {
-    serde_json::to_writer(&mut *stdout, value)?;
-    stdout.write_all(b"\n")?;
-    stdout.flush()?;
-    Ok(())
-}
-
+#[path = "commands_json_output.rs"]
+mod json_output;
+use json_output::*;
 #[path = "commands/model_listing.rs"]
 mod model_listing;
 

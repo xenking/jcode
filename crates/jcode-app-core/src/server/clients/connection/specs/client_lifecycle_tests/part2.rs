@@ -1,0 +1,483 @@
+use super::*;
+
+#[test]
+fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_accepted_reload_recovery";
+    let continuation = "stored continuation accepted by server";
+
+    super::super::super::reload_recovery::persist_intent(
+        "reload-accepted-continuation",
+        session_id,
+        super::super::super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: Some("stored notice".to_string()),
+            continuation_message: continuation.to_string(),
+        },
+        "synthetic accepted continuation test",
+    )?;
+    assert!(super::super::super::reload_recovery::has_pending_for_session(session_id));
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+        let registry = Registry::new(Arc::clone(&provider)).await;
+        let mut session =
+            crate::session::Session::create_with_id(session_id.to_string(), None, None);
+        session.apply_route(crate::session::Route {
+            model: Some("complete-immediately".to_string()),
+            ..session.route()
+        });
+        let agent = Arc::new(Mutex::new(Agent::new_with_session(
+            provider, registry, session, None,
+        )));
+
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+        let mut client_is_processing = false;
+        let mut processing_message_id = None;
+        let mut processing_session_id = None;
+        let mut processing_task = None;
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+
+        start_processing_message(
+            ProcessingMessage {
+                attachment_data: None,
+                queued_client_id: None,
+                jarvis_voice: false,
+                id: 77,
+                content: "continue after reload".to_string(),
+                images: Vec::new(),
+                system_reminder: Some(continuation.to_string()),
+                active_skill: None,
+                server_failover: false,
+            },
+            session_id,
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut processing_message_id,
+                session_id: &mut processing_session_id,
+                task: &mut processing_task,
+            },
+            &agent,
+            &client_event_tx,
+            &processing_done_tx,
+            Vec::new(),
+            &SwarmStatusRefs {
+                members: &swarm_members,
+                swarms_by_id: &swarms_by_id,
+                event_history: &event_history,
+                event_counter: &event_counter,
+                event_tx: &swarm_event_tx,
+            },
+        )
+        .await;
+
+        assert!(client_is_processing);
+        assert_eq!(processing_message_id, Some(77));
+        assert_eq!(processing_session_id.as_deref(), Some(session_id));
+        assert!(processing_task.is_some());
+        assert!(
+            !super::super::super::reload_recovery::has_pending_for_session(session_id),
+            "server acceptance of the exact hidden continuation should consume the durable intent"
+        );
+
+        let (done_id, result, _report, _, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
+                .await
+                .expect("processing task should finish")
+                .expect("processing task should report completion");
+        assert_eq!(done_id, 77);
+        result?;
+        if let Some(handle) = processing_task.take() {
+            handle.await.expect("processing task join");
+        }
+        client_is_processing = false;
+        processing_message_id = None;
+        processing_session_id = None;
+        while client_event_rx.try_recv().is_ok() {}
+        let message_count = agent.lock().await.message_count();
+        let event_count = event_counter.load(std::sync::atomic::Ordering::Relaxed);
+
+        // A stale History continuation arriving after the final answer is a
+        // no-op even if it carries an invalid skill. No turn/skill/status edits.
+        // The replay is reminder-only: a delivered reminder that arrives with
+        // real content is stripped and the content runs as a new prompt (see
+        // delivered_replay_is_reminder_only), so it is not a no-op.
+        start_processing_message(
+            ProcessingMessage {
+                attachment_data: None,
+                queued_client_id: None,
+                jarvis_voice: false,
+                id: 78,
+                content: String::new(),
+                images: Vec::new(),
+                system_reminder: Some(continuation.to_string()),
+                active_skill: Some("nonexistent-replay-skill".to_string()),
+                server_failover: false,
+            },
+            session_id,
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut processing_message_id,
+                session_id: &mut processing_session_id,
+                task: &mut processing_task,
+            },
+            &agent,
+            &client_event_tx,
+            &processing_done_tx,
+            Vec::new(),
+            &SwarmStatusRefs {
+                members: &swarm_members,
+                swarms_by_id: &swarms_by_id,
+                event_history: &event_history,
+                event_counter: &event_counter,
+                event_tx: &swarm_event_tx,
+            },
+        )
+        .await;
+        assert!(!client_is_processing);
+        assert!(processing_message_id.is_none());
+        assert!(processing_session_id.is_none());
+        assert!(processing_task.is_none());
+        assert_eq!(agent.lock().await.message_count(), message_count);
+        assert_eq!(
+            event_counter.load(std::sync::atomic::Ordering::Relaxed),
+            event_count
+        );
+        assert!(processing_done_rx.try_recv().is_err());
+        assert!(matches!(
+            client_event_rx.try_recv(),
+            Ok(ServerEvent::Done { id: 78 })
+        ));
+        assert!(client_event_rx.try_recv().is_err());
+
+        // Unrelated reminders and ordinary prompts (even the exact body) are
+        // not replays. A fresh intent in this session is accepted as well.
+        for (id, reminder) in [
+            (79, Some("ordinary reminder")),
+            (80, None),
+            (81, Some(continuation)),
+        ] {
+            if id == 81 {
+                super::super::super::reload_recovery::persist_intent(
+                    "reload-next",
+                    session_id,
+                    super::super::super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+                    crate::tool::selfdev::ReloadRecoveryDirective {
+                        reconnect_notice: None,
+                        continuation_message: continuation.to_string(),
+                    },
+                    "next reload",
+                )?;
+            }
+            start_processing_message(
+                ProcessingMessage {
+                    attachment_data: None,
+                    queued_client_id: None,
+                    jarvis_voice: false,
+                    id,
+                    content: continuation.to_string(),
+                    images: Vec::new(),
+                    system_reminder: reminder.map(str::to_string),
+                    active_skill: None,
+                    server_failover: false,
+                },
+                session_id,
+                &mut ProcessingState {
+                    client_is_processing: &mut client_is_processing,
+                    message_id: &mut processing_message_id,
+                    session_id: &mut processing_session_id,
+                    task: &mut processing_task,
+                },
+                &agent,
+                &client_event_tx,
+                &processing_done_tx,
+                Vec::new(),
+                &SwarmStatusRefs {
+                    members: &swarm_members,
+                    swarms_by_id: &swarms_by_id,
+                    event_history: &event_history,
+                    event_counter: &event_counter,
+                    event_tx: &swarm_event_tx,
+                },
+            )
+            .await;
+            assert!(client_is_processing);
+            assert_eq!(processing_message_id, Some(id));
+            let (done_id, result, _, _, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
+                    .await?
+                    .expect("accepted turn completion");
+            assert_eq!(done_id, id);
+            result?;
+            processing_task.take().unwrap().await?;
+            client_is_processing = false;
+            processing_message_id = None;
+            processing_session_id = None;
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
+
+    Ok(())
+}
+
+#[test]
+fn reload_starting_rejects_new_turns_for_multiple_sessions() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    crate::server::write_reload_state(
+        "reload-lifecycle-multi-starting",
+        "test-hash",
+        crate::server::ReloadPhase::Starting,
+        Some("session_alpha".to_string()),
+    );
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let forked = Arc::new(AtomicBool::new(false));
+        let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+            forked: Arc::clone(&forked),
+        });
+        let registry = Registry::new(Arc::clone(&provider)).await;
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+
+        for (message_id, session_id) in [
+            (101, "session_alpha"),
+            (102, "session_beta"),
+            (103, "session_gamma"),
+        ] {
+            let mut session =
+                crate::session::Session::create_with_id(session_id.to_string(), None, None);
+            session.apply_route(crate::session::Route {
+                model: Some("panic-on-fork".to_string()),
+                ..session.route()
+            });
+            let agent = Arc::new(Mutex::new(Agent::new_with_session(
+                Arc::clone(&provider),
+                registry.clone(),
+                session,
+                None,
+            )));
+
+            let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+            let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+            let mut client_is_processing = false;
+            let mut processing_message_id = None;
+            let mut processing_session_id = None;
+            let mut processing_task = None;
+
+            start_processing_message(
+                ProcessingMessage {
+                    attachment_data: None,
+                    queued_client_id: None,
+                    jarvis_voice: false,
+                    id: message_id,
+                    content: format!("do not start {session_id} during reload"),
+                    images: Vec::new(),
+                    system_reminder: None,
+                    active_skill: None,
+                    server_failover: false,
+                },
+                session_id,
+                &mut ProcessingState {
+                    client_is_processing: &mut client_is_processing,
+                    message_id: &mut processing_message_id,
+                    session_id: &mut processing_session_id,
+                    task: &mut processing_task,
+                },
+                &agent,
+                &client_event_tx,
+                &processing_done_tx,
+                Vec::new(),
+                &SwarmStatusRefs {
+                    members: &swarm_members,
+                    swarms_by_id: &swarms_by_id,
+                    event_history: &event_history,
+                    event_counter: &event_counter,
+                    event_tx: &swarm_event_tx,
+                },
+            )
+            .await;
+
+            let event = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                client_event_rx.recv(),
+            )
+            .await
+            .expect("reload guard should emit promptly for every session")
+            .expect("reload event should be sent to client");
+            assert!(
+                matches!(
+                    event,
+                    ServerEvent::Reloading {
+                        new_socket: None,
+                        ..
+                    }
+                ),
+                "expected Reloading event for {session_id}, got {event:?}"
+            );
+            assert!(
+                client_event_rx.try_recv().is_err(),
+                "reload guard should only emit one reload notification for {session_id}"
+            );
+            assert!(
+                !client_is_processing,
+                "{session_id} should not enter processing during reload"
+            );
+            assert_eq!(processing_message_id, None);
+            assert_eq!(processing_session_id, None);
+            assert!(
+                processing_task.is_none(),
+                "{session_id} should not spawn a processing task during reload"
+            );
+            assert!(processing_done_rx.try_recv().is_err());
+        }
+
+        assert!(
+            !forked.load(Ordering::SeqCst),
+            "rejecting multiple sessions during reload should not fork or invoke provider work"
+        );
+    });
+}
+
+#[tokio::test]
+async fn lightweight_comm_request_skips_full_session_initialization() {
+    let (server_stream, client_stream) = crate::transport::Stream::pair().expect("socket pair");
+    let forked = Arc::new(AtomicBool::new(false));
+    let provider_template: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::clone(&forked),
+    });
+
+    let sessions: SessionAgents =
+        Arc::new(crate::server::SessionManager::from_agents(HashMap::new()));
+    let global_session_id = Arc::new(RwLock::new(String::new()));
+    let client_count = Arc::new(RwLock::new(0usize));
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let shared_context = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
+    let file_touch = FileTouchService::new();
+    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
+    let client_debug_state = Arc::new(RwLock::new(ClientDebugState::default()));
+    let (_debug_response_tx, _) = broadcast::channel(8);
+    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+
+    let server_task = tokio::spawn(handle_client(
+        server_stream,
+        ClientEnv {
+            sessions: Arc::clone(&sessions),
+            provider_template,
+            global_session_id,
+            client_count,
+            client_connections: Arc::clone(&client_connections),
+            swarm_members,
+            swarms_by_id,
+            shared_context,
+            swarm_plans,
+            swarm_coordinators,
+            file_touch,
+            channel_subscriptions,
+            channel_subscriptions_by_session,
+            client_debug_state,
+            client_debug_response_tx: _debug_response_tx,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+            server_name: "jcode-test".to_string(),
+            server_icon: "🧪".to_string(),
+            mcp_pool,
+            shutdown_signals,
+            soft_interrupt_queues,
+            await_members_runtime: AwaitMembersRuntime::default(),
+            swarm_mutation_runtime: SwarmMutationRuntime::default(),
+        },
+        None,
+    ));
+
+    let (client_reader, mut client_writer) = client_stream.into_split();
+    let mut client_reader = BufReader::new(client_reader);
+    let request = Request::CommList {
+        id: 7,
+        session_id: "not-in-swarm".to_string(),
+    };
+    let payload = serde_json::to_string(&request).expect("serialize request") + "\n";
+    client_writer
+        .write_all(payload.as_bytes())
+        .await
+        .expect("write request");
+
+    let mut line = String::new();
+    client_reader
+        .read_line(&mut line)
+        .await
+        .expect("read ack bytes");
+    let ack = decode_request_or_event(&line);
+    assert!(matches!(ack, ServerEvent::Ack { id: 7 }));
+
+    line.clear();
+    client_reader
+        .read_line(&mut line)
+        .await
+        .expect("read terminal response");
+    let response = decode_request_or_event(&line);
+    match response {
+        ServerEvent::Error { id, message, .. } => {
+            assert_eq!(id, 7);
+            assert!(message.contains("Not in a swarm"));
+        }
+        other => panic!("expected error response, got {other:?}"),
+    }
+
+    line.clear();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), client_reader.read_line(&mut line))
+            .await
+            .expect("non-Ping lightweight command must close its one-shot connection")
+            .expect("read EOF"),
+        0,
+    );
+    drop(client_writer);
+    server_task
+        .await
+        .expect("server task join")
+        .expect("server task result");
+
+    assert!(
+        !forked.load(Ordering::SeqCst),
+        "lightweight control request should not fork a provider"
+    );
+    assert!(
+        client_connections.read().await.is_empty(),
+        "lightweight control request should not register a live client session"
+    );
+    assert!(
+        sessions.ids().await.is_empty(),
+        "lightweight control request should not allocate a live agent session"
+    );
+}
+
+#[test]
+fn soft_interrupt_dispatch_starts_idle_session_and_queues_busy_session() {
+    assert!(should_start_idle_soft_interrupt(false, false, false));
+    assert!(!should_start_idle_soft_interrupt(true, false, false));
+    assert!(!should_start_idle_soft_interrupt(false, true, false));
+    assert!(!should_start_idle_soft_interrupt(false, false, true));
+}

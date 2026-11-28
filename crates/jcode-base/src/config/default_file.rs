@@ -100,8 +100,8 @@ swarm_panel_focus = "alt+n"
 
 # Spawn a fresh jcode session in a new terminal window, reusing the current
 # session's working directory. Companion to the system-wide launch hotkeys.
-# `jcode setup-hotkey` installs these three global launch hotkeys on macOS,
-# Linux niri/Hyprland/sway/i3, and Windows. The Cmd modifier maps to Super on
+# Only an explicit `jcode setup-hotkey` installs these three global launch hotkeys
+# (macOS, Linux niri/Hyprland/sway/i3, Windows). The Cmd modifier maps to Super on
 # Linux and Alt on Windows. Windows also adds the physical Copilot key:
 #   Cmd+;        new jcode in your home directory
 #   Cmd+'        new jcode in your last project directory
@@ -123,6 +123,24 @@ swarm_panel_focus = "alt+n"
 # By default Enter resumes in this terminal; Ctrl+Enter performs the alternate action.
 session_picker_enter = "current-terminal"
 
+[jarvis.speech]
+# Optional external OpenAI-compatible speech endpoint used by `jcode --jarvis`.
+# POST {model, voice, input, response_format: "wav"}; returns audio/wav.
+# Model and voice installation belong to the service, never the Jcode repo.
+# Overrides: JCODE_JARVIS_SPEECH_ENDPOINT. Omit endpoint to use local eSpeak.
+# endpoint = "http://127.0.0.1:8765/v1/audio/speech"
+# model = "piper-jarvis"
+# voice = "jarvis"
+# api_key_env = "MY_SPEECH_API_KEY"
+
+# Experimental `jcode --jarvis-always-on` uses local voice detection, Nari,
+# and a single-shot Jev request gate. Settings alone never open the microphone.
+# [jarvis.listening]
+# max_agent_turns_per_hour = 0 # 0 disables the agent-turn cap
+# action_probability = 0.5  # 0.5..1; Fn tap sends recent speech without the gate
+# trigger_sound = "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga"  # "" = silent
+# warm_nari = false  # keep one idle Nari connection ready (no audio sent while idle)
+
 [dictation]
 # External speech-to-text command.
 # The command should record/transcribe speech and print the final transcript to stdout.
@@ -133,21 +151,30 @@ session_picker_enter = "current-terminal"
 command = ""
 
 # How to apply the transcript inside jcode: insert|append|replace|send
-mode = "send"
+# insert (the default) puts the words at the composer caret so you can edit
+# and send them yourself. send submits the transcript as a prompt immediately.
+mode = "insert"
 
 # Optional in-app hotkey to trigger dictation. Set to "off" to disable.
 # Example: "alt+;"
 key = "off"
 
-# Max seconds to wait for the dictation command to finish (0 = no timeout)
-timeout_secs = 90
+# Max seconds a dictation command may run (0 = no timeout). When the limit is
+# reached the command is interrupted and any transcript it already printed is
+# still used.
+timeout_secs = 300
 
-# Built-in voice backend: auto|nari|soniox|subscription|command.
-# auto keeps the default selection. soniox reads SONIOX_API_KEY or
-# <jcode config dir>/soniox.env.
+# Built-in voice backend: auto|nari|soniox|elevenlabs|subscription|command.
+# soniox reads SONIOX_API_KEY or <jcode config dir>/soniox.env.
+# elevenlabs reads ELEVENLABS_API_KEY or <jcode config dir>/elevenlabs.env.
+# auto chooses Nari or Soniox if a key is present.
 # backend = "auto"
 # Optional streaming WebSocket URL override for nari/soniox.
 # base_url = ""
+# Speech model for the selected backend, for example "stt-rt-v6" for soniox.
+# Empty uses the backend's default. Long dictation renews the provider session
+# automatically, so there is no recording time limit to configure.
+# model = ""
 
 # Extra names or terms to help built-in voice transcription recognize them.
 # Jcode's own product names are always included.
@@ -179,9 +206,9 @@ centered = false
 # Pin read images to a side pane (default: true)
 pin_images = true
 
-# Pin the full session todo list to the top of the chat transcript while it
-# scrolls, like the sticky previous-prompt preview (default: false)
-# pin_todos = true
+# Pinned todo header: "full" (default), "minimal" (one line), or "hidden".
+# /todos pin cycles modes. The legacy pin_todos = false overrides this setting.
+# todo_header = "full"
 
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false
@@ -192,8 +219,8 @@ auto_server_reload = true
 # Capture mouse events (enables scroll wheel; disables terminal text selection)
 mouse_capture = true
 
-# Enable debug socket for external control/testing (default: false)
-debug_socket = false
+# Enable debug socket for external control/testing (default: true)
+debug_socket = true
 
 # Render emoji in terminal-facing TUI and CLI output (default: true).
 # Set false here or set JCODE_NO_EMOJI=1 for ASCII fallbacks.
@@ -359,8 +386,10 @@ prompt_entry_animation = true
 # selection_bg = "#3c3c50"
 
 [features]
-# Check for and install updates during startup. Set to false for the persistent
-# equivalent of passing --no-update on every invocation.
+# Check for new releases during startup and show an "update available" notice.
+# Nothing is downloaded or installed until you run `jcode update` (or opt in
+# with --auto-update). Set to false for the persistent equivalent of passing
+# --no-update on every invocation.
 check_updates = true
 # Memory: retrieval + extraction sidecar features
 memory = true
@@ -380,8 +409,9 @@ todo_gate_digest = false
 todo_gate_diagnostics = false
 # Inject timestamps into user messages and tool results sent to the model
 message_timestamps = true
-# Persist memory injections into session history instead of sending them as request-only ephemeral context
-persist_memory_injections = false
+# Keep recalled memory in the model's session history until compaction.
+# Set false to send it only in the current request.
+# persist_memory_injections = true
 # Show an in-chat warning when a request misses the KV cache for a harness-caused
 # (avoidable) reason: system prompt, tool set, or message prefix changed. These
 # should essentially never happen and indicate a prefix-cache bug.
@@ -462,8 +492,8 @@ browser_handoff = false
 # This does not kill tools or change their own execution timeouts.
 auto_background_timeout_ms = 3000
 # Controls which built-in tools are sent to the model.
-# Profiles: "full" (default), "acp", "minimal"/"lite", or "none".
-# acp keeps core coding tools plus batch for generic ACP clients.
+# Profiles: "full" (default), "minimal"/"lite", or "none".
+# "acp" is a legacy name for "full".
 # minimal keeps core coding tools only: bash, read, write, edit, multiedit,
 # apply_patch, patch, agentgrep, glob, grep, and ls.
 profile = "full"
@@ -498,6 +528,7 @@ codemode = true
 mode = "reactive"
 # Reactive starts at either threshold, whichever is reached first.
 # Zero disables the absolute token threshold.
+# An explicit token threshold also selects this policy for OpenAI native auto.
 reactive_threshold = 0.80
 reactive_threshold_tokens = 400000
 # Proactive/semantic checks become eligible at either floor, whichever is
@@ -529,7 +560,8 @@ shake = false
 profile = "standard"
 # Tool profile requested when `jcode acp` starts the daemon itself.
 # Existing daemons keep their current server-wide tool config.
-tool_profile = "acp"
+# ACP clients get the same tools as the TUI. Use "minimal" to cut them down.
+tool_profile = "full"
 
 [provider]
 # Default model (optional, uses provider default if not set)
@@ -565,6 +597,10 @@ preserve_reasoning_context = true
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself
 # cross_provider_failover = "manual"
+# Case-insensitive model-ID substrings (optional * wildcard) excluded from all
+# automatic failover, including worker fallbacks. Explicit /model and spawn
+# choices remain available. Set [] to disable exclusions. Default: ["opus"].
+# failover_excluded_models = ["opus"]
 # Switch immediately only for definitive usage exhaustion (default: true).
 # False preserves the countdown. Manual mode always disables automatic switching.
 exhausted_usage_immediate_failover = true
@@ -582,6 +618,11 @@ anthropic_retry_recoverable_rate_limits = true
 # Preserve earned resets while another approved pool route is ready (default: true).
 # Set false to redeem before account/provider failover instead.
 # auto_reset_only_when_no_routes = true
+# When automatic resets fire: "blocked_wait_over" (default) spends one only
+# while blocked and the window reset is more than auto_reset_min_wait_minutes
+# away. "exhausted" spends one as soon as a window hits 100%.
+# auto_reset_trigger = "blocked_wait_over"
+# auto_reset_min_wait_minutes = 10
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests
@@ -624,6 +665,12 @@ cross_provider_failover = "countdown"
 # never starts a turn or injects into a running turn.
 # Env override: JCODE_WAKE_MODE
 wake_mode = "internal"
+# Keep finished background tasks and their output for 7 days. Set to 0 to
+# disable automatic cleanup. Running tasks are never expired by this policy.
+# background_task_retention_days = 7
+# While a background swarm await is pending, wake its coordinator with a
+# progress check-in this often (minutes). Set to 0 to disable.
+# await_checkin_minutes = 15
 
 [agents]
 # Swarm root settings and defaults for helper agents (workers, subagents, sidecars).
@@ -648,10 +695,40 @@ swarm_model_allowlist = []
 # swarm_model_selection = true
 # swarm_model_allowlist = ["openai:gpt-5.5", "claude:claude-sonnet-4-6"]
 #
+# Hard worker allowlist. When non-empty, a spawned worker may only run on these
+# exact model/route strings: an agent asking for anything else is rejected with
+# the list, and worker failover never steps outside it. Every worker turn checks
+# its current route too, so a worker that something moved outside the list
+# (account failover, an older session) stops with an error instead of spending.
+# Omit the model on spawn to use swarm_model. Leave empty to trust swarm_model
+# and its fallbacks. User-started sessions are never restricted by this list.
+spawn_allowed_models = []
+# Example: cheap primary, Claude fallbacks, never fable/astra or other routes.
+# spawn_allowed_models = ["opencode-go:deepseek-v4.1-flash", "claude:claude-sonnet-5-5", "claude:claude-opus-5-5"]
+#
 # Reasoning effort for spawned swarm workers ("low", "medium", "high", ...).
 # Agents cannot choose worker effort through the swarm tool. Unset = "low".
 # Env override: JCODE_SWARM_EFFORT
 # swarm_effort = "low"
+# Optional per-route worker effort ceilings. An absent entry leaves the model's
+# supported levels unrestricted. Applies on spawn, model failover, and /effort.
+swarm_effort_caps = {}
+# Worker request speed, independent of effort. Accelerated workers need owner approval.
+# swarm_speed = "standard"
+# swarm_speed_caps = { "openai:gpt-5.5" = "standard" }
+# swarm_effort_caps = { "openai:gpt-6.1-sol" = "xhigh" }
+#
+# Worker pool: the models workers may use and, per
+# model, the reasoning efforts allowed on it. Keys are exact provider:model
+# routes. A non-empty pool becomes the worker allowlist (spawn_allowed_models
+# and swarm_model_allowlist). An empty list allows every effort. Any other
+# effort moves to the nearest allowed level, preferring the next one up, on
+# spawn, failover and /effort.
+swarm_pool = {}
+# [agents.swarm_pool]
+# "claude:claude-sonnet-5-5" = ["high", "xhigh"]
+# "claude:claude-opus-5-5" = ["medium", "high", "xhigh"]
+# "opencode-go:deepseek-v4.1-flash" = []
 #
 # Root model reasoning while /effort swarm is selected. Independent of worker
 # swarm_effort. Supported levels: none|minimal|low|medium|high|xhigh|max.
@@ -683,17 +760,43 @@ swarm_max_concurrent_agents = 32
 swarm_stall_after_secs = 600
 # swarm_stall_nudge = false
 #
-# Max percentage (1-90) of the chat height the inline swarm gallery band may use.
-# Unset = built-in default (40%). Lower values keep more transcript visible; set
-# near the minimum to collapse the gallery to a thin strip.
-# swarm_gallery_max_pct = 40
+# Agent profiles: persona, tool allowlist, effort and model per kind of agent.
+# Built-ins: orchestrator, task, sonic, scout, reviewer. Pick one per worker
+# with the swarm tool's `profile` or a todo lane's `lane_profile`. A table
+# named like a built-in overrides only the fields it sets. `tools` narrows
+# [tools], it never widens it.
+# root_profile = "orchestrator"   # applied to new root sessions
+# [agents.profiles.scout]
+# model = "claude-haiku-5-5"
+# effort = "medium"
+# tools = ["read", "agentgrep", "batch", "bash", "todo", "swarm"]
+# skills = false
+# instructions_file = "~/.jcode/profiles/scout.md"
 #
-# Layout of the inline swarm strip above the status line:
-#   "vertical"   - one agent per row (session icon + status + task), capped to
-#                  a few rows with a "+N more" overflow marker (default)
-#   "horizontal" - all agents packed as chips on a single row
-# Env override: JCODE_SWARM_STRIP_LAYOUT
-# swarm_strip_layout = "vertical"
+# Model prompts: text per model family or exact model, matched by glob on the
+# model ID (`provider:model` when the pattern has a colon). Every matching rule
+# applies in order: `append` adds after the default instructions, `replace`
+# swaps them out (the last matching replace wins). Lines starting with
+# `<!-- tools: name -->` stay only when the session has that tool.
+# [[agents.model_prompts]]
+# match = ["claude-*"]
+# mode = "append"
+# instructions = "Prefer short answers. Batch independent reads."
+# [[agents.model_prompts]]
+# match = ["gpt-6*-sol"]
+# mode = "replace"
+# instructions_file = "~/.jcode/prompts/sol.md"
+#
+# Advisor: a stronger model the agent consults with the `advisor` tool. It
+# sees a digest of the session (requests, the agent's messages, one line per
+# tool call), never raw tool output, and answers NOTE, CONCERN or BLOCKER.
+# Unset model means no advisor tool. With auto_review, every turn that ran
+# tools is reviewed when it ends, and a CONCERN or BLOCKER wakes the agent.
+# [agents.advisor]
+# model = "claude-opus-5-5"
+# effort = "high"
+# max_digest_tokens = 12000
+# auto_review = false
 #
 # Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
 # Provider values: auto, jcode, openrouter, typesafe, laya, aimlapi.
@@ -702,6 +805,11 @@ swarm_stall_after_secs = 600
 # override via JCODE_LAYA_BASE_URL or LAYA_BASE_URL, optional LAYA_API_KEY in laya.env).
 # Env override: JCODE_MEMORY_JEV_PROVIDER
 # memory_jev_provider = "auto"
+
+# Opt in to automatic relevance-judged recall and Decisions validation of
+# sidecar-extracted memories (default false). On Decisions failure, automatic
+# recall injects nothing and extraction falls back to local exact deduplication.
+# memory_auto_recall = false
 # Optional per-purpose Jev Decisions model overrides. Unset preserves the
 # selected provider's existing model. Environment overrides take precedence.
 # Env overrides: JCODE_MEMORY_JEV_MODEL, JCODE_BROWSER_JEV_MODEL, JCODE_VOICE_JEV_MODEL
@@ -885,16 +993,16 @@ port = 7643
 bind_addr = "0.0.0.0"
 
 [session]
-# Release reloadable session memory after 30 minutes idle. Active work is never
-# interrupted. Type in the terminal to wake. Set to 0 to disable hibernation.
+# Hibernate idle caches without interrupting active work. Set to 0 to disable.
 # Environment override: JCODE_HIBERNATION_IDLE_SECS
 hibernation_idle_secs = 1800
+# Unload detached sessions (finished workers: at most 60s). Zero disables.
+unload_idle_secs = 1800
 # What an idle terminal client releases when it hibernates:
 #   "caches"     - render caches only. Instant, lossless wake. (default)
 #   "transcript" - also drop the transcript and reload it from the server on
 #                  wake. Loses local-only notices and the exact scroll spot.
-#   "exit"       - exit the client, leaving a tiny waiter that resumes the
-#                  session on the next key press. Largest savings, ~1s wake.
+#   "exit"       - exit and resume on the next keystroke (~1s wake).
 # Environment override: JCODE_HIBERNATION_MODE
 hibernation_mode = "caches"
 
@@ -926,14 +1034,27 @@ voice_waveform = true
 # Desktop notifications for voice state. When off, recording still needs the
 # waveform to be shown in a Jcode CLI as its visible indicator.
 voice_notifications = true
+# Hold the laptop Fn key to talk to the running always-on Jarvis session
+# (`jcode --jarvis-always-on`) from any window, without changing focus. Needs
+# Fn to reach Linux as KEY_FN on a [dictation] global_devices keyboard (on some
+# laptops via a udev hwdb remap). Fn shortcuts never record.
+jarvis_fn_key = false
+# Key for that: "fn" or "rightshift" (when Fn never reaches Linux). A bare
+# tap sends what Jarvis just heard; Right Shift with another key types normally.
+jarvis_key = "fn"
+# With jarvis_fn_key: when no always-on Jarvis is running, an Fn hold opens one
+# in a new terminal and sends what you said once it is ready.
+jarvis_fn_launch = true
+# Extra flags for that Jarvis, after --jarvis-always-on, e.g. ["--jarvis-screen"].
+jarvis_fn_launch_args = []
 # Open URLs and files for the server. Off: clients use their own opener.
 open = true
 # Open new terminal windows for the server. Off: clients launch locally.
 spawn_terminal = true
 # Lid-close override while agents work (macOS/Windows, see [power]).
 lid = true
-# Hourly browser bridge auto-update.
-browser_updates = true
+# Automatically update the browser bridge (opt-in). Off: only `jcode browser setup` updates it.
+browser_updates = false
 
 [menubar]
 # macOS only: show the jcode session count in the menu bar. Set to false to
@@ -986,17 +1107,6 @@ desktop_notifications = true
 # jade_relay_reply_enabled = false   # Deliver cloud prompts to one configured live session.
 # jade_relay_launch_enabled = false  # Allow cloud device commands to open headed local sessions.
 # jade_relay_launch_working_dir = "" # Optional default cwd for launched sessions.
-
-# [sponsors] # Legacy config section name retained for compatibility.
-# Integration discovery (disabled by default; set enabled = true to opt in).
-# When enabled, the agent gains an `integration_tools` tool listing third-party
-# developer tools from Jcode's hosted integration directory. These providers
-# have integrated with the agent to make setup and use seamless. Some providers
-# may share revenue with Jcode when a referred user becomes a customer, but
-# commercial relationships never influence recommendations.
-# See https://jcode.sh/discovery-tools
-# enabled = false
-# endpoint = "https://api.jcode.sh/v1/discovery"
 	"##;
 
         // Substitute platform-specific defaults from the keybinding registry.
@@ -1024,7 +1134,7 @@ mod tests {
             toml::from_str::<Config>(&template).expect("the shipped config template must parse");
         assert!(config.tools.codemode);
         assert_eq!(config.compaction.reactive_threshold, 0.80);
-        assert_eq!(config.compaction.reactive_threshold_tokens, 400_000);
+        assert_eq!(config.compaction.reactive_threshold_tokens, Some(400_000));
         assert_eq!(config.compaction.proactive_floor, 0.40);
         assert_eq!(config.compaction.proactive_floor_tokens, 150_000);
         assert_eq!(
@@ -1038,6 +1148,10 @@ mod tests {
         assert!(
             config.display.show_thinking,
             "the shipped user config must request model reasoning"
+        );
+        assert!(
+            config.display.debug_socket,
+            "the shipped user config must enable the owner-only debug socket"
         );
         assert_eq!(
             config.display.reasoning_display(),

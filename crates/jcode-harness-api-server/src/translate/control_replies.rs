@@ -4,12 +4,23 @@ use super::{ApiEvent, BridgeState, ErrorCode, ServerFrame, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum SimpleKind {
+    QueueControl,
+    QueueSnapshot,
+    QueueRemoval,
+    QueueEdit,
     RuntimeCommand,
     Detach,
     Tools,
     ToolControl,
     Ping,
     History,
+    HistoryPage,
+    HistoryImageChunk,
+    SessionImages,
+    SessionImage,
+    ContextBreakdown,
+    ShakeTools,
+    CompactedHistory,
     /// Receipt-only controls: cancel, soft interrupts, auth/usage invalidation,
     /// and the legacy background-tool fallback. Their handlers do not reject
     /// the control after ack (an idle interrupt can separately fail its turn).
@@ -20,9 +31,15 @@ pub(super) enum SimpleKind {
     OkOnHistory,
     /// Awaiting `model_changed`, which carries its own error field.
     Model,
+    /// Awaiting `model_change_cancelled`, the answer to withdrawing a queued
+    /// model switch.
+    ModelSwitchCancel,
     ContextCap,
+    /// Awaiting `routing_status`, the text answer to a routing intent.
+    Routing,
     /// Awaiting `reasoning_effort_changed`.
     ReasoningEffort,
+    SpeedMode,
     /// Awaiting `compacted_history`.
     Compact,
     /// Awaiting the catalog reply that answers `list_models`.
@@ -49,10 +66,21 @@ impl BridgeState {
                 *pending_id == id
                     && matches!(
                         kind,
-                        SimpleKind::Tools
+                        SimpleKind::QueueControl
+                            | SimpleKind::QueueSnapshot
+                            | SimpleKind::QueueRemoval
+                            | SimpleKind::Tools
                             | SimpleKind::ToolControl
                             | SimpleKind::OkOnDone
+                            | SimpleKind::Routing
                             | SimpleKind::OkOnHistory
+                            | SimpleKind::CompactedHistory
+                            | SimpleKind::HistoryPage
+                            | SimpleKind::HistoryImageChunk
+                            | SimpleKind::SessionImages
+                            | SimpleKind::SessionImage
+                            | SimpleKind::ContextBreakdown
+                            | SimpleKind::ShakeTools
                     )
             })?;
         let (_, api_id, _) = self.pending_simple.remove(index);

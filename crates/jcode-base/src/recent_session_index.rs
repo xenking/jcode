@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use jcode_session_types::SessionCatalogContext;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::session::Session;
@@ -36,8 +37,10 @@ impl RecentSessionMetadata {
                     .then(|| self.save_label.as_deref().and_then(non_empty))
                     .flatten()
             })
-            .or_else(|| self.todo_title.as_deref().and_then(non_empty))
             .or_else(|| self.generated_title.as_deref().and_then(non_empty))
+            // Todo groups are lane labels ("session-titles"), not conversation
+            // titles. Only sessions with no generated title fall back to them.
+            .or_else(|| self.todo_title.as_deref().and_then(non_empty))
     }
 }
 
@@ -116,6 +119,7 @@ fn open_at(path: &std::path::Path) -> Result<Connection> {
         ("resume_short_name", "TEXT"),
         ("resume_fingerprint", "TEXT"),
         ("resume_updated_at", "TEXT"),
+        ("catalog_context", "TEXT"),
     ] {
         if !columns.contains(column) {
             transaction.execute(
@@ -160,8 +164,25 @@ fn recent_with(connection: &Connection, limit: usize) -> Result<Vec<RecentSessio
 
 /// Update the index after a successful session persistence operation.
 pub fn upsert_session(session: &Session) -> Result<()> {
-    let fingerprint = SessionFingerprint::read(&crate::session::session_path(&session.id)?);
+    let fingerprint = SessionFingerprint::read(&crate::session::session_path(session.id())?);
     index_session(session, fingerprint.as_ref(), false)
+}
+
+/// An unchanged save need not fingerprint or rewrite a healthy index row,
+/// but should still repopulate one that was explicitly invalidated or dropped.
+pub(crate) fn ensure_resume_entry(session: &Session) -> Result<()> {
+    let indexed = with_connection(|connection| {
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recent_sessions
+                           WHERE session_id = ?1 AND resume_fingerprint IS NOT NULL)",
+            [session.id()],
+            |row| row.get::<_, bool>(0),
+        )?)
+    })?;
+    if !indexed {
+        upsert_session(session)?;
+    }
+    Ok(())
 }
 
 // A backfill must not overwrite a newer concurrent save. Its supplied
@@ -179,17 +200,19 @@ fn index_session(
     backfill: bool,
 ) -> Result<()> {
     let entry = RecentSessionMetadata {
-        session_id: session.id.clone(),
-        working_dir: session.working_dir.clone(),
-        generated_title: session.title.clone(),
-        custom_title: session.custom_title.clone(),
-        todo_title: crate::todo::load_session_title(&session.id),
-        saved: session.saved,
-        save_label: session.save_label.clone(),
-        updated_at_ms: session.updated_at.timestamp_millis(),
-        last_active_at_ms: session.last_active_at.map(|time| time.timestamp_millis()),
+        session_id: session.id().to_owned(),
+        working_dir: session.working_dir().map(str::to_owned),
+        generated_title: session.title().map(str::to_owned),
+        custom_title: session.custom_title().map(str::to_owned),
+        todo_title: crate::todo::load_session_title(session.id()),
+        saved: session.is_saved(),
+        save_label: session.save_label().map(str::to_owned),
+        updated_at_ms: session.updated_at().timestamp_millis(),
+        last_active_at_ms: session.last_active_at().map(|time| time.timestamp_millis()),
     };
     let encoded_fingerprint = fingerprint.map(serde_json::to_string).transpose()?;
+    let context = session_catalog_context(session);
+    let encoded_context = serde_json::to_string(&context)?;
     with_connection(|connection| {
         // Acquire the SQLite write lock before validating the read. A newer
         // save either already changed the files (we skip it) or publishes its
@@ -203,7 +226,7 @@ fn index_session(
             })
             .transpose()?;
         if backfill
-            && SessionFingerprint::read(&crate::session::session_path(&session.id)?).as_ref()
+            && SessionFingerprint::read(&crate::session::session_path(session.id())?).as_ref()
                 != fingerprint
         {
             return Ok(());
@@ -213,7 +236,8 @@ fn index_session(
             &entry,
             session.short_name.as_deref(),
             encoded_fingerprint.as_deref(),
-            Some(&session.updated_at.to_rfc3339()),
+            Some(&session.updated_at().to_rfc3339()),
+            Some(&encoded_context),
         )?;
         if let Some(transaction) = transaction {
             transaction.commit()?;
@@ -222,12 +246,30 @@ fn index_session(
     })
 }
 
+fn session_catalog_context(session: &Session) -> SessionCatalogContext {
+    let cache_expires_at_ms = session.last_provider_request_at().and_then(|last_request| {
+        let provider = session.route_api_method().or(session.provider_key())?;
+        let ttl = crate::provider::cache_ttl_for_provider_model(provider, session.model())?;
+        let ttl = chrono::TimeDelta::try_seconds(ttl.try_into().ok()?)?;
+        last_request
+            .checked_add_signed(ttl)
+            .map(|time| time.timestamp_millis())
+    });
+    SessionCatalogContext {
+        model: session.model().map(str::to_owned),
+        reasoning_effort: session.reasoning_effort().map(str::to_owned),
+        modes: session.pinned_skill_names().to_vec(),
+        cache_expires_at_ms,
+        activity: Some(session.catalog_activity()),
+    }
+}
+
 pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
     with_connection(|connection| upsert_with(connection, entry))
 }
 
 fn upsert_with(connection: &Connection, entry: &RecentSessionMetadata) -> Result<()> {
-    upsert_with_resume(connection, entry, None, None, None)
+    upsert_with_resume(connection, entry, None, None, None, None)
 }
 
 fn upsert_with_resume(
@@ -236,13 +278,14 @@ fn upsert_with_resume(
     short_name: Option<&str>,
     fingerprint: Option<&str>,
     updated_at: Option<&str>,
+    catalog_context: Option<&str>,
 ) -> Result<()> {
     connection.execute(
         "INSERT INTO recent_sessions (
              session_id, working_dir, generated_title, custom_title, todo_title,
              saved, updated_at_ms, last_active_at_ms, save_label,
-             resume_short_name, resume_fingerprint, resume_updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             resume_short_name, resume_fingerprint, resume_updated_at, catalog_context
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(session_id) DO UPDATE SET
              working_dir = excluded.working_dir,
              generated_title = excluded.generated_title,
@@ -254,7 +297,21 @@ fn upsert_with_resume(
              save_label = excluded.save_label,
              resume_short_name = excluded.resume_short_name,
              resume_fingerprint = excluded.resume_fingerprint,
-             resume_updated_at = excluded.resume_updated_at",
+             resume_updated_at = excluded.resume_updated_at,
+             catalog_context = COALESCE(excluded.catalog_context, recent_sessions.catalog_context)
+         WHERE (recent_sessions.working_dir, recent_sessions.generated_title,
+                recent_sessions.custom_title, recent_sessions.todo_title,
+                recent_sessions.saved, recent_sessions.updated_at_ms,
+                recent_sessions.last_active_at_ms, recent_sessions.save_label,
+                recent_sessions.resume_short_name, recent_sessions.resume_fingerprint,
+                recent_sessions.resume_updated_at, recent_sessions.catalog_context)
+             IS NOT (excluded.working_dir, excluded.generated_title,
+                     excluded.custom_title, excluded.todo_title,
+                     excluded.saved, excluded.updated_at_ms,
+                     excluded.last_active_at_ms, excluded.save_label,
+                     excluded.resume_short_name, excluded.resume_fingerprint,
+                     excluded.resume_updated_at,
+                     COALESCE(excluded.catalog_context, recent_sessions.catalog_context))",
         params![
             entry.session_id,
             entry.working_dir,
@@ -268,6 +325,7 @@ fn upsert_with_resume(
             short_name,
             fingerprint,
             updated_at,
+            catalog_context,
         ],
     )?;
     Ok(())
@@ -353,7 +411,9 @@ pub(crate) fn invalidate_resume_entries(ids: &[&str]) -> Result<()> {
         {
             let mut statement = transaction.prepare(
                 "UPDATE recent_sessions SET resume_fingerprint = NULL,
-                    resume_short_name = NULL, resume_updated_at = NULL WHERE session_id = ?1",
+                    resume_short_name = NULL, resume_updated_at = NULL WHERE session_id = ?1
+                    AND (resume_fingerprint, resume_short_name, resume_updated_at)
+                        IS NOT (NULL, NULL, NULL)",
             )?;
             for id in ids {
                 statement.execute([id])?;
@@ -399,7 +459,8 @@ fn refresh_todo_title_with(connection: &Connection, session_id: &str) -> Result<
         .is_some();
     if exists {
         connection.execute(
-            "UPDATE recent_sessions SET todo_title = ?2 WHERE session_id = ?1",
+            "UPDATE recent_sessions SET todo_title = ?2 WHERE session_id = ?1
+             AND todo_title IS NOT ?2",
             params![session_id, crate::todo::load_session_title(session_id)],
         )?;
     }
@@ -414,7 +475,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_title_uses_custom_then_todo_then_generated() {
+    fn write_amp_identical_upsert_does_not_change_the_row_or_wal() -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let path = home.path().join("index.sqlite3");
+        let wal = home.path().join("index.sqlite3-wal");
+        let connection = open_at(&path)?;
+        let mut entry = RecentSessionMetadata {
+            session_id: "session_write_amp".into(),
+            working_dir: None,
+            generated_title: Some("Title".into()),
+            custom_title: None,
+            todo_title: None,
+            saved: false,
+            save_label: None,
+            updated_at_ms: 1,
+            last_active_at_ms: None,
+        };
+        upsert_with_resume(
+            &connection,
+            &entry,
+            None,
+            Some("fingerprint"),
+            None,
+            Some("{}"),
+        )?;
+        let before = std::fs::metadata(&wal)?.len();
+        let changes = connection.total_changes();
+        for _ in 0..20 {
+            upsert_with_resume(
+                &connection,
+                &entry,
+                None,
+                Some("fingerprint"),
+                None,
+                Some("{}"),
+            )?;
+        }
+        assert_eq!(connection.total_changes(), changes);
+        assert_eq!(std::fs::metadata(&wal)?.len(), before);
+        entry.generated_title = None;
+        upsert_with_resume(
+            &connection,
+            &entry,
+            None,
+            Some("fingerprint"),
+            None,
+            Some("{}"),
+        )?;
+        assert_eq!(recent_with(&connection, 1)?, vec![entry]);
+        assert!(std::fs::metadata(&wal)?.len() > before);
+        Ok(())
+    }
+
+    #[test]
+    fn display_title_prefers_generated_over_todo_lane_labels() {
         let mut entry = RecentSessionMetadata {
             session_id: "session_test".into(),
             working_dir: None,
@@ -426,6 +540,8 @@ mod tests {
             updated_at_ms: 1,
             last_active_at_ms: None,
         };
+        assert_eq!(entry.display_title(), Some("Generated"));
+        entry.generated_title = None;
         assert_eq!(entry.display_title(), Some("Todo goal"));
         entry.custom_title = Some("Renamed".into());
         assert_eq!(entry.display_title(), Some("Renamed"));
@@ -449,6 +565,8 @@ mod tests {
         assert_eq!(entry.display_title(), Some("Renamed"));
         entry.custom_title = None;
         entry.saved = false;
+        assert_eq!(entry.display_title(), Some("Generated"));
+        entry.generated_title = None;
         assert_eq!(entry.display_title(), Some("Todo goal"));
     }
 }

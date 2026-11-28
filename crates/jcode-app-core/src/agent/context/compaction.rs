@@ -1,0 +1,777 @@
+use super::*;
+
+use crate::kv_cache_monitor::{MissReason, RequestCacheDomain};
+
+/// The outcome of the compaction routing runs before a forced account move.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PreMoveCompaction {
+    Compacted {
+        before: u64,
+        after: u64,
+    },
+    /// Compaction could not start: nothing to compact, or one already runs.
+    Skipped(String),
+}
+
+const SWITCHED_ROUTE_COLD_LIMIT: usize = 150_000;
+
+fn cold_route_limit(manager: &crate::compaction::CompactionManager) -> usize {
+    manager.token_budget().min(SWITCHED_ROUTE_COLD_LIMIT).min(
+        manager
+            .resolved_compaction_threshold_tokens()
+            .unwrap_or(usize::MAX),
+    )
+}
+
+pub(super) struct SwitchedRouteBudget {
+    pub(super) limit: usize,
+    pub(super) reduction: Option<(u64, u64)>,
+}
+
+fn switch_compaction_detail(
+    model: &str,
+    reason: MissReason,
+    before: u64,
+    after: Option<u64>,
+) -> String {
+    let size = match after {
+        Some(after) => format!("~{}K→~{}K", before / 1000, after / 1000),
+        None => format!("~{}K", before / 1000),
+    };
+    let domain = match reason {
+        MissReason::ProviderSwitch => "providers",
+        MissReason::AccountSwitch => "accounts",
+        _ => "models",
+    };
+    format!(
+        "Switching to {model}: compacting {size} before sending (cache is not shared across {domain})"
+    )
+}
+
+impl Agent {
+    pub(super) fn request_cache_domain(&self) -> RequestCacheDomain {
+        RequestCacheDomain {
+            provider: self.provider.name().into(),
+            model: self.provider.model(),
+            credential: self.provider.active_resolved_credential(),
+            account: self.kv_cache_account_identity(),
+        }
+    }
+
+    pub(super) fn request_cache_domain_switch(&self) -> Option<MissReason> {
+        let stored = self.session.cache_clock().last_domain;
+        let legacy;
+        let previous = if let Some(domain) = &stored {
+            domain
+        } else {
+            legacy = self.kv_cache_monitor.checkpoint_cache_domain()?;
+            &legacy
+        };
+        // We have no proof a different domain still has this transcript cached.
+        self.request_cache_domain().switch_from(previous)
+    }
+
+    pub(super) fn route_switch_compaction_notice(&self, event: &CompactionEvent) -> Option<String> {
+        if event.trigger != crate::compaction::ROUTE_SWITCH_COMPACTION_TRIGGER {
+            return None;
+        }
+        Some(switch_compaction_detail(
+            &self.provider.model(),
+            self.request_cache_domain_switch()?,
+            event.pre_tokens?,
+            event.post_tokens,
+        ))
+    }
+
+    /// Compacts on the account the session runs on now, while its prompt
+    /// cache is warm, and waits for the summary. Routing calls this right
+    /// before it moves the session, so the move rewrites only the summary.
+    /// Returns what happened: a compaction with the context size before and
+    /// after in tokens, or the expected reason it could not start. `Err` is
+    /// a compaction that started and failed.
+    pub(crate) async fn compact_on_current_account(&mut self) -> Result<PreMoveCompaction> {
+        let compaction = self.registry.compaction();
+        let mut manager = compaction.write().await;
+        let before = manager.effective_token_count_with(self.session.provider_messages());
+        let provider = self.provider.fork();
+        if let Err(reason) = manager.force_compact_with_policy(
+            self.session.provider_messages(),
+            provider,
+            crate::compaction::ManualCompactionPolicy::Standard,
+        ) {
+            return Ok(PreMoveCompaction::Skipped(reason));
+        }
+        self.wait_for_request_compaction(&mut manager).await?;
+        if let Some(error) = manager.take_compaction_error() {
+            anyhow::bail!("compaction before the move failed: {error}");
+        }
+        let after = manager.effective_token_count_with(self.session.provider_messages());
+        Ok(PreMoveCompaction::Compacted {
+            before: before as u64,
+            after: after as u64,
+        })
+    }
+
+    pub(super) async fn wait_for_request_compaction(
+        &mut self,
+        manager: &mut crate::compaction::CompactionManager,
+    ) -> Result<()> {
+        let started = Instant::now();
+        while manager.is_compacting() {
+            manager.check_and_apply_compaction_with(self.session.provider_messages());
+            if !manager.is_compacting() {
+                break;
+            }
+            anyhow::ensure!(
+                !self.is_graceful_shutdown(),
+                "Cancelled while reducing cold-cache context"
+            );
+            anyhow::ensure!(
+                started.elapsed() < Duration::from_secs(120),
+                "Cold-cache compaction timed out; refusing to resend the oversized prompt"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn compact_before_route_switch(
+        &mut self,
+        manager: &mut crate::compaction::CompactionManager,
+        model: &str,
+        reason: MissReason,
+        event_tx: Option<&crate::stream_batching::BatchingSender>,
+    ) -> Result<SwitchedRouteBudget> {
+        let target = cold_route_limit(manager);
+        let messages = self.session.provider_messages();
+        let before = manager.effective_token_count_with(messages);
+        if before < target {
+            return Ok(SwitchedRouteBudget {
+                limit: target,
+                reduction: None,
+            });
+        }
+
+        let detail = switch_compaction_detail(model, reason, before as u64, None);
+        logging::info(&detail);
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ServerEvent::StatusDetail { detail });
+        }
+
+        // Reuse any completed fold first, even if it had been waiting for the
+        // next turn to apply. Don't start a remote summarizer on the cold route.
+        manager.check_and_apply_compaction_with(messages);
+        if manager.effective_token_count_with(messages) >= target {
+            manager.start_route_switch_compaction(messages, self.provider.clone(), target);
+            self.wait_for_request_compaction(manager).await?;
+        }
+        let messages = self.session.provider_messages();
+        if manager.effective_token_count_with(messages) >= target {
+            if let Some(error) = manager.take_compaction_error() {
+                logging::warn(&format!("Route-switch snapcompact failed: {error}"));
+            }
+            manager
+                .hard_compact_for_route_switch(messages, target)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Cannot fit the cold request to {model}; refusing to send it: {error}"
+                    )
+                })?;
+        }
+        let after = manager.effective_token_count_with(messages);
+        anyhow::ensure!(
+            after < target,
+            "Cold request to {model} is still ~{}K tokens (target <{}K); refusing to send it",
+            after / 1000,
+            target / 1000,
+        );
+        Ok(SwitchedRouteBudget {
+            limit: target,
+            reduction: Some((before as u64, after as u64)),
+        })
+    }
+
+    pub(super) fn warn_missing_native_compaction_summary(
+        &mut self,
+        event_tx: Option<&crate::stream_batching::BatchingSender>,
+    ) {
+        let detail = format!("⚠ {}", crate::compaction::MISSING_NATIVE_SUMMARY);
+        logging::warn(&format!(
+            "[compaction] session={}: {detail}",
+            self.session.id()
+        ));
+        self.session
+            .record_replay_display_message("system", None, &detail);
+        self.persist_session_best_effort("missing native compaction summary warning");
+        if let Some(tx) = event_tx {
+            let _ = tx.send(ServerEvent::StatusDetail { detail });
+        }
+    }
+
+    /// Flush an idle session before optional process replacement. Never abandon
+    /// a pending compaction or lose a completed summary that has not been polled.
+    pub(crate) fn checkpoint_idle_runtime_upgrade(&mut self) -> Result<()> {
+        self.poll_compaction_completion_event();
+        let compaction = self.registry.compaction();
+        let manager = compaction
+            .try_read()
+            .map_err(|_| anyhow::anyhow!("compaction state is busy"))?;
+        anyhow::ensure!(!manager.is_compacting(), "compaction is still running");
+        self.session.adopt_compaction(manager.persisted_state());
+        // Prepared blank sessions also have externally visible IDs. Ordinary
+        // save intentionally skips these until the first user message.
+        self.session.save_prepared()?;
+        let pending = self
+            .soft_interrupt_queue
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("queued input is busy or poisoned"))?;
+        crate::soft_interrupt_store::overwrite(self.session_id(), &pending)?;
+        Ok(())
+    }
+
+    pub(super) fn note_compaction_applied(&mut self) {
+        crate::cache_keepalive::invalidate(self.session.id());
+        self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
+        self.tool_lock.unlock();
+        self.provider_session_id = None;
+        self.session.forget_provider_session();
+        if self.session.pinned_skill().is_some() {
+            self.active_skill = self.session.pinned_skill().map(str::to_owned);
+            self.announce_active_skill();
+        }
+    }
+
+    pub fn poll_compaction_completion_event(&mut self) -> Option<CompactionEvent> {
+        let provider_messages = self.session.messages_for_provider();
+        let compaction = self.registry.compaction();
+        let (event, decisions_updated) = match compaction.try_write() {
+            Ok(mut manager) => {
+                let event = manager.poll_compaction_event_with(&provider_messages);
+                let decisions_updated = manager.take_decisions_updated();
+                if event.is_some() || decisions_updated {
+                    self.sync_session_compaction_state_from_manager(&manager);
+                }
+                (event, decisions_updated)
+            }
+            Err(_) => return None,
+        };
+
+        if let Some(event) = event.as_ref() {
+            self.note_compaction_applied();
+            self.record_compaction_divider(event);
+        }
+        if event.is_some() || decisions_updated {
+            self.persist_session_best_effort("compaction completion/enrichment");
+        }
+
+        event
+    }
+
+    /// The server only calls this while a client is attached and owns no turn.
+    pub(crate) fn idle_cache_expiry_at(
+        &mut self,
+        now: std::time::SystemTime,
+    ) -> (bool, Option<CompactionEvent>) {
+        if self.is_swarm_worker() || !self.provider.uses_jcode_compaction() {
+            return (false, None);
+        }
+        let compaction = self.registry.compaction();
+        let Ok(mut manager) = compaction.try_write() else {
+            return (false, None);
+        };
+        let ttl = self.cache_expiry_ttl_secs(&manager);
+        if !manager.claim_idle_cache_expiry(
+            now,
+            ttl,
+            self.session
+                .last_cache_expiry_compaction_for()
+                .map(Into::into),
+        ) {
+            return (false, None);
+        }
+        let boundary = CompactionBoundary::Idle;
+        let messages = self.session.provider_messages();
+        let target = manager.cache_expiry_request_target(messages, now, ttl);
+        let fold_planned =
+            target.is_some() && manager.plan_cache_expiry_compaction(messages, now, ttl);
+        let fold_instead = self.prefer_cold_cache_fold(&manager, target, fold_planned);
+        if let Some((detail, Some(event))) =
+            self.maybe_shake_at(&mut manager, now, boundary, fold_instead, fold_planned)
+        {
+            logging::info(&detail);
+            return (false, Some(event));
+        }
+        (
+            self.maybe_cache_expiry_compaction(&mut manager, now, boundary),
+            None,
+        )
+    }
+
+    /// Opportunistic compaction while the session is idle but still waiting.
+    ///
+    /// The caller owns the definition of "waiting" (a swarm member still
+    /// running, a `bg` wait, an `await_members` dependency). This method only
+    /// decides whether the context is full enough to fold now, so that the next
+    /// user message finds a compacted transcript instead of triggering a
+    /// compaction in the middle of its own turn.
+    pub fn maybe_idle_precompact(&mut self) -> bool {
+        if self.is_swarm_worker() || !self.provider.uses_jcode_compaction() {
+            return false;
+        }
+        let now = std::time::SystemTime::now();
+        let compaction = self.registry.compaction();
+        let mut manager = match compaction.try_write() {
+            Ok(manager) => manager,
+            Err(_) => return false,
+        };
+        let ttl = self.cache_expiry_ttl_secs(&manager);
+        if manager.attempted_cache_expiry_compaction()
+            || self.cache_expiry_already_compacted(&manager, now, ttl)
+        {
+            return false;
+        }
+        let messages = self.session.provider_messages();
+        if !manager.plan_idle_precompaction_with(messages, now, ttl) {
+            return false;
+        }
+        let tokens = manager.effective_token_count_with(messages);
+        let started = manager.start_idle_precompaction(messages, self.provider.clone());
+        if started {
+            logging::info(&format!(
+                "[compaction] strategy={} tokens_before={} reason=idle_waiting",
+                crate::compaction::IDLE_PRECOMPACTION_TRIGGER,
+                tokens,
+            ));
+        }
+        started
+    }
+
+    /// Whether this agent is currently summarizing in the background.
+    ///
+    /// The compaction bus events are process-global, so a per-session client
+    /// must ask its own agent before painting a running divider.
+    pub fn is_compacting_now(&self) -> bool {
+        self.registry
+            .compaction()
+            .try_read()
+            .map(|manager| manager.is_compacting())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn poll_compaction_status(
+        &mut self,
+    ) -> (Option<CompactionEvent>, Option<String>, bool) {
+        let event = self.poll_compaction_completion_event();
+        let compaction = self.registry.compaction();
+        match compaction.try_write() {
+            Ok(mut manager) => (
+                event,
+                manager.take_compaction_error(),
+                manager.is_compacting(),
+            ),
+            Err(_) => (event, None, true),
+        }
+    }
+
+    pub fn request_manual_compaction(&mut self) -> (String, bool) {
+        if !self.provider.supports_compaction() {
+            return (
+                "Manual compaction is not available for this provider.".to_string(),
+                false,
+            );
+        }
+        let worker = self.is_swarm_worker();
+        if worker && let Err(error) = self.enforce_worker_request() {
+            return (error.to_string(), false);
+        }
+
+        let provider = self.provider.fork();
+        let cold = worker && self.request_cache_domain_switch().is_some();
+        let messages = self.session.messages_for_provider();
+        let compaction = self.registry.compaction();
+
+        match compaction.try_write() {
+            Ok(mut manager) => {
+                let stats = manager.stats_with(&messages);
+                let status_msg = format!(
+                    "**Context Status:**\n\
+                    • Messages: {} (active), {} (total history)\n\
+                    • Token usage: ~{}k (estimate ~{}k) / {}k ({:.1}%)\n\
+                    • Has summary: {}\n\
+                    • Compacting: {}",
+                    stats.active_messages,
+                    stats.total_turns,
+                    stats.effective_tokens / 1000,
+                    stats.token_estimate / 1000,
+                    manager.token_budget() / 1000,
+                    stats.context_usage * 100.0,
+                    if stats.has_summary { "yes" } else { "no" },
+                    if stats.is_compacting {
+                        "in progress..."
+                    } else {
+                        "no"
+                    }
+                );
+
+                use crate::compaction::ManualCompactionPolicy;
+                let policy = if worker {
+                    ManualCompactionPolicy::Worker {
+                        cold_limit: cold.then(|| cold_route_limit(&manager)),
+                    }
+                } else {
+                    ManualCompactionPolicy::Standard
+                };
+                match manager.force_compact_with_policy(&messages, provider, policy) {
+                    Ok(()) => (
+                        format!(
+                            "{}\n\n📦 **Compacting context** (manual) — summarizing older messages in the background to stay within the context window.\n\
+                            The summary will be applied automatically when ready.",
+                            status_msg
+                        ),
+                        true,
+                    ),
+                    Err(reason) => (
+                        format!("{status_msg}\n\n⚠ **Cannot compact:** {reason}"),
+                        false,
+                    ),
+                }
+            }
+            Err(_) => (
+                "⚠ Cannot access compaction manager (lock held)".to_string(),
+                false,
+            ),
+        }
+    }
+
+    fn is_context_limit_error(error: &str) -> bool {
+        let lower = error.to_lowercase();
+        lower.contains("context length")
+            || lower.contains("context window")
+            || lower.contains("maximum context")
+            || lower.contains("max context")
+            || lower.contains("token limit")
+            || lower.contains("too many tokens")
+            || lower.contains("prompt is too long")
+            || lower.contains("input is too long")
+            || lower.contains("request too large")
+            || lower.contains("length limit")
+            || lower.contains("maximum tokens")
+            || (lower.contains("exceeded") && lower.contains("tokens"))
+    }
+
+    /// Best-effort emergency recovery after a context-limit error.
+    ///
+    /// Performs a synchronous hard compaction and resets provider session state,
+    /// allowing the caller to retry the same turn immediately.
+    pub(super) fn try_auto_compact_after_context_limit(&mut self, error: &str) -> bool {
+        if crate::provider::openai_request::is_openai_encrypted_content_too_large_error(error)
+            && self.try_recover_oversized_openai_native_compaction()
+        {
+            return true;
+        }
+        // A provider HTTP 413 ("request too large") is a *byte-size* failure
+        // driven by inline base64 images, not a token-context overflow. Token
+        // accounting deliberately undercounts images, so ordinary compaction
+        // would not shrink the payload and the retry would 413 again. Strip
+        // oversized images first.
+        if self.try_recover_after_payload_too_large(error) {
+            return true;
+        }
+        if self.try_recover_after_image_rejection(error) {
+            return true;
+        }
+        if !Self::is_context_limit_error(error) {
+            return false;
+        }
+        if !self.provider.supports_compaction() {
+            return false;
+        }
+
+        let compaction = self.registry.compaction();
+
+        let (dropped, usage_pct) = match compaction.try_write() {
+            Ok(mut manager) => {
+                let (dropped, usage_pct) = {
+                    let all_messages = self.session.provider_messages();
+                    let usage_pct = manager.context_usage_with(all_messages) * 100.0;
+                    // Preserve the actual observed/estimated token count rather than
+                    // overwriting it with `provider.context_window()`: an upstream route
+                    // may reject at a smaller limit (e.g. 64k) than the catalog window (1M).
+                    let pre_tokens = manager.effective_token_count_with(all_messages) as u64;
+                    let dropped = match manager.hard_compact_with(all_messages) {
+                        Ok(dropped) => dropped,
+                        Err(reason) => {
+                            logging::warn(&format!(
+                                "Context-limit auto-recovery failed: hard compact failed ({})",
+                                reason
+                            ));
+                            return false;
+                        }
+                    };
+                    let post_tokens = manager.token_estimate_with(all_messages) as u64;
+                    self.last_recovery_compaction = Some((pre_tokens, post_tokens, dropped));
+                    (dropped, usage_pct)
+                };
+                self.sync_session_compaction_state_from_manager(&manager);
+                (dropped, usage_pct)
+            }
+            Err(_) => {
+                logging::warn("Context-limit auto-recovery skipped: compaction manager lock busy");
+                return false;
+            }
+        };
+
+        self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
+        self.tool_lock.unlock();
+        self.provider_session_id = None;
+        self.session.forget_provider_session();
+
+        logging::warn(&format!(
+            "Context limit exceeded; auto-compacted and retrying (dropped {} messages, usage was {:.1}%)",
+            dropped, usage_pct
+        ));
+        crate::runtime_memory_log::emit_event(
+            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+                "auto_compaction_applied",
+                "context_limit_auto_compaction",
+            )
+            .with_session_id(self.session.id().to_owned())
+            .with_detail(format!(
+                "dropped_messages={dropped},usage_pct={usage_pct:.1}"
+            ))
+            .force_attribution(),
+        );
+
+        true
+    }
+
+    /// Client notice for the context-limit auto-recovery that just ran,
+    /// carrying its measured before/after token counts.
+    pub(super) fn take_recovery_compaction_event(&mut self) -> crate::protocol::ServerEvent {
+        let stats = self.last_recovery_compaction.take();
+        crate::compaction::compaction_server_event(&crate::compaction::CompactionEvent {
+            trigger: "auto_recovery".to_string(),
+            method: Some("drop".to_string()),
+            pre_tokens: stats.map(|(pre, _, _)| pre),
+            post_tokens: stats.map(|(_, post, _)| post),
+            tokens_saved: stats.map(|(pre, post, _)| pre.saturating_sub(post)),
+            duration_ms: None,
+            messages_dropped: stats.map(|(_, _, dropped)| dropped),
+            messages_compacted: None,
+            summary_chars: None,
+            active_messages: None,
+        })
+    }
+
+    /// Best-effort recovery after a provider HTTP 413 "request too large" error.
+    ///
+    /// This failure is caused by the serialized request body (dominated by inline
+    /// base64 images) exceeding the provider's size cap, which is independent of
+    /// the token context window. We strip oversized images from the persisted
+    /// transcript, oldest-first, down to a conservative byte budget and reset the
+    /// provider session/cache so the caller can retry the same turn immediately.
+    fn try_recover_after_payload_too_large(&mut self, error: &str) -> bool {
+        if !crate::compaction::is_request_payload_too_large_error(error) {
+            return false;
+        }
+
+        let stripped = self
+            .session
+            .strip_oversized_images(crate::compaction::PAYLOAD_IMAGE_CHAR_BUDGET);
+        if stripped == 0 {
+            logging::warn(
+                "Request-too-large recovery skipped: no oversized inline images to strip",
+            );
+            return false;
+        }
+        self.reset_after_transcript_image_rewrite();
+
+        logging::warn(&format!(
+            "Request body exceeded provider size limit; stripped {} oversized inline image(s) and retrying",
+            stripped
+        ));
+        crate::runtime_memory_log::emit_event(
+            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+                "payload_too_large_recovered",
+                "request_payload_too_large",
+            )
+            .with_session_id(self.session.id().to_owned())
+            .with_detail(format!("images_stripped={stripped}"))
+            .force_attribution(),
+        );
+
+        true
+    }
+
+    /// A provider rejected an inline image with a deterministic 400 (bad
+    /// media type, undecodable data, a limit jcode does not model). Every
+    /// retry would replay the same image, so replace stored images with text
+    /// notes and retry once (#1712). The outbound clamp normally prevents
+    /// this; this catches provider rules it does not know about.
+    fn try_recover_after_image_rejection(&mut self, error: &str) -> bool {
+        if !crate::compaction::is_image_rejection_error(error) {
+            return false;
+        }
+        let stripped = self.session.strip_all_images();
+        if stripped == 0 {
+            return false;
+        }
+        self.reset_after_transcript_image_rewrite();
+        if let Err(err) = self.session.save() {
+            logging::warn(&format!(
+                "Image-rejection recovery: failed to persist stripped transcript: {err}"
+            ));
+        }
+        logging::warn(&format!(
+            "Provider rejected an inline image; replaced {stripped} image(s) with text notes and retrying"
+        ));
+        crate::runtime_memory_log::emit_event(
+            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+                "image_rejection_recovered",
+                "provider_image_rejected",
+            )
+            .with_session_id(self.session.id().to_owned())
+            .with_detail(format!("images_stripped={stripped}"))
+            .force_attribution(),
+        );
+        true
+    }
+
+    /// The transcript's images changed; reseed compaction bookkeeping and
+    /// reset provider session/cache state so the retry sends the new payload.
+    fn reset_after_transcript_image_rewrite(&mut self) {
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            let provider_messages = self.session.messages_for_provider();
+            manager.reset();
+            manager.set_context_cap_override(self.session.context_cap());
+            manager.set_budget_for_model(
+                self.provider.context_window(),
+                self.provider.name(),
+                &self.provider.model(),
+            );
+            if let Some(state) = self.session.compaction() {
+                manager.restore_persisted_state_with(&state, &provider_messages);
+            } else {
+                manager.seed_restored_messages_with(&provider_messages);
+            }
+            self.sync_session_compaction_state_from_manager(&manager);
+        }
+
+        self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
+        self.tool_lock.unlock();
+        self.provider_session_id = None;
+        self.session.forget_provider_session();
+    }
+
+    fn try_recover_oversized_openai_native_compaction(&mut self) -> bool {
+        let compaction = self.registry.compaction();
+        let recovered = match compaction.try_write() {
+            Ok(mut manager) => {
+                if !manager.discard_oversized_openai_native_compaction() {
+                    return false;
+                }
+                self.sync_session_compaction_state_from_manager(&manager);
+                true
+            }
+            Err(_) => {
+                logging::warn(
+                    "OpenAI native compaction recovery skipped: compaction manager lock busy",
+                );
+                false
+            }
+        };
+
+        if !recovered {
+            return false;
+        }
+
+        self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
+        self.tool_lock.unlock();
+        self.provider_session_id = None;
+        self.session.forget_provider_session();
+
+        logging::warn(
+            "OpenAI native compaction payload exceeded provider size limit; discarded native state and retrying with text fallback",
+        );
+        crate::runtime_memory_log::emit_event(
+            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+                "native_compaction_payload_recovered",
+                "openai_encrypted_content_too_large",
+            )
+            .with_session_id(self.session.id().to_owned())
+            .force_attribution(),
+        );
+
+        true
+    }
+
+    pub(super) fn effective_context_tokens_from_usage(
+        &self,
+        input_tokens: u64,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+    ) -> u64 {
+        // Shared heuristic (jcode-compaction-core): keeps the compaction
+        // manager's observed-token feed consistent with the client-side
+        // context display.
+        crate::compaction::effective_context_tokens_from_usage(
+            self.provider.name(),
+            input_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        )
+    }
+
+    pub(super) fn update_compaction_usage_from_stream(
+        &mut self,
+        input_tokens: u64,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+    ) {
+        if !self.provider.uses_jcode_compaction() || input_tokens == 0 {
+            return;
+        }
+        let observed = self.effective_context_tokens_from_usage(
+            input_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        );
+        // The provider can report more input tokens than the request carried, so
+        // the report is checked against the harness's own estimate of the same
+        // messages before it drives the context percentage or the compaction
+        // trigger.
+        let messages = self.session.provider_messages();
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            let estimate = manager.token_estimate_with(messages);
+            let accepted = manager.update_observed_input_tokens_with_estimate(observed, estimate);
+            manager.push_token_snapshot(accepted);
+        };
+    }
+
+    /// Push an embedding snapshot for the semantic compaction mode.
+    /// Called after each assistant turn with a short text snippet.
+    /// No-op if the embedding model is unavailable or mode is not semantic.
+    pub(super) fn push_embedding_snapshot_if_semantic(&mut self, text: &str) {
+        use crate::config::CompactionMode;
+        let is_semantic = {
+            let compaction = self.registry.compaction();
+            compaction
+                .try_read()
+                .map(|m| m.mode() == CompactionMode::Semantic)
+                .unwrap_or(false)
+        };
+        if !is_semantic {
+            return;
+        }
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            manager.push_embedding_snapshot(text);
+        };
+    }
+}

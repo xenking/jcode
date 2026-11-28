@@ -2,7 +2,7 @@ use super::commands::{REVIEW_PREFERRED_MODEL, active_session_id, active_working_
 use super::{App, DisplayMessage};
 use crate::id;
 use crate::message::{ContentBlock, Role, ToolCall};
-use crate::session::{Session, StoredMessage};
+use crate::session::{Inherit, Session, StoredMessage};
 use std::time::Instant;
 
 fn review_session_read_only_guardrails() -> &'static str {
@@ -39,11 +39,11 @@ fn resolve_feedback_target_session_id(session_id: &str) -> String {
             break;
         };
 
-        if !is_analysis_feedback_session_title(session.title.as_deref()) {
+        if !is_analysis_feedback_session_title(session.title()) {
             return current_id;
         }
 
-        let Some(parent_id) = session.parent_id.clone() else {
+        let Some(parent_id) = session.parent_id().map(str::to_owned) else {
             return current_id;
         };
 
@@ -63,12 +63,16 @@ pub(super) fn current_feedback_target_session_id(app: &App) -> String {
 
 fn judge_transcript_text_message(role: Role, text: String) -> StoredMessage {
     StoredMessage {
+        codemode: None,
+        ask: None,
+        attachment_data: None,
         id: id::new_id("message"),
         role,
         content: vec![ContentBlock::Text {
             text,
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -177,7 +181,7 @@ fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<Stor
     // user's `reasoning_display` mode, so strip reasoning up front rather than
     // letting a `Full` display preference leak hidden reasoning to the judge.
     let mut visible_parent = parent_session.clone();
-    let mut messages = std::mem::take(&mut visible_parent.messages);
+    let mut messages = visible_parent.cloned_messages();
     for message in &mut messages {
         message.content.retain(|block| {
             !matches!(
@@ -267,12 +271,12 @@ fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<Stor
 }
 
 fn apply_judge_visible_context_if_needed(session: &mut Session, title_override: Option<&str>) {
-    let effective_title = title_override.or(session.title.as_deref());
+    let effective_title = title_override.or(session.title());
     if !is_judge_session_title(effective_title) {
         return;
     }
 
-    let Some(parent_session_id) = session.parent_id.clone() else {
+    let Some(parent_session_id) = session.parent_id().map(str::to_owned) else {
         return;
     };
     let Ok(parent_session) = Session::load(&parent_session_id) else {
@@ -281,8 +285,8 @@ fn apply_judge_visible_context_if_needed(session: &mut Session, title_override: 
 
     let transcript = build_judge_visible_transcript_messages(&parent_session);
     session.replace_messages(transcript);
-    session.compaction = None;
-    session.provider_session_id = None;
+    session.adopt_compaction(None);
+    session.forget_provider_session();
 }
 
 /// Drop every side panel page belonging to the discarded session (#605).
@@ -322,6 +326,7 @@ pub(super) fn reset_current_session(app: &mut App) {
     app.swarm_plan_version = None;
     app.swarm_plan_swarm_id = None;
     app.queued_messages.clear();
+    app.queued_images.clear();
     app.queued_commands.clear();
     app.pasted_contents.clear();
     app.pending_images.clear();
@@ -330,10 +335,22 @@ pub(super) fn reset_current_session(app: &mut App) {
     app.improve_mode = None;
     let mut session = Session::create(None, None);
     session.mark_active();
-    session.model = Some(app.provider.model());
-    session.provider_key = crate::session::derive_session_provider_key(app.provider.name());
-    session.autoreview_enabled = Some(app.autoreview_enabled);
-    session.autojudge_enabled = Some(app.autojudge_enabled);
+    session.apply_route(crate::session::Route {
+        model: Some(app.provider.model()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: crate::session::derive_session_provider_key(app.provider.name()),
+        ..session.route()
+    });
+    session.apply_autonomy(crate::session::Autonomy {
+        autoreview_enabled: Some(app.autoreview_enabled),
+        ..session.autonomy()
+    });
+    session.apply_autonomy(crate::session::Autonomy {
+        autojudge_enabled: Some(app.autojudge_enabled),
+        ..session.autonomy()
+    });
     session.ensure_initial_session_context_message();
     app.session = session;
     clear_side_panel_for_new_session(app);
@@ -402,7 +419,7 @@ pub(super) fn handle_observe_command(app: &mut App, trimmed: &str) -> bool {
 
 fn current_autoreview_model_summary(app: &App) -> String {
     current_autoreview_model_override(app)
-        .or_else(|| app.session.model.clone())
+        .or_else(|| app.session.model().map(str::to_owned))
         .unwrap_or_else(|| app.provider.model())
 }
 
@@ -414,7 +431,7 @@ pub(super) fn current_autoreview_model_override(app: &App) -> Option<String> {
 
 fn current_autojudge_model_summary(app: &App) -> String {
     current_autojudge_model_override(app)
-        .or_else(|| app.session.model.clone())
+        .or_else(|| app.session.model().map(str::to_owned))
         .unwrap_or_else(|| app.provider.model())
 }
 
@@ -672,39 +689,53 @@ fn clone_session_for_review(
 ) -> anyhow::Result<(String, String)> {
     let parent_session_id = current_feedback_target_session_id(app);
     let mut child = Session::create(Some(parent_session_id), Some(session_title.to_string()));
-    child.replace_messages(app.session.messages.clone());
-    child.compaction = app.session.compaction.clone();
-    child.working_dir = app.session.working_dir.clone();
-    child.model = Some(initial_model);
-    child.provider_key = provider_key_override.or_else(|| app.session.provider_key.clone());
-    child.subagent_model = app.session.subagent_model.clone();
-    child.autoreview_enabled = Some(false);
-    child.autojudge_enabled = Some(false);
-    child.status = crate::session::SessionStatus::Closed;
+    child.replace_messages(app.session.cloned_messages());
+    child.inherit_from(
+        &app.session,
+        Inherit::COMPACTION | Inherit::WORKING_DIR | Inherit::SUBAGENT_MODEL,
+    );
+    child.apply_route(crate::session::Route {
+        model: Some(initial_model),
+        ..child.route()
+    });
+    child.apply_route(crate::session::Route {
+        provider_key: provider_key_override
+            .or_else(|| app.session.provider_key().map(str::to_owned)),
+        ..child.route()
+    });
+    child.apply_autonomy(crate::session::Autonomy {
+        autoreview_enabled: Some(false),
+        ..child.autonomy()
+    });
+    child.apply_autonomy(crate::session::Autonomy {
+        autojudge_enabled: Some(false),
+        ..child.autonomy()
+    });
+    child.mark_closed_unregistered();
     child.save()?;
-    Ok((child.id.clone(), child.display_name().to_string()))
+    Ok((child.id().to_owned(), child.display_name().to_string()))
 }
 
 fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
     let parent_session_id = active_session_id(app);
     let mut child = Session::create(Some(parent_session_id.clone()), None);
-    child.replace_messages(app.session.messages.clone());
-    child.compaction = app.session.compaction.clone();
-    child.system_prompt = app.session.system_prompt.clone();
-    child.working_dir = app.session.working_dir.clone();
-    child.model = app.session.model.clone();
-    child.provider_key = app.session.provider_key.clone();
-    child.route_api_method = app.session.route_api_method.clone();
-    child.subagent_model = app.session.subagent_model.clone();
-    child.autoreview_enabled = app.session.autoreview_enabled;
-    child.autojudge_enabled = app.session.autojudge_enabled;
-    child.status = crate::session::SessionStatus::Closed;
+    child.inherit_from(
+        &app.session,
+        Inherit::MESSAGES
+            | Inherit::COMPACTION
+            | Inherit::SYSTEM_PROMPT
+            | Inherit::WORKING_DIR
+            | Inherit::ROUTE
+            | Inherit::SUBAGENT_MODEL
+            | Inherit::REVIEW_TOGGLES,
+    );
+    child.mark_closed_unregistered();
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
     // continuing (and duplicating) the parent's current turn.
     child.append_fork_notice(&parent_session_id, app.session.display_name());
     child.save()?;
-    Ok((child.id.clone(), child.display_name().to_string()))
+    Ok((child.id().to_owned(), child.display_name().to_string()))
 }
 
 pub(super) fn prepare_review_spawned_session(
@@ -716,19 +747,37 @@ pub(super) fn prepare_review_spawned_session(
     parent_session_id_override: Option<String>,
 ) {
     if let Ok(mut session) = crate::session::Session::load(session_id) {
-        session.autoreview_enabled = Some(false);
-        session.autojudge_enabled = Some(false);
+        session.apply_autonomy(crate::session::Autonomy {
+            autoreview_enabled: Some(false),
+            ..session.autonomy()
+        });
+        session.apply_autonomy(crate::session::Autonomy {
+            autojudge_enabled: Some(false),
+            ..session.autonomy()
+        });
         if let Some(parent_session_id) = parent_session_id_override {
-            session.parent_id = Some(parent_session_id);
+            session.apply_lineage(crate::session::Lineage {
+                parent_id: Some(parent_session_id),
+                ..session.lineage()
+            });
         }
         if let Some(title) = title_override.clone() {
-            session.title = Some(title);
+            session.apply_titles(crate::session::Titles {
+                title: Some(title),
+                ..session.titles()
+            });
         }
         if let Some(model) = model_override {
-            session.model = Some(model);
+            session.apply_route(crate::session::Route {
+                model: Some(model),
+                ..session.route()
+            });
         }
         if provider_key_override.is_some() {
-            session.provider_key = provider_key_override;
+            session.apply_route(crate::session::Route {
+                provider_key: provider_key_override,
+                ..session.route()
+            });
         }
         apply_judge_visible_context_if_needed(&mut session, title_override.as_deref());
         let _ = session.save();
@@ -916,7 +965,7 @@ pub(super) fn queue_review_spawn_remote(
 pub(super) fn queue_autojudge_remote(app: &mut App) {
     if !app.autojudge_enabled
         || app.pending_split_request
-        || app.pending_split_startup_message.is_some()
+        || app.split_startup_staged()
     {
         return;
     }

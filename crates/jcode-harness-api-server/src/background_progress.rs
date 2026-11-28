@@ -20,6 +20,7 @@ pub struct BackgroundProgress {
     pub label: String,
     pub percent: Option<f32>,
     pub summary: String,
+    pub detail: Option<String>,
     pub done: bool,
 }
 
@@ -31,6 +32,7 @@ impl BackgroundProgress {
             label: self.label,
             percent: self.percent,
             summary: self.summary,
+            detail: self.detail,
             done: self.done,
         }
     }
@@ -66,6 +68,7 @@ pub fn parse_background_notification(message: &str) -> Option<BackgroundProgress
             label,
             percent: parse_percent(&summary),
             summary,
+            detail: None,
             done: false,
         });
     }
@@ -93,6 +96,7 @@ pub fn parse_background_notification(message: &str) -> Option<BackgroundProgress
             label,
             percent: None,
             summary,
+            detail: Some(trimmed.to_owned()),
             done: true,
         });
     }
@@ -167,5 +171,5 @@ fn parse_percent(summary: &str) -> Option<f32> {
 }
 
 #[cfg(test)]
-#[path = "background_progress_tests.rs"]
+#[path = "tests/background_progress_tests.rs"]
 mod tests;

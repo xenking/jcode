@@ -26,6 +26,13 @@ impl EnvVarGuard {
         crate::env::set_var(key, value);
         Self { key, prev }
     }
+
+    #[cfg(unix)]
+    fn remove(key: &'static str) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::remove_var(key);
+        Self { key, prev }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -143,6 +150,15 @@ fn swarm_effort_display_labels_default_to_low() {
 #[test]
 fn detected_resume_terminal_recognizes_handterm_term_program() {
     let _env_lock = crate::storage::lock_test_env();
+    // Higher-priority pane IDs would bypass the TERM_PROGRAM branch.
+    let _cleared = [
+        "HERDR_ENV",
+        "HERDR_PANE_ID",
+        "REX_BLOCK",
+        "HANDTERM_SESSION",
+        "HANDTERM_PID",
+    ]
+    .map(EnvVarGuard::remove);
     let _guard = EnvVarGuard::set_value("TERM_PROGRAM", "handterm");
     assert_eq!(detected_resume_terminal().as_deref(), Some("handterm"));
 }
@@ -270,10 +286,14 @@ fn resume_invocation_args_omits_blank_socket() {
 /// whether the developer machine has a published local build channel and of
 /// other tests mutating JCODE_HOME in parallel. Returns the guards that keep
 /// the environment pinned for the duration of the test.
+///
+/// Fields drop in order: restore `JCODE_HOME`, delete the tempdir, and only
+/// then release the env lock. Releasing the lock first lets another test take
+/// it and set its own `JCODE_HOME` before this guard's restore overwrites it.
 fn pinned_resume_test_home() -> (
-    std::sync::MutexGuard<'static, ()>,
-    tempfile::TempDir,
     EnvVarGuard,
+    tempfile::TempDir,
+    std::sync::MutexGuard<'static, ()>,
 ) {
     let env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -281,7 +301,7 @@ fn pinned_resume_test_home() -> (
     std::fs::create_dir_all(&current).expect("create builds/current");
     std::fs::write(current.join("jcode"), b"#!/bin/sh\n").expect("write fake jcode binary");
     let home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-    (env_lock, temp, home)
+    (home, temp, env_lock)
 }
 
 #[test]
@@ -348,6 +368,26 @@ fn format_countdown_until_handles_subminute_and_minutes() {
     assert!(soon_text.starts_with("in "));
     assert!(soon_text.ends_with('s'));
     assert!(medium_text.starts_with("in 2m"));
+}
+
+#[test]
+fn gather_ambient_info_does_not_invent_empty_state_after_load_failure() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let ambient = temp.path().join("ambient");
+    std::fs::create_dir(&ambient).unwrap();
+    let state = ambient.join("state.json");
+    std::fs::write(&state, "broken scheduler state").unwrap();
+
+    assert!(
+        gather_ambient_info_inner(true).is_none(),
+        "an unreadable scheduler must not appear idle with an empty queue"
+    );
+    assert_eq!(
+        std::fs::read_to_string(state).unwrap(),
+        "broken scheduler state"
+    );
 }
 
 #[test]

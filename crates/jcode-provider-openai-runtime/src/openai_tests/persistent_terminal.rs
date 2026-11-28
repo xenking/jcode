@@ -1,6 +1,27 @@
 // Synthetic two-turn wire regression: the saved cursor covers request input,
 // while previous_response_id also owns the response output appended after it.
 #[tokio::test]
+async fn persistent_turn_state_resets_only_for_new_user_turn() {
+    let provider = OpenAIProvider::new(prewarm_test_credentials());
+    let (mut state, server) = test_persistent_ws_state().await;
+    state.turn_state = Arc::clone(&provider.turn_state);
+    *provider.turn_state.lock().unwrap() = Some("first-token".into());
+    *provider.persistent_ws.lock().await = Some(state);
+    provider.begin_turn("turn-1").await;
+    assert!(provider.turn_state.lock().unwrap().is_none());
+    *provider.turn_state.lock().unwrap() = Some("second-token".into());
+    *provider.persistent_ws.lock().await = None;
+    provider.begin_turn("turn-1").await;
+    assert_eq!(
+        provider.turn_state.lock().unwrap().as_deref(),
+        Some("second-token")
+    );
+    provider.begin_turn("turn-2").await;
+    assert!(provider.turn_state.lock().unwrap().is_none());
+    server.abort();
+}
+
+#[tokio::test]
 async fn persistent_delta_wire_excludes_saved_response_output() {
     assert_delta_wire_excludes_saved_response_output(false, false).await;
 }
@@ -26,8 +47,18 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
     let callback =
         serde_json::json!({"type":"function_call_output", "call_id":"call_wire", "output":"done"});
     let injected = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"Client history"}]});
-    let output = vec![assistant.clone(), call.clone()];
-    let expected_delta = vec![callback.clone(), injected.clone()];
+    let wire_reasoning = serde_json::json!({"type":"reasoning", "id":"rs_wire", "status":"completed", "summary":[], "encrypted_content":"opaque-fixture", "content":null});
+    let wire_empty_reasoning = serde_json::json!({"type":"reasoning", "id":"rs_empty", "status":"completed", "summary":[], "encrypted_content":null});
+    let second_call = serde_json::json!({"type":"function_call", "id":"fc_second", "status":"completed", "call_id":"call_second", "name":"read", "arguments":"{}"});
+    let second_callback = serde_json::json!({"type":"function_call_output", "call_id":"call_second", "output":"second done"});
+    let output = vec![
+        wire_reasoning,
+        wire_empty_reasoning,
+        assistant.clone(),
+        call.clone(),
+        second_call.clone(),
+    ];
+    let expected_delta = vec![callback.clone(), second_callback.clone(), injected.clone()];
     let server = tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
@@ -58,6 +89,12 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
                     },
                 );
             }
+            if oauth && turn == 1 {
+                assert_eq!(
+                    request["client_metadata"]["x-codex-turn-state"],
+                    "sticky-test"
+                );
+            }
             if turn == 1 {
                 assert_eq!(request["previous_response_id"], "resp_wire_0");
                 assert_eq!(request["input"], serde_json::json!(expected_delta));
@@ -69,6 +106,9 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
             .await
             .unwrap();
             if turn == 0 {
+                if oauth {
+                    ws.send(WsMessage::Text(serde_json::json!({"type":"response.metadata", "headers":{"x-codex-turn-state":"sticky-test"}}).to_string())).await.unwrap();
+                }
                 for item in &output {
                     ws.send(WsMessage::Text(
                         serde_json::json!({"type":"response.output_item.done", "item":item})
@@ -99,6 +139,8 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_request_options: None,
+        turn_state: Arc::new(StdMutex::new(None)),
         last_input_item_hashes: persistent_ws_input_item_hashes(std::slice::from_ref(&user)),
         last_response_output: Vec::new(),
     })));
@@ -121,8 +163,8 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
                     &credentials,
                     &request,
                     &input,
-                    input.len(),
-                    &tx
+                    &tx,
+                    None,
                 )
                 .await,
                 PersistentWsResult::Success
@@ -136,14 +178,62 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
                         .unwrap()
                         .last_response_output
                         .len(),
-                    2
+                    5
                 );
-                input.extend([
-                    assistant.clone(),
-                    call.clone(),
-                    callback.clone(),
-                    injected.clone(),
-                ]);
+                // Build the second full input through the same normalizer as the
+                // real provider. In particular it inserts callbacks between calls.
+                let message = |role, content: Vec<ContentBlock>| ChatMessage {
+                    role,
+                    content: content.into(),
+                    timestamp: None,
+                    tool_duration_ms: None,
+                };
+                let messages = [
+                    message(
+                        jcode_message_types::Role::Assistant,
+                        vec![
+                            ContentBlock::Text {
+                                text: "Working".into(),
+                                cache_control: None,
+                            },
+                            ContentBlock::OpenAIReasoning {
+                                id: "rs_wire".into(),
+                                summary: vec![],
+                                encrypted_content: Some("opaque-fixture".into()),
+                                status: Some("completed".into()),
+                            },
+                            ContentBlock::ToolUse {
+                                id: "call_wire".into(),
+                                name: "read".into(),
+                                input: serde_json::json!({}),
+                                thought_signature: None,
+                            },
+                            ContentBlock::ToolUse {
+                                id: "call_second".into(),
+                                name: "read".into(),
+                                input: serde_json::json!({}),
+                                thought_signature: None,
+                            },
+                        ],
+                    ),
+                    message(
+                        jcode_message_types::Role::User,
+                        vec![
+                            ContentBlock::ToolResult {
+                                tool_use_id: "call_wire".into(),
+                                content: "done".into(),
+                                is_error: None,
+                            },
+                            ContentBlock::ToolResult {
+                                tool_use_id: "call_second".into(),
+                                content: "second done".into(),
+                                is_error: None,
+                            },
+                        ],
+                    ),
+                ];
+                input.extend(jcode_provider_openai::build_responses_input(&messages));
+                input.push(injected.clone());
             }
         }
         assert!(
@@ -254,6 +344,8 @@ async fn persistent_terminal_public_case(
         message_count: 1,
         last_input_item_count: 1,
         last_response_output: Vec::new(),
+        last_request_options: None,
+        turn_state: Arc::new(StdMutex::new(None)),
         last_input_item_hashes: persistent_ws_input_item_hashes(&full_input[..1]),
     });
     let outcome = tokio::time::timeout(Duration::from_secs(2), async {
@@ -372,6 +464,8 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
         message_count: 1,
         last_input_item_count: 1,
         last_response_output: Vec::new(),
+        last_request_options: None,
+        turn_state: Arc::new(StdMutex::new(None)),
         last_input_item_hashes: persistent_ws_input_item_hashes(&[
             serde_json::json!({"role":"user","content":"old"}),
         ]),
@@ -387,8 +481,8 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
                 serde_json::json!({"role":"user","content":"old"}),
                 serde_json::json!({"role":"user","content":"new"}),
             ],
-            2,
             &tx,
+            None,
         )
         .await
     });

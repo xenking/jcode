@@ -6,6 +6,64 @@ use anyhow::Result;
 use serde::de::DeserializeOwned;
 use std::path::Path;
 
+#[cfg(any(test, feature = "test-support"))]
+fn real_jcode_home() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| home.join(".jcode"))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn same_path(left: &Path, right: &Path) -> bool {
+    left == right
+        || matches!(
+            (left.canonicalize(), right.canonicalize()),
+            (Ok(left), Ok(right)) if left == right
+        )
+}
+
+/// Whether `path` is persistent state inside the developer's real `~/.jcode`.
+///
+/// Test temp homes are frequently created under `TMPDIR`, and jcode points
+/// `TMPDIR` at `~/.jcode/scratch` during its own runs, so a path merely below
+/// the real home is not proof of a leak. Only the state outside the temporary
+/// directory is off limits.
+#[cfg(any(test, feature = "test-support"))]
+fn is_real_home_state(path: &Path) -> bool {
+    let Some(real) = real_jcode_home() else {
+        return false;
+    };
+    if !(same_path(path, &real) || path.starts_with(&real)) {
+        return false;
+    }
+    if path.starts_with(std::env::temp_dir()) {
+        return false;
+    }
+    #[cfg(unix)]
+    if path.starts_with("/tmp") {
+        return false;
+    }
+    true
+}
+
+/// Refuse a write inside the developer's real `~/.jcode` from a test build.
+///
+/// [`jcode_dir`] already refuses to resolve the real home, but a caller can
+/// pass a path computed some other way (a literal, a stale snapshot path, an
+/// explicit `save_snapshot_to`). This is the last gate before persisting.
+#[allow(unused_variables)]
+pub fn assert_not_real_home(path: &Path) {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        if is_real_home_state(path) {
+            // Unreachable in production: this entire gate is test-only. A
+            // failed isolation invariant must stop before touching user state.
+            panic!(
+                "a test build is about to write {} inside the real jcode home: isolate JCODE_HOME instead of persisting there",
+                path.display()
+            );
+        }
+    }
+}
+
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     jcode_storage::read_json_with_recovery_handler(path, |event| match event {
         jcode_storage::StorageRecoveryEvent::CorruptPrimary { path, error } => {
@@ -35,6 +93,33 @@ pub fn lock_test_env() -> MutexGuard<'static, ()> {
     test_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Makes sessions created while it lives behave like a user's, not a test run's.
+///
+/// A session created with `JCODE_TEST_SESSION` set is flagged as a test session
+/// and skips persistence and cleanup paths that tests about saved versus
+/// unsaved sessions exercise. Those tests must not inherit the flag from the
+/// caller's shell. The caller must hold [`lock_test_env`] for its lifetime.
+#[cfg(any(test, feature = "test-support"))]
+pub struct RealSessionSemantics(Option<std::ffi::OsString>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl RealSessionSemantics {
+    pub fn pin() -> Self {
+        let previous = std::env::var_os("JCODE_TEST_SESSION");
+        crate::env::remove_var("JCODE_TEST_SESSION");
+        Self(previous)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for RealSessionSemantics {
+    fn drop(&mut self) {
+        if let Some(previous) = self.0.take() {
+            crate::env::set_var("JCODE_TEST_SESSION", previous);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -595,11 +595,9 @@ class PreviewWorkflowTests(unittest.TestCase):
     def test_main_push_ci_is_sha_isolated_but_pr_checks_remain_latest(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         concurrency = workflow.split('concurrency:\n', 1)[1].split('\nenv:', 1)[0]
-        self.assertIn("group: ci-${{ github.workflow }}-${{ github.ref }}-", concurrency)
-        self.assertIn("github.event_name == 'push' && "
-                      "(github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') "
-                      "&& github.sha || 'latest'", concurrency)
-        self.assertIn('cancel-in-progress: true', concurrency)
+        self.assertIn("group: ci-${{ github.event_name }}-${{ github.ref }}-", concurrency)
+        self.assertIn("github.event_name == 'pull_request' && 'latest' || github.sha", concurrency)
+        self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", concurrency)
 
 
 if __name__ == "__main__":

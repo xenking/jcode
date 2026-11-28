@@ -25,7 +25,7 @@ fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = false;
         app.auto_poke_default_on = false;
-        let session_id = app.session.id.clone();
+        let session_id = app.session.id().to_owned();
         assert!(!app.refresh_completed_todo_report(true));
         let mut todos = completion_report_todos("pending");
         crate::todo::save_todos(&session_id, &todos).unwrap();
@@ -147,7 +147,7 @@ fn todo_completion_report_saves_full_evidence_but_renders_compactly_without_poke
 fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
-        let session_id = app.session.id.clone();
+        let session_id = app.session.id().to_owned();
         let mut todos = completion_report_todos("completed");
         crate::todo::save_todos(&session_id, &todos).unwrap();
         assert!(app.refresh_completed_todo_report(true));
@@ -269,10 +269,10 @@ fn todo_completion_report_refreshes_evidence_and_preserves_previous_cycles() {
 }
 
 #[test]
-fn todo_completion_report_uses_remote_session_and_runs_before_other_gates() {
+fn todo_completion_report_can_explicitly_render_remote_session_without_continuation() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
-        let wrapper = app.session.id.clone();
+        let wrapper = app.session.id().to_owned();
         crate::todo::save_todos(&wrapper, &completion_report_todos("pending")).unwrap();
         let remote = "session_completion_report_remote";
         app.is_remote = true;
@@ -281,6 +281,10 @@ fn todo_completion_report_uses_remote_session_and_runs_before_other_gates() {
         app.auto_poke_default_on = false;
         app.auto_poke_incomplete_todos = false;
         assert!(!app.schedule_auto_poke_followup_if_needed());
+        // Daemon turn boundaries do not read client-side policy state. An
+        // explicit report refresh still uses the selected session correctly.
+        assert!(completion_report_messages(&app).is_empty());
+        assert!(app.refresh_completed_todo_report(true));
         assert_eq!(completion_report_messages(&app).len(), 1);
         assert!(app.queued_messages.is_empty());
     });

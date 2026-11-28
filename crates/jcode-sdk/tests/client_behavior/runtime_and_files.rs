@@ -85,6 +85,8 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
     let seen = std::sync::Arc::clone(&requests);
     let routes = vec![
         ModelRouteInfo {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             usage: Some(jcode_sdk::ModelUsage {
                 count: 7,
                 last_used_unix_secs: Some(100),
@@ -97,14 +99,20 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
             api_method: "messages".to_string(),
             available: true,
             detail: "ready".to_string(),
+            account: None,
+            icon: None,
         },
         ModelRouteInfo {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             usage: None,
             model: "gemini".to_string(),
             provider: "google".to_string(),
             api_method: "generate_content".to_string(),
             available: true,
             detail: "ready".to_string(),
+            account: None,
+            icon: None,
         },
     ];
     let reply_routes = routes.clone();
@@ -120,6 +128,8 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
             | ApiRequest::InvalidateUsage { .. } => ApiEvent::Ok,
             ApiRequest::Ping => ApiEvent::Pong,
             ApiRequest::GetRuntimeInfo { .. } => ApiEvent::RuntimeInfo {
+                speed_mode: Default::default(),
+                speed_options: Vec::new(),
                 session_id: "s1".to_string(),
                 provider: Some("anthropic".to_string()),
                 model: Some("claude".to_string()),

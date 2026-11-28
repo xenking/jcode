@@ -75,7 +75,7 @@ impl App {
         // background and surface it via a UiActivity card. Short timeout keeps
         // this responsive; offline failures degrade to a quiet log line.
         if configured_key {
-            let session_id = self.session.id.clone();
+            let session_id = self.session.id().to_owned();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
                     match crate::subscription_api::fetch_subscription_me().await {

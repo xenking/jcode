@@ -28,6 +28,31 @@ test("ndjson decoder reassembles frames split across chunks", () => {
   ]);
 });
 
+test("sendSkillMessage forwards daemon-owned skill activation without awaiting an ack", async (t) => {
+  const received: unknown[] = [];
+  const server = await startMockHarness({
+    onRequest(request) {
+      const { v, id, ...message } = request;
+      assert.equal(v, 1);
+      assert.equal(typeof id, "number");
+      received.push(message);
+    },
+  });
+  t.after(() => server.close());
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  t.after(() => client.close());
+  await client.sendSkillMessage("s1", "inspect", "verify-probe", [], "keep context");
+  await waitFor(() => received.length === 1);
+  assert.deepEqual(received, [{
+    req: "send_skill_message",
+    session_id: "s1",
+    content: "inspect",
+    active_skill: "verify-probe",
+    images: [],
+    system_reminder: "keep context",
+  }]);
+});
+
 test("handshake records server identity and capabilities", async () => {
   const server = await startMockHarness();
   const client = await JcodeClient.connect({ socketPath: server.socketPath });
@@ -59,6 +84,29 @@ test("replies are correlated by id even when out of order", async () => {
   assert.deepEqual(sessions, [{ session_id: "s1", status: "idle" }]);
   client.close();
   await server.close();
+});
+
+test("attach reports pending asks without conflating empty and unavailable snapshots", async (t) => {
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      assert.equal(request.req, "attach_session");
+      const session = { session_id: request.session_id, status: "idle" };
+      const pending = request.session_id === "pending" ? ["ask-1"] : [];
+      send({
+        v: 1, reply_to: request.id, ev: "attached", session,
+        ...(request.session_id === "legacy" ? {} : { pending_ask_ids: pending }),
+      });
+    },
+  });
+  t.after(() => server.close());
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  t.after(() => client.close());
+  assert.deepEqual(await client.attachSessionWithPendingAsks("pending"), {
+    session: { session_id: "pending", status: "idle" }, pendingAskIds: ["ask-1"],
+  });
+  assert.deepEqual((await client.attachSessionWithPendingAsks("empty")).pendingAskIds, []);
+  assert.equal((await client.attachSessionWithPendingAsks("legacy")).pendingAskIds, undefined);
+  assert.deepEqual(await client.attachSession("pending"), { session_id: "pending", status: "idle" });
 });
 
 test("error frames reject as HarnessError", async () => {
@@ -280,6 +328,94 @@ test("sendMessage retains the legacy images argument", async () => {
   assert.equal(received.no_reply, undefined);
   client.close();
   await server.close();
+});
+
+test("sendMessage transmits file and pasted text attachments", async () => {
+  let received: unknown;
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "send_message") {
+        received = request.attachments;
+        send({ v: 1, ev: "message_accepted", session_id: request.session_id });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const attachments = [
+    { type: "file", name: "a.txt", mime: "text/plain", size: 3, data: "YWJj" },
+    { type: "pasted_text", text: "one\ntwo" },
+  ];
+  try {
+    await client.sendMessage("s1", "hello", { attachments });
+    assert.deepEqual(received, attachments);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
+test("setQueuedPromptEditing transmits the hold and release for the same prompt", async () => {
+  const holds: Array<[string, string, string, boolean]> = [];
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "set_queued_prompt_editing") {
+        holds.push([request.session_id, request.client_id, request.prompt_id, request.editing]);
+        send({ v: 1, reply_to: request.id, ev: "ok" });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    await client.setQueuedPromptEditing("s1", "c1", "p1", true);
+    await client.setQueuedPromptEditing("s1", "c1", "p1", false);
+    assert.deepEqual(holds, [["s1", "c1", "p1", true], ["s1", "c1", "p1", false]]);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
+test("listDraftModels requests a catalog without a session", async () => {
+  let calls = 0;
+  const server = await startMockHarness({
+    capabilities: ["draft_model_catalog"],
+    onRequest(request, send) {
+      if (request.req === "list_draft_models") {
+        calls += 1;
+        assert.equal("session_id" in request, false);
+        send({ v: 1, reply_to: request.id, ev: "draft_models", current: "current", routes: [] });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    assert.deepEqual(await client.listDraftModels(), { current: "current", routes: [] });
+    assert.equal(calls, 1);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
+test("editQueuedPrompt transmits attachments", async () => {
+  let received: unknown;
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "edit_queued_prompt") {
+        received = request.attachments;
+        send({ v: 1, reply_to: request.id, ev: "queued_prompt_edited", session_id: request.session_id, prompt_id: request.prompt_id, outcome: "edited" });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const attachments = [{ type: "pasted_text" as const, text: "one\ntwo" }];
+  try {
+    assert.equal(await client.editQueuedPrompt("s1", "c1", "p1", "hello", [], attachments), "edited");
+    assert.deepEqual(received, attachments);
+  } finally {
+    client.close();
+    await server.close();
+  }
 });
 
 test("sendMessage noReply waits for request ok and does not wait for turn events", async () => {

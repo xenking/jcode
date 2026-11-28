@@ -4,6 +4,8 @@ mod account_selection;
 pub mod activation;
 pub mod anthropic;
 pub mod antigravity;
+pub mod auto_reset_trigger;
+mod background_routes;
 pub mod bedrock;
 mod catalog_memo;
 mod catalog_refresh;
@@ -41,7 +43,7 @@ use account_failover::{
     account_usage_probe, active_account_label_for_provider, maybe_annotate_limit_summary,
     same_provider_account_failover_enabled,
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 #[cfg(test)]
 use jcode_provider_core::FailoverDecision;
@@ -50,7 +52,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Instant;
 
-pub use account_failover::{has_alternate_account_in_pool, has_eligible_alternate_account};
+pub use account_failover::{
+    has_alternate_account_in_pool, has_eligible_alternate_account, set_routing_decider,
+};
 pub use catalog_routes::{
     append_simplified_anthropic_model_routes, remote_current_openai_compatible_route_for_model,
     remote_model_is_server_copilot_only, remote_model_routes_fallback,
@@ -59,6 +63,7 @@ pub use catalog_routes::{
 };
 pub use jcode_provider_core::attempt_tracker;
 pub use jcode_provider_core::cli_provider_arg_for_session_key;
+pub use jcode_provider_core::failover::usage_limit_details;
 pub use jcode_provider_core::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, CHEAPNESS_REFERENCE_INPUT_TOKENS,
     CHEAPNESS_REFERENCE_OUTPUT_TOKENS, CredentialMode, DEFAULT_CONTEXT_LIMIT, EventStream,
@@ -180,145 +185,24 @@ pub fn stores_reasoning_content_for_context(provider_name: &str) -> bool {
     if !crate::config::config().provider.preserve_reasoning_context {
         return false;
     }
-    matches!(
-        provider_name.to_ascii_lowercase().as_str(),
-        "openrouter" | "anthropic" | "openai"
-    )
+    crate::message::is_anthropic_reasoning_provider(provider_name)
+        || provider_name.eq_ignore_ascii_case("openrouter")
+        || provider_name.eq_ignore_ascii_case("openai")
 }
 
-// Keep inactive direct profiles on the same 15-minute soft-refresh cadence as
-// the active OpenRouter/OpenAI-compatible runtime. We continue serving the
-// cached routes immediately while a background refresh updates the catalog.
-pub(crate) const OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS: u64 = 15 * 60;
+pub use crate::context_limits::{cached_context_limit_for_model, populate_context_limits};
 
-fn openai_compatible_profile_catalog_cache_is_stale(cached_at: u64, now: u64) -> bool {
-    now.saturating_sub(cached_at) >= OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS
-}
-
-pub(crate) fn cached_live_models_for_openai_compatible_profile(
-    resolved: &crate::provider_catalog::ResolvedOpenAiCompatibleProfile,
-) -> Option<(Vec<String>, bool)> {
-    let cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&resolved.id)?;
-    let cache_is_stale = jcode_provider_openrouter::current_unix_secs()
-        .map(|now| openai_compatible_profile_catalog_cache_is_stale(cache.cached_at, now))
-        .unwrap_or(false);
-    let source_api_base = cache
-        .source_api_base
-        .as_deref()
-        .and_then(crate::provider_catalog::normalize_api_base)?;
-    let expected_api_base = crate::provider_catalog::normalize_api_base(&resolved.api_base)?;
-    if source_api_base != expected_api_base {
-        return None;
-    }
-
-    let models = cache
-        .models
-        .into_iter()
-        .map(|model| model.id.trim().to_string())
-        .filter(|model| !model.is_empty())
-        .collect::<Vec<_>>();
-    if models.is_empty() {
-        None
-    } else {
-        Some((models, cache_is_stale))
-    }
-}
-
-fn direct_openai_compatible_profile_routes(
-    profile: crate::provider_catalog::OpenAiCompatibleProfile,
-) -> Vec<ModelRoute> {
-    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-    let static_models = crate::provider_catalog::openai_compatible_profile_static_models(profile);
-    // Pure read: the catalog scheduler owns refresh cadence, so rendering
-    // routes cannot fan out HTTP requests.
-    let (mut models, from_live_catalog) = if let Some((models, _cache_is_stale)) =
-        cached_live_models_for_openai_compatible_profile(&resolved)
-    {
-        (models, true)
-    } else {
-        let mut models = static_models;
-        if models.is_empty()
-            && let Some(default_model) = resolved.default_model.as_ref()
-            && !default_model.trim().is_empty()
-        {
-            models.push(default_model.trim().to_string());
-        }
-        (models, false)
-    };
-
-    let provider = resolved.display_name.clone();
-    let api_method = format!("openai-compatible:{}", resolved.id);
-    let detail = if from_live_catalog {
-        resolved.api_base.clone()
-    } else if resolved.api_base.trim().is_empty() {
-        "fallback: static provider model list".to_string()
-    } else {
-        format!(
-            "{}; fallback: static provider model list",
-            resolved.api_base
-        )
-    };
-
-    let mut routes = Vec::new();
-    for model in models.drain(..) {
-        if !is_listable_model_name(&model)
-            || !crate::provider_catalog::openai_compatible_profile_model_supports_chat(
-                &resolved.id,
-                &model,
-            )
-            || routes.iter().any(|route: &ModelRoute| route.model == model)
-        {
-            continue;
-        }
-
-        routes.push(ModelRoute {
-            model,
-            provider: provider.clone(),
-            api_method: api_method.clone(),
-            available: true,
-            detail: detail.clone(),
-            usage: None,
-            cheapness: None,
-        });
-    }
-
-    routes
-}
-
-fn standard_openrouter_profile_configured() -> bool {
-    crate::provider_catalog::load_env_value_from_env_or_config(
-        "OPENROUTER_API_KEY",
-        "openrouter.env",
-    )
-    .is_some()
-}
-
-fn configured_standard_openrouter_profile_routes() -> Vec<ModelRoute> {
-    let Some(cache) = jcode_provider_openrouter::load_disk_cache_entry_for_namespace("openrouter")
-    else {
-        return Vec::new();
-    };
-
-    let source_matches_openrouter = cache
-        .source_api_base
-        .as_deref()
-        .and_then(crate::provider_catalog::normalize_api_base)
-        .map(|base| base.contains("openrouter.ai"))
-        .unwrap_or(false);
-    if !source_matches_openrouter {
-        return Vec::new();
-    }
-
-    let available = standard_openrouter_profile_configured();
-    cache
-        .models
-        .into_iter()
-        .map(|model| model.id.trim().to_string())
-        .filter(|model| is_listable_model_name(model))
-        .map(|model| build_openrouter_auto_route(&model, available, String::new()))
-        .collect()
-}
-
+#[path = "direct_profile_routes.rs"]
+mod direct_profile_routes;
+#[cfg(test)]
+pub(crate) use direct_profile_routes::OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS;
+pub(crate) use direct_profile_routes::cached_live_models_for_openai_compatible_profile;
+#[cfg(test)]
+use direct_profile_routes::openai_compatible_profile_catalog_cache_is_stale;
+use direct_profile_routes::{
+    configured_standard_openrouter_profile_routes, direct_openai_compatible_profile_routes,
+    standard_openrouter_profile_configured,
+};
 /// Strip an explicit Jcode subscription prefix (`jcode:` or
 /// `jcode-subscription:`) from a model spec.
 pub(crate) fn jcode_subscription_model_prefix(model: &str) -> Option<&str> {
@@ -341,9 +225,8 @@ pub use self::models::{
     ModelCatalogHttpStatus, OpenAIModelCatalog, anthropic_catalog_scope_for_route,
     begin_anthropic_model_catalog_refresh, begin_anthropic_model_catalog_refresh_for_scope,
     begin_openai_model_catalog_refresh, cached_anthropic_model_ids,
-    cached_anthropic_model_ids_for_scope, cached_context_limit_for_model, cached_openai_model_ids,
-    cached_openai_reasoning_efforts, clear_all_model_unavailability_for_account,
-    clear_all_provider_unavailability_for_account,
+    cached_anthropic_model_ids_for_scope, cached_openai_model_ids, cached_openai_reasoning_efforts,
+    clear_all_model_unavailability_for_account, clear_all_provider_unavailability_for_account,
     clear_claude_provider_unavailability_for_account_label, clear_model_unavailable_for_account,
     clear_openai_provider_unavailability_for_account_label, clear_provider_unavailable_for_account,
     context_limit_for_model, context_limit_for_model_with_provider, fetch_anthropic_model_catalog,
@@ -357,13 +240,12 @@ pub use self::models::{
     openai_platform_api_key_configured, persist_anthropic_model_catalog,
     persist_anthropic_model_catalog_for_scope, persist_openai_model_catalog,
     populate_account_models, populate_anthropic_models, populate_anthropic_models_for_scope,
-    populate_context_limits, populate_context_limits_from_config,
-    populate_context_limits_from_config_value, provider_for_model, provider_for_model_with_hint,
-    provider_unavailability_detail_for_account, provider_unavailability_detail_for_account_label,
-    record_model_unavailable_for_account, record_provider_unavailable_for_account,
-    record_provider_unavailable_for_account_label, refresh_openai_model_catalog_in_background,
-    resolve_model_capabilities, should_refresh_anthropic_model_catalog,
-    should_refresh_anthropic_model_catalog_for_scope, should_refresh_openai_model_catalog,
+    provider_for_model, provider_for_model_with_hint, provider_unavailability_detail_for_account,
+    provider_unavailability_detail_for_account_label, record_model_unavailable_for_account,
+    record_provider_unavailable_for_account, record_provider_unavailable_for_account_label,
+    refresh_openai_model_catalog_in_background, resolve_model_capabilities,
+    should_refresh_anthropic_model_catalog, should_refresh_anthropic_model_catalog_for_scope,
+    should_refresh_openai_model_catalog,
 };
 pub use self::models::{
     begin_openai_model_catalog_refresh_for_scope, cached_openai_model_ids_for_scope,
@@ -372,7 +254,8 @@ pub use self::models::{
     get_best_available_openai_model_for_scope, known_openai_model_ids_for_scope,
     model_availability_for_scope, openai_catalog_scope_for_credential,
     persist_openai_model_catalog_for_scope, populate_account_models_for_scope,
-    record_model_unavailable_for_scope, refresh_openai_model_catalog_in_background_for_scope,
+    publish_openai_model_catalog_refresh, record_model_unavailable_for_scope,
+    refresh_openai_model_catalog_in_background_for_scope,
     should_refresh_openai_model_catalog_for_scope,
 };
 pub use self::selection::DefaultModelSelection;
@@ -473,7 +356,10 @@ impl MultiProvider {
         tools: &[ToolDefinition],
         mode: CompletionMode<'_>,
     ) -> Result<bool> {
-        if !self.provider_uses_oauth_accounts(provider) {
+        if jcode_provider_core::worker_request_is_pinned()
+            || !self.provider_uses_oauth_accounts(provider)
+            || account_failover::routing_decides(provider, &self.model())
+        {
             return Ok(false);
         }
         let config = crate::config::Config::load().provider;
@@ -485,13 +371,13 @@ impl MultiProvider {
         if !enabled {
             return Ok(false);
         }
+        let account = self
+            .selected_account_for_provider(provider)
+            .or_else(|| active_account_label_for_provider(provider));
         if let Some(prompt) = self.auto_reset_route_prompt(provider, reason, messages, tools, mode)
         {
             // Preserve the router's exact-route approval/countdown boundary.
             // A reset must not spend a grant while a permitted route is ready.
-            let account = self
-                .selected_account_for_provider(provider)
-                .or_else(|| active_account_label_for_provider(provider));
             models::record_provider_unavailable_for_account_label(
                 Self::provider_key(provider),
                 account.as_deref(),
@@ -499,9 +385,38 @@ impl MultiProvider {
             );
             return Err(anyhow::anyhow!(prompt.to_error_message()));
         }
-        let account = self
-            .selected_account_for_provider(provider)
-            .or_else(|| active_account_label_for_provider(provider));
+        let decision = account_failover::multi_account_provider_kind(provider).map(|kind| {
+            auto_reset_trigger::decide(
+                config.auto_reset_trigger,
+                config.auto_reset_min_wait_minutes,
+                &auto_reset_trigger::cached_input(kind, account.as_deref(), true),
+                chrono::Utc::now(),
+            )
+        });
+        let Some(decision) = decision else {
+            return Ok(false);
+        };
+        let account_name = account.clone().unwrap_or_else(|| "default".into());
+        crate::logging::info(&format!(
+            "Automatic earned reset decision for {} ({}): {} [trigger={}, min_wait={}m]: {}",
+            Self::provider_label(provider),
+            account_name,
+            if decision.is_redeem() {
+                "redeem"
+            } else {
+                "wait"
+            },
+            config.auto_reset_trigger.as_str(),
+            config.auto_reset_min_wait_minutes,
+            decision.reason()
+        ));
+        if !decision.is_redeem() {
+            return Ok(false);
+        }
+        if std::env::var_os("JCODE_AUTO_RESET_DRY_RUN").is_some_and(|v| !v.is_empty() && v != "0") {
+            crate::logging::info("Automatic earned reset: dry run, not redeeming");
+            return Ok(false);
+        }
         let reset = match provider {
             ActiveProvider::OpenAI => crate::usage::auto_reset_weekly_usage(account).await,
             ActiveProvider::Claude => crate::usage::auto_reset_fable_usage(account).await,
@@ -509,12 +424,20 @@ impl MultiProvider {
         };
         Ok(match reset {
             Ok(true) => {
+                crate::logging::info(&format!(
+                    "Automatic earned reset REDEEMED for {} ({}): {}",
+                    Self::provider_label(provider),
+                    account_name,
+                    decision.reason()
+                ));
                 self.startup_notices
                     .write()
                     .unwrap_or_else(|p| p.into_inner())
                     .push(format!(
-                        "{} usage is available again after earned-reset recovery. Continuing automatically.",
-                        Self::provider_label(provider)
+                        "{} ({}) redeemed one earned usage reset ({}). Continuing automatically.",
+                        Self::provider_label(provider),
+                        account_name,
+                        decision.reason()
                     ));
                 true
             }
@@ -541,7 +464,12 @@ impl MultiProvider {
         {
             return None;
         }
-        let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
+        let (chars, tokens) = Self::estimate_request_input(
+            jcode_message_types::TokenFamily::from_model(&self.model()),
+            messages,
+            tools,
+            mode,
+        );
         self.cross_provider_pool_prompt(provider, provider, reason.to_owned(), chars, tokens)
     }
 
@@ -604,7 +532,10 @@ impl MultiProvider {
         mode: CompletionMode<'_>,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        self.bind_auto_account_for_request(self.active_provider())?;
+        let premium = self.speed_mode() != jcode_provider_core::SpeedMode::Standard;
+        if !premium {
+            self.bind_auto_account_for_request(self.active_provider())?;
+        }
         self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
 
@@ -635,6 +566,33 @@ impl MultiProvider {
             };
 
         let active = self.active_provider();
+        if premium {
+            let provider = self
+                .speed_provider()
+                .context("The configured speed route is no longer available")?;
+            self.bind_provider_session(provider.as_ref());
+            return match mode {
+                CompletionMode::Unified { system } => {
+                    provider
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                }
+                CompletionMode::Split {
+                    system_static,
+                    system_dynamic,
+                } => {
+                    provider
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await
+                }
+            };
+        }
         // Saved account requests remain session-local. Only configured pool
         // members may propose another exact account after a startup failure.
         if let Some(bound_label) = self.selected_account_for_provider(active) {
@@ -655,14 +613,11 @@ impl MultiProvider {
                 );
             }
             if let Some(reason) =
-                models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
-                    .or_else(|| {
-                        account_failover::multi_account_provider_kind(active)
-                            .filter(|kind| {
-                                crate::usage::account_known_exhausted(*kind, &bound_label)
-                            })
-                            .map(|_| "OAuth usage exhausted".to_string())
-                    })
+                models::bound_account_quota_cooldown(key, &bound_label).or_else(|| {
+                    account_failover::multi_account_provider_kind(active)
+                        .filter(|kind| crate::usage::account_known_exhausted(*kind, &bound_label))
+                        .map(|_| "OAuth usage exhausted".to_string())
+                })
                 && !self
                     .try_auto_banked_reset(active, &reason, messages, tools, mode)
                     .await?
@@ -727,8 +682,12 @@ impl MultiProvider {
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
-        let (estimated_input_chars, estimated_input_tokens) =
-            Self::estimate_request_input(messages, tools, mode);
+        let (estimated_input_chars, estimated_input_tokens) = Self::estimate_request_input(
+            jcode_message_types::TokenFamily::from_model(&self.model()),
+            messages,
+            tools,
+            mode,
+        );
 
         for candidate in sequence {
             let label = Self::provider_label(candidate);
@@ -1104,7 +1063,7 @@ impl MultiProvider {
                 let provider = external::instantiate_openrouter_runtime(
                     external::OpenRouterRuntimeSpec::NamedProfile {
                         name: profile_name.to_string(),
-                        config,
+                        config: Box::new(config),
                     },
                 )?;
                 registry
@@ -1814,6 +1773,12 @@ impl Default for MultiProvider {
 
 #[async_trait]
 impl Provider for MultiProvider {
+    async fn begin_turn(&self, turn_id: &str) {
+        if let Some(provider) = self.openai_provider() {
+            provider.begin_turn(turn_id).await;
+        }
+    }
+
     fn set_session_id(&self, session_id: &str) {
         *self
             .session_id
@@ -2001,6 +1966,21 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn api_key_long_context_pricing(
+        &self,
+    ) -> jcode_provider_core::context_pricing::LongContextPricing {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .map(|p| p.api_key_long_context_pricing()),
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .map(|p| p.api_key_long_context_pricing()),
+            _ => None,
+        }
+        .unwrap_or(jcode_provider_core::context_pricing::LongContextPricing::Unknown)
+    }
+
     fn credential_mode(&self) -> CredentialMode {
         let active = self.active_provider();
         match active {
@@ -2089,6 +2069,20 @@ impl Provider for MultiProvider {
         Ok(())
     }
 
+    fn set_api_key_account(&self, label: Option<&str>) -> Result<()> {
+        let runtime = self
+            .active_labelled_key_runtime()
+            .ok_or_else(|| anyhow!("The active provider does not support labelled API keys"))?;
+        runtime.set_api_key_account(label)?;
+        self.invalidate_routes_memo();
+        Ok(())
+    }
+
+    fn serving_api_key_account(&self) -> Option<String> {
+        self.active_labelled_key_runtime()?
+            .serving_api_key_account()
+    }
+
     fn active_explicit_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
         use jcode_provider_core::ResolvedCredential;
         // Only report an *explicit* in-memory pin. Auto mode returns `None` so
@@ -2148,15 +2142,19 @@ impl Provider for MultiProvider {
     }
 
     fn supports_deferred_tools(&self) -> bool {
-        // Only first-party Anthropic and OpenAI Responses paths implement
-        // provider-native deferred loading. Every other route receives an
-        // eager-only tool list (see `complete_with_failover`).
+        // Anthropic, OpenAI Responses, and the Gemini Developer API
+        // Interactions path (tool retrieval) implement provider-native
+        // deferred loading. Every other route receives an eager-only tool
+        // list (see `complete_with_failover`).
         match self.active_provider() {
             ActiveProvider::Claude => self
                 .anthropic_provider()
                 .is_some_and(|provider| provider.supports_deferred_tools()),
             ActiveProvider::OpenAI => self
                 .openai_provider()
+                .is_some_and(|provider| provider.supports_deferred_tools()),
+            ActiveProvider::Gemini => self
+                .gemini_provider()
                 .is_some_and(|provider| provider.supports_deferred_tools()),
             _ => false,
         }
@@ -2329,6 +2327,10 @@ impl Provider for MultiProvider {
             // Unknown model - try current provider.
             self.set_model_on_provider(self.active_provider(), model)
         }
+    }
+
+    fn fork_for_background_route(&self, selection: &RouteSelection) -> Result<Arc<dyn Provider>> {
+        self.fork_background_runtime(selection)
     }
 
     fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
@@ -2524,6 +2526,9 @@ impl Provider for MultiProvider {
                 .anthropic_provider()
                 .and_then(|provider| provider.reasoning_effort()),
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.reasoning_effort()),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .and_then(|a| a.reasoning_effort()),
             ActiveProvider::Copilot => self.copilot_provider().and_then(|o| o.reasoning_effort()),
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()
@@ -2542,6 +2547,10 @@ impl Provider for MultiProvider {
                 .openai_provider()
                 .ok_or_else(|| anyhow::anyhow!("OpenAI provider not available"))?
                 .set_reasoning_effort(effort),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .ok_or_else(|| anyhow::anyhow!("Antigravity provider not available"))?
+                .set_reasoning_effort(effort),
             ActiveProvider::Copilot => self
                 .copilot_provider()
                 .ok_or_else(|| anyhow::anyhow!("Copilot provider not available"))?
@@ -2551,7 +2560,7 @@ impl Provider for MultiProvider {
                 .ok_or_else(|| anyhow::anyhow!("OpenAI-compatible provider not available"))?
                 .set_reasoning_effort(effort),
             _ => Err(anyhow::anyhow!(
-                "Reasoning effort is only supported for OpenAI, Anthropic, and compatible reasoning models"
+                "Reasoning effort is only supported for OpenAI, Anthropic, Antigravity, and compatible reasoning models"
             )),
         }
     }
@@ -2566,6 +2575,10 @@ impl Provider for MultiProvider {
                 .openai_provider()
                 .map(|o| o.available_efforts())
                 .unwrap_or_default(),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .map(|a| a.available_efforts())
+                .unwrap_or_default(),
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()
                 .map(|o| o.available_efforts())
@@ -2576,6 +2589,38 @@ impl Provider for MultiProvider {
             },
             _ => vec![],
         }
+    }
+
+    fn speed_options(&self, model: &str) -> Vec<jcode_provider_core::SpeedOption> {
+        self.speed_provider()
+            .map(|provider| provider.speed_options(model))
+            .unwrap_or_else(|| vec![jcode_provider_core::SpeedOption::standard()])
+    }
+
+    fn speed_mode(&self) -> jcode_provider_core::SpeedMode {
+        self.speed_provider()
+            .map(|provider| provider.speed_mode())
+            .unwrap_or_default()
+    }
+
+    fn speed_route_identity(&self) -> Option<String> {
+        self.speed_provider()?.speed_route_identity()
+    }
+
+    fn set_speed_mode(&self, mode: jcode_provider_core::SpeedMode) -> Result<()> {
+        use jcode_provider_core::SpeedMode;
+        if mode == SpeedMode::Standard {
+            for provider in [self.openai_provider(), self.anthropic_provider()]
+                .into_iter()
+                .flatten()
+            {
+                provider.set_speed_mode(mode)?;
+            }
+            return Ok(());
+        }
+        self.speed_provider()
+            .context("The active route does not support premium speed")?
+            .set_speed_mode(mode)
     }
 
     fn service_tier(&self) -> Option<String> {
@@ -2737,6 +2782,13 @@ impl Provider for MultiProvider {
                 .map(|o| o.uses_jcode_compaction())
                 .unwrap_or(false),
         }
+    }
+
+    fn supports_explicit_native_compaction(&self) -> bool {
+        self.active_provider() == ActiveProvider::OpenAI
+            && self
+                .openai_provider()
+                .is_some_and(|provider| provider.supports_explicit_native_compaction())
     }
 
     async fn native_compact(
@@ -3172,6 +3224,8 @@ mod bedrock_placeholder_default_tests {
 
     fn route(model: &str, available: bool) -> ModelRoute {
         ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.to_string(),
             provider: "AWS Bedrock".to_string(),
             api_method: "bedrock".to_string(),
@@ -3179,6 +3233,8 @@ mod bedrock_placeholder_default_tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }
     }
 

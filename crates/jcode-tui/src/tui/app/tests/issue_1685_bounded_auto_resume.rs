@@ -7,6 +7,7 @@ fn issue_1685_user_turn(
     retry_attempts: u8,
 ) -> PendingRemoteMessage {
     PendingRemoteMessage {
+        jarvis_voice: false,
         content: content.to_string(),
         images: vec![],
         is_system: false,
@@ -61,6 +62,8 @@ fn issue_1685_openference_json_rate_limit_uses_retry_after_seconds_not_max_rpm()
 
 #[test]
 fn issue_1685_stale_rate_limit_stops_after_bounded_resumes() {
+    use crate::tui::rex::AgentState;
+
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -82,6 +85,7 @@ fn issue_1685_stale_rate_limit_stops_after_bounded_resumes() {
             .expect("held within budget");
         assert_eq!(pending.retry_attempts, attempt);
         assert!(app.rate_limit_reset.is_some());
+        assert_eq!(app.rex_agent_state(), AgentState::Working);
     }
 
     app.is_processing = true;
@@ -91,6 +95,7 @@ fn issue_1685_stale_rate_limit_stops_after_bounded_resumes() {
         "no further automatic resend"
     );
     assert!(app.rate_limit_reset.is_none());
+    assert_eq!(app.rex_agent_state(), AgentState::Error);
     assert!(
         !app.auto_poke_incomplete_todos,
         "auto-poke must not restart the loop"
@@ -100,6 +105,47 @@ fn issue_1685_stale_rate_limit_stops_after_bounded_resumes() {
         app.display_messages()
             .iter()
             .any(|m| m.content.contains("Rate-limit retry limit reached"))
+    );
+}
+
+#[test]
+fn quota_exhausted_retry_notice_is_single_actionable_line() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_provider_name = Some("OpenAI".into());
+    app.rate_limit_pending_message = Some(issue_1685_user_turn(
+        "continue",
+        true,
+        App::AUTO_RETRY_MAX_ATTEMPTS,
+    ));
+    app.is_processing = true;
+    let before = app.display_messages().len();
+    app.handle_server_event(
+        issue_1685_error(
+            99,
+            "429 weekly usage limit. Resets at 2026-08-21T04:31:00Z",
+            Some(30),
+        ),
+        &mut remote,
+    );
+    let added = &app.display_messages()[before..];
+    let line = added
+        .iter()
+        .find(|m| m.content.contains("Rate-limit retry limit reached"))
+        .expect("stop notice");
+    assert!(
+        line.content.contains("OpenAI")
+            && line.content.contains("weekly")
+            && line.content.contains("2026-08-21")
+            && line.content.contains("stopped"),
+        "{}",
+        line.content
+    );
+    assert!(
+        !added.iter().any(|m| m.role == "error"),
+        "duplicate error: {added:?}"
     );
 }
 

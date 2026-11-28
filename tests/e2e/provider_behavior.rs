@@ -162,7 +162,10 @@ async fn test_resume_restores_model_and_tool_history() -> Result<()> {
     std::fs::create_dir_all(&runtime_dir)?;
 
     let mut session = Session::create(None, Some("Resume Test".to_string()));
-    session.model = Some("gpt-5.2-codex".to_string());
+    session.apply_route(jcode::session::Route {
+        model: Some("gpt-5.2-codex".to_string()),
+        ..session.route()
+    });
     session.add_message(
         jcode::message::Role::User,
         vec![jcode::message::ContentBlock::Text {
@@ -206,7 +209,7 @@ async fn test_resume_restores_model_and_tool_history() -> Result<()> {
     let server_handle = tokio::spawn(async move { server_instance.run().await });
 
     let mut client = wait_for_subscribed_server_client(&socket_path).await?;
-    let resume_id = client.resume_session(&session.id).await?;
+    let resume_id = client.resume_session(session.id()).await?;
 
     let mut history_event = None;
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -261,8 +264,14 @@ async fn test_resume_session_with_local_history_uses_metadata_only_history() -> 
     std::fs::create_dir_all(&runtime_dir)?;
 
     let mut session = Session::create(None, Some("Target Subscribe Test".to_string()));
-    session.model = Some("model-a".to_string());
-    session.provider_session_id = Some("provider-resume-123".to_string());
+    session.apply_route(jcode::session::Route {
+        model: Some("model-a".to_string()),
+        ..session.route()
+    });
+    session.apply_route(jcode::session::Route {
+        provider_session_id: Some("provider-resume-123".to_string()),
+        ..session.route()
+    });
     session.add_message(
         jcode::message::Role::User,
         vec![jcode::message::ContentBlock::Text {
@@ -317,7 +326,7 @@ async fn test_resume_session_with_local_history_uses_metadata_only_history() -> 
     assert!(saw_done, "Did not receive subscribe done event");
 
     let resume_id = client
-        .resume_session_with_options(&session.id, true, false)
+        .resume_session_with_options(session.id(), true, false)
         .await?;
     let mut history_checked = false;
     let mut resume_done = false;
@@ -333,7 +342,7 @@ async fn test_resume_session_with_local_history_uses_metadata_only_history() -> 
                 provider_model,
                 ..
             } if id == resume_id => {
-                assert_eq!(session_id, session.id);
+                assert_eq!(session_id, session.id());
                 assert_eq!(
                     messages.len(),
                     2,
@@ -378,10 +387,10 @@ async fn test_resume_session_with_local_history_uses_metadata_only_history() -> 
         saw_message_done,
         "Did not receive Done for resumed message. Seen events: {}\nstate={}\nhistory={}\nlogs={}",
         seen_events.join(" | "),
-        debug_run_command(debug_socket_path.clone(), "state", Some(&session.id))
+        debug_run_command(debug_socket_path.clone(), "state", Some(session.id()))
             .await
             .unwrap_or_else(|err| format!("<state error: {err}>")),
-        debug_run_command(debug_socket_path.clone(), "history", Some(&session.id))
+        debug_run_command(debug_socket_path.clone(), "history", Some(session.id()))
             .await
             .unwrap_or_else(|err| format!("<history error: {err}>")),
         std::env::var_os("JCODE_HOME")
@@ -415,9 +424,13 @@ async fn test_resume_all_sessions_continues_interrupted_live_session() -> Result
     ));
     std::fs::create_dir_all(&runtime_dir)?;
 
-    // A session left with a pending user turn the assistant never answered.
+    // A closed session with a pending user turn. Attaching it must not schedule
+    // crash recovery before the explicit resume-all request.
     let mut session = Session::create(None, Some("Interrupted Session".to_string()));
-    session.model = Some("model-a".to_string());
+    session.apply_route(jcode::session::Route {
+        model: Some("model-a".to_string()),
+        ..session.route()
+    });
     session.add_message(
         jcode::message::Role::User,
         vec![jcode::message::ContentBlock::Text {
@@ -425,6 +438,7 @@ async fn test_resume_all_sessions_continues_interrupted_live_session() -> Result
             cache_control: None,
         }],
     );
+    session.mark_closed();
     session.save()?;
 
     let socket_path = runtime_dir.join("jcode.sock");
@@ -447,7 +461,7 @@ async fn test_resume_all_sessions_continues_interrupted_live_session() -> Result
     let _ = collect_until_done_unix(&mut client, subscribe_id).await?;
 
     // Make the interrupted session live by attaching this client to it.
-    let resume_id = client.resume_session(&session.id).await?;
+    let resume_id = client.resume_session(session.id()).await?;
     let _ = collect_until_done_unix(&mut client, resume_id).await?;
 
     // Ask the server to continue every interrupted live session.
@@ -456,8 +470,17 @@ async fn test_resume_all_sessions_continues_interrupted_live_session() -> Result
     let mut saw_continuation = false;
     let mut resume_all_result: Option<(usize, usize)> = None;
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen_events = Vec::new();
     while Instant::now() < deadline && (!saw_continuation || resume_all_result.is_none()) {
-        let event = tokio::time::timeout(Duration::from_secs(2), client.read_event()).await??;
+        let Ok(event) = tokio::time::timeout(Duration::from_secs(2), client.read_event()).await
+        else {
+            break;
+        };
+        let mut event = event?;
+        seen_events.push(format!("{event:?}"));
+        while let ServerEvent::TurnEvent { event: inner, .. } = event {
+            event = *inner;
+        }
         match event {
             ServerEvent::TextDelta { text } if text.contains("Continuing the migration now.") => {
                 saw_continuation = true;
@@ -478,13 +501,56 @@ async fn test_resume_all_sessions_continues_interrupted_live_session() -> Result
 
     assert!(
         saw_continuation,
-        "interrupted live session should stream a continuation after resume_all_sessions"
+        "interrupted live session should stream a continuation after resume_all_sessions; seen events: {}",
+        seen_events.join(" | ")
     );
     let (resumed, skipped) =
         resume_all_result.ok_or_else(|| anyhow::anyhow!("did not receive ResumeAllResult"))?;
     assert_eq!(resumed, 1, "exactly one interrupted session should resume");
     assert_eq!(skipped, 0, "no live session should be skipped");
 
+    Ok(())
+}
+
+/// Aborting a server future never reaches `shutdown`. Its accept loops and
+/// recovery owner must still stop: a finished test's lingering owner consumed
+/// the process-wide recovery wake-up of the next test's server, which then
+/// continued its interrupted session only after the 5 s retry.
+#[tokio::test]
+async fn test_aborted_server_stops_accepting_connections() -> Result<()> {
+    let _env = setup_test_env()?;
+    let runtime_dir = short_runtime_dir(format!(
+        "jcode-abort-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir)?;
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+    let provider: Arc<dyn jcode::provider::Provider> =
+        Arc::new(MockProvider::with_models(vec!["model-a"]));
+    let server_instance =
+        server::Server::new_with_paths(provider, socket_path.clone(), debug_socket_path.clone());
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+    drop(wait_for_server_client(&socket_path).await?);
+
+    server_handle.abort();
+    let _ = server_handle.await;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let stopped = loop {
+        if tokio::net::UnixStream::connect(&socket_path).await.is_err() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+    assert!(stopped, "an aborted server kept accepting connections");
     Ok(())
 }
 
@@ -501,7 +567,10 @@ async fn test_resume_session_reports_reload_interruption_for_peer_sessions() -> 
     std::fs::create_dir_all(&runtime_dir)?;
 
     let mut session = Session::create(None, Some("Reload Interrupted Session".to_string()));
-    session.model = Some("model-a".to_string());
+    session.apply_route(jcode::session::Route {
+        model: Some("model-a".to_string()),
+        ..session.route()
+    });
     session.add_message(
         jcode::message::Role::User,
         vec![jcode::message::ContentBlock::ToolResult {
@@ -534,7 +603,7 @@ async fn test_resume_session_reports_reload_interruption_for_peer_sessions() -> 
         "expected subscribe to finish, got: {subscribe_events:?}"
     );
 
-    let resume_id = client.resume_session(&session.id).await?;
+    let resume_id = client.resume_session(session.id()).await?;
     let events = collect_until_done_unix(&mut client, resume_id).await?;
 
     let history_event = events
@@ -550,7 +619,7 @@ async fn test_resume_session_reports_reload_interruption_for_peer_sessions() -> 
         })
         .ok_or_else(|| anyhow::anyhow!("Did not receive resume history event: {events:?}"))?;
 
-    assert_eq!(history_event.0, session.id);
+    assert_eq!(history_event.0, session.id());
     assert_eq!(
         history_event.1,
         Some(true),

@@ -15,11 +15,16 @@ This is not process suspension, and it does not promise a near-zero-RAM session.
 ```toml
 [session]
 hibernation_idle_secs = 1800
+unload_idle_secs = 1800
 ```
 
 The default is 30 minutes. Set the value to `0` to disable idle hibernation.
 `JCODE_HIBERNATION_IDLE_SECS` overrides the file value. Existing configuration
-files without a `[session]` table inherit the default.
+files without a `[session]` table inherit the defaults.
+
+`unload_idle_secs` is a separate daemon policy. The default is 30 minutes,
+and `0` disables it without affecting cache hibernation. The threshold for
+an idle finished swarm worker is capped at 60 seconds.
 
 ### Terminal behavior
 
@@ -55,9 +60,12 @@ session locks. The daemon's RSS change is not attributed to a particular TUI.
 - TUI: prepared transcript/body frames, rendered-message lines, syntax
   highlighting, copy viewport, derived side-panel/diff/image state, incremental
   markdown renderer, and the local session's provider-message cache.
-- Daemon: idle sessions' provider-message caches and reconstructible tool-output
-  indexes. Original tool definitions, captured instructions, undo state,
-  provider handles, and canonical messages stay resident.
+- Daemon cache hibernation: provider-message caches and reconstructible
+  tool-output indexes. The `Agent` and canonical messages stay resident.
+- Daemon idle unload: removes the entire `Agent` after verifying a durable
+  snapshot and journal. Attached clients, queued input, in-flight tools,
+  compaction, pending alerts, rewind undo, and coordinators with running
+  workers block unloading.
 
 The terminal keeps a bounded copy of its last frame instead of repainting the
 transcript into new caches on every idle tick. The status is cleared on input,
@@ -71,6 +79,8 @@ and read-only debug queries do not thaw the session.
 - `client:hibernate` requests immediate hibernation for testing. It bypasses
   the elapsed-time requirement, not active-work guards or the disable setting.
 - `client:frame` includes the hibernation status without rebuilding caches.
+- `server:memory` and runtime memory attribution rows include the cumulative
+  `sessions.idle_eviction_count` since daemon startup.
 
 ### Safety invariants
 
@@ -84,11 +94,11 @@ and read-only debug queries do not thaw the session.
 
 ## Scope
 
-The first implementation deliberately does not evict the authoritative client
-transcript or serialize and destroy the whole agent. Those deeper reductions
-need a separate audited persistence/thaw boundary. RAM savings therefore depend
-on how much derived state was resident before hibernation, particularly rendered
-transcripts and decoded image caches.
+Idle unload is not session closure. The server keeps roster entries and
+statuses, subject to normal terminal-member retention. A targeted subscribe,
+resume, debug command, or server-driven wake can reload the durable history.
+`await_members` reads the retained statuses without loading the transcript.
+No matching attached TUI is unloaded by the daemon.
 
 ## Validation
 

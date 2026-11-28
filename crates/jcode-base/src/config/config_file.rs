@@ -2,16 +2,62 @@ use super::*;
 use crate::storage::jcode_dir;
 use std::path::PathBuf;
 
-type TrustedExternalAuthKey = (
-    Option<PathBuf>,
-    Option<std::time::SystemTime>,
-    Option<u64>,
-    Option<String>,
-);
-type TrustedExternalAuthLists = std::sync::Arc<(Vec<String>, Vec<String>)>;
-static TRUSTED_EXTERNAL_AUTH_MEMO: std::sync::Mutex<
-    Option<(TrustedExternalAuthKey, TrustedExternalAuthLists)>,
-> = std::sync::Mutex::new(None);
+/// Root of the shared config, as far as this module cares.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DesktopRoot {
+    desktop: DesktopSection,
+}
+
+/// `[desktop]` tables written by the Desktop client.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DesktopSection {
+    models: DesktopModelsSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DesktopModelsSection {
+    /// Routed model specs (`openai-oauth:gpt-5.6-sol`) the Desktop picker hides.
+    hidden: Vec<String>,
+}
+
+/// Route specs the Desktop model picker hides.
+///
+/// Desktop owns `[desktop.models] hidden` and writes it to the shared config
+/// file, so the terminal `/model` picker reads the list from the same file
+/// rather than from [`Config`]: one setting hides a model in every client, and
+/// a `Config::save` never rewrites a section this crate does not own.
+///
+/// A missing, malformed, or Desktop-less config hides nothing.
+pub fn desktop_hidden_models() -> Vec<String> {
+    let Some(path) = Config::path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    desktop_hidden_models_from(&text)
+}
+
+/// Parse the hidden list out of one config document.
+fn desktop_hidden_models_from(text: &str) -> Vec<String> {
+    let Ok(section) = toml::from_str::<DesktopRoot>(text) else {
+        return Vec::new();
+    };
+    let mut hidden: Vec<String> = section
+        .desktop
+        .models
+        .hidden
+        .into_iter()
+        .map(|spec| spec.trim().to_string())
+        .filter(|spec| !spec.is_empty())
+        .collect();
+    hidden.sort();
+    hidden.dedup();
+    hidden
+}
 
 impl Config {
     /// Persist only the update preference, without baking in environment overrides.
@@ -30,6 +76,7 @@ impl Config {
     pub fn load() -> Self {
         let mut config = Self::load_from_file().unwrap_or_default();
         config.apply_env_overrides();
+        config.agents.apply_swarm_pool();
         config
     }
 
@@ -40,6 +87,7 @@ impl Config {
     pub fn load_strict() -> anyhow::Result<Self> {
         let mut config = Self::load_from_file_strict()?.unwrap_or_default();
         config.apply_env_overrides();
+        config.agents.apply_swarm_pool();
         Ok(config)
     }
 
@@ -49,7 +97,7 @@ impl Config {
     /// Saving those defaults would destroy the user's existing config. It also
     /// deliberately skips environment overrides so transient process settings
     /// are not baked into the file as a side effect of changing one preference.
-    fn load_for_update() -> anyhow::Result<Self> {
+    pub(crate) fn load_for_update() -> anyhow::Result<Self> {
         Ok(Self::load_from_file_strict()?.unwrap_or_default())
     }
 
@@ -99,13 +147,49 @@ impl Config {
         Ok(())
     }
 
+    /// Whether `[auth]` trusts this (normalized) source id.
+    pub(crate) fn trusts_source(&self, source_id: &str) -> bool {
+        self.auth.trusts_source(source_id)
+    }
+
+    /// Whether `[auth]` trusts this `source|path` entry.
+    pub(crate) fn trusts_path_entry(&self, entry: &str) -> bool {
+        self.auth.trusts_path_entry(entry)
+    }
+
+    /// Change the saved `[auth]` trust lists. Saves only when `change` reports
+    /// that it altered them, and returns whether it did.
+    pub(crate) fn update_trust(
+        change: impl FnOnce(&mut AuthConfig) -> bool,
+    ) -> anyhow::Result<bool> {
+        let mut cfg = Self::load_for_update()?;
+        let changed = change(&mut cfg.auth);
+        if changed {
+            cfg.save()?;
+        }
+        Ok(changed)
+    }
+
+    /// Extras configured for the built-in API-key profile `id`.
+    pub(crate) fn api_key_profile(&self, id: &str) -> Option<&ApiKeyProfileConfig> {
+        self.api_key_profiles.get(id)
+    }
+
+    /// `base_url` configured for the built-in API-key profile `id`.
+    pub(crate) fn api_key_profile_base_url(&self, id: &str) -> Option<&str> {
+        self.api_key_profile(id)?.base_url.as_deref()
+    }
+
+    /// Model price overrides configured for the built-in API-key profile `id`.
+    pub(crate) fn api_key_profile_costs(
+        &self,
+        id: &str,
+    ) -> Option<&std::collections::BTreeMap<String, crate::config::ApiKeyModelCost>> {
+        Some(&self.api_key_profile(id)?.costs)
+    }
+
     /// Mark the process-cached config as stale and notify dependent caches.
     pub fn invalidate_cache() {
-        // Also drop the trust-list memo: its mtime key can miss two same-length
-        // saves inside one filesystem timestamp tick.
-        if let Ok(mut guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock() {
-            *guard = None;
-        }
         super::invalidate_config_cache();
     }
 
@@ -117,10 +201,10 @@ impl Config {
             .map(str::to_string);
         let mut cfg = Self::load_for_update()?;
         match target {
-            "swarm" => cfg.agents.swarm_model = value,
+            "swarm" => cfg.agents.set_worker_model(WorkerModelSlot::Swarm, value),
             "review" => cfg.autoreview.model = value,
             "judge" => cfg.autojudge.model = value,
-            "memory" => cfg.agents.memory_model = value,
+            "memory" => cfg.agents.set_worker_model(WorkerModelSlot::Memory, value),
             "ambient" => cfg.ambient.model = value,
             other => anyhow::bail!("Unknown agent model target: {other}"),
         }
@@ -159,13 +243,6 @@ impl Config {
             model.unwrap_or("(none)"),
             provider.unwrap_or("(auto)")
         ));
-        // The first auto-switch account is the default, so the order follows
-        // whichever path changed it. A failure here must not undo the save.
-        if let Some(route) = provider
-            && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(route)
-        {
-            crate::logging::error(&format!("Could not sync account order: {error}"));
-        }
         Ok(())
     }
 
@@ -229,13 +306,21 @@ impl Config {
         Ok(())
     }
 
+    fn save_display_preference(preference: DisplayPreference) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.display.apply(preference);
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved display.{} to config: {}",
+            preference.key(),
+            preference.value_label()
+        ));
+        Ok(())
+    }
+
     /// Update the persisted default alignment preference.
     pub fn set_display_centered(centered: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load_for_update()?;
-        cfg.display.centered = centered;
-        cfg.save()?;
-        crate::logging::info(&format!("Saved display.centered to config: {}", centered));
-        Ok(())
+        Self::save_display_preference(DisplayPreference::Centered(centered))
     }
 
     /// Update the persisted reasoning display mode preference.
@@ -252,189 +337,34 @@ impl Config {
 
     /// Update the persisted compact-notifications preference.
     pub fn set_compact_notifications(compact: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load_for_update()?;
-        cfg.display.compact_notifications = compact;
-        cfg.save()?;
-        crate::logging::info(&format!(
-            "Saved display.compact_notifications to config: {}",
-            compact
-        ));
-        Ok(())
+        Self::save_display_preference(DisplayPreference::CompactNotifications(compact))
     }
 
-    /// Update the persisted pinned-todos preference.
-    pub fn set_pin_todos(pin: bool) -> anyhow::Result<()> {
+    /// Save the todo header mode and keep the legacy pin flag in sync.
+    pub fn set_todo_header_mode(mode: TodoHeaderMode) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
-        cfg.display.pin_todos = pin;
-        cfg.save()?;
-        crate::logging::info(&format!("Saved display.pin_todos to config: {}", pin));
-        Ok(())
-    }
-
-    /// Update the persisted show-agentgrep-output preference.
-    pub fn set_show_agentgrep_output(show: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load_for_update()?;
-        cfg.display.show_agentgrep_output = show;
+        cfg.display.set_todo_header_mode(mode);
         cfg.save()?;
         crate::logging::info(&format!(
-            "Saved display.show_agentgrep_output to config: {}",
-            show
-        ));
-        Ok(())
-    }
-
-    /// Update the persisted LaTeX rendering mode.
-    pub fn set_latex_rendering(mode: LatexRenderingMode) -> anyhow::Result<()> {
-        let mut cfg = Self::load_for_update()?;
-        cfg.display.latex_rendering = mode;
-        cfg.save()?;
-        crate::logging::info(&format!(
-            "Saved display.latex_rendering to config: {}",
+            "Saved display.todo_header to config: {}",
             mode.as_str()
         ));
         Ok(())
     }
 
+    /// Update the persisted show-agentgrep-output preference.
+    pub fn set_show_agentgrep_output(show: bool) -> anyhow::Result<()> {
+        Self::save_display_preference(DisplayPreference::ShowAgentgrepOutput(show))
+    }
+
+    /// Update the persisted LaTeX rendering mode.
+    pub fn set_latex_rendering(mode: LatexRenderingMode) -> anyhow::Result<()> {
+        Self::save_display_preference(DisplayPreference::LatexRendering(mode))
+    }
+
     /// Update the persisted tool-call-details preference.
     pub fn set_tool_call_details(show: bool) -> anyhow::Result<()> {
-        let mut cfg = Self::load_for_update()?;
-        cfg.display.tool_call_details = show;
-        cfg.save()?;
-        crate::logging::info(&format!(
-            "Saved display.tool_call_details to config: {}",
-            show
-        ));
-        Ok(())
-    }
-
-    /// Persist the baked global launch-hotkey mapping.
-    ///
-    /// Auto-import calls this once with the per-repo chord -> directory layout it
-    /// inferred. `imported` is set so the bake never runs twice and later manual
-    /// edits are not clobbered.
-    pub fn set_launch_hotkeys(
-        entries: Vec<jcode_config_types::LaunchHotkeyEntry>,
-        enabled: bool,
-    ) -> anyhow::Result<()> {
-        let mut cfg = Self::load_for_update()?;
-        cfg.launch_hotkeys.entries = entries;
-        cfg.launch_hotkeys.enabled = Some(enabled);
-        cfg.launch_hotkeys.imported = true;
-        cfg.save()?;
-        crate::logging::info(&format!(
-            "Saved {} launch hotkey(s) to config (enabled={enabled})",
-            cfg.launch_hotkeys.entries.len()
-        ));
-        Ok(())
-    }
-
-    /// One-time bake of per-repo launch hotkeys from session history.
-    ///
-    /// Scans `~/.jcode/sessions` for the directories the user works in most,
-    /// ranks them (recency-weighted, git-root folded, home excluded), and writes
-    /// a static chord -> directory mapping into config: top repo on `Cmd+;`, home
-    /// on `Cmd+'`, and the next repos on `Cmd+[` / `Cmd+]` / `Cmd+\`.
-    ///
-    /// Idempotent and side-effect-light:
-    /// - Runs only on platforms with global launch hotkeys (macOS, Linux,
-    ///   Windows).
-    /// - No-ops once `launch_hotkeys.imported` is set, so it bakes exactly once
-    ///   and never overwrites later manual edits.
-    /// - No-ops when there are not at least two rankable repos, so we do not
-    ///   commit a degenerate "everything is home" layout on a fresh machine; the
-    ///   built-in 3 hotkeys keep working until there is real history.
-    ///
-    /// Returns `true` when it wrote a baked mapping (so the caller can trigger a
-    /// hotkey reinstall), `false` otherwise. Best-effort: errors are logged and
-    /// swallowed.
-    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-    pub fn bake_launch_hotkeys_once() -> bool {
-        use jcode_import_core::repo_ranking;
-
-        let cfg = Self::load();
-        if cfg.launch_hotkeys.imported {
-            return false;
-        }
-        let Ok(jcode_dir) = jcode_dir() else {
-            return false;
-        };
-        let sessions_dir = jcode_dir.join("sessions");
-        let Some(home) = dirs::home_dir() else {
-            return false;
-        };
-
-        // Cheap gate: count session files without reading them. Skip the full
-        // scan until there is at least a little history, so brand-new installs do
-        // not pay the read cost (and we do not bake a degenerate layout).
-        let session_count = std::fs::read_dir(&sessions_dir)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(".json")))
-                    .count()
-            })
-            .unwrap_or(0);
-        const MIN_SESSIONS_TO_BAKE: usize = 3;
-        const GIVE_UP_SESSION_COUNT: usize = 50;
-        if session_count < MIN_SESSIONS_TO_BAKE {
-            return false;
-        }
-
-        let plan = repo_ranking::plan_launch_hotkeys_from_sessions(
-            &sessions_dir,
-            &home,
-            chrono::Utc::now(),
-        );
-
-        // `plan` always contains the home slot; a length of 1 means no rankable
-        // repos were found.
-        if plan.len() < 2 {
-            // If the user has lots of history but still no rankable repos, stop
-            // re-scanning on every launch: mark imported with no custom entries
-            // (the built-in 3 hotkeys keep working).
-            if session_count >= GIVE_UP_SESSION_COUNT
-                && let Err(err) = Self::set_launch_hotkeys(Vec::new(), true)
-            {
-                crate::logging::warn(&format!("launch hotkey bake give-up persist failed: {err}"));
-            }
-            crate::logging::info(
-                "launch hotkey bake: not enough repo history yet; keeping defaults",
-            );
-            return false;
-        }
-
-        let entries: Vec<jcode_config_types::LaunchHotkeyEntry> = plan
-            .into_iter()
-            .map(|p| jcode_config_types::LaunchHotkeyEntry {
-                chord: p.chord,
-                // Home keeps the dynamic sentinel so it tracks `$HOME`; repos are
-                // baked to absolute paths.
-                dir: if p.label == "home" {
-                    "$HOME".to_string()
-                } else {
-                    p.dir
-                },
-                label: p.label,
-                self_dev: false,
-            })
-            .collect();
-
-        match Self::set_launch_hotkeys(entries, true) {
-            Ok(()) => {
-                crate::logging::info("launch hotkey bake: wrote per-repo mapping to config");
-                true
-            }
-            Err(err) => {
-                crate::logging::warn(&format!("launch hotkey bake failed to persist: {err}"));
-                false
-            }
-        }
-    }
-
-    /// No-op bake on platforms without global launch hotkeys.
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    pub fn bake_launch_hotkeys_once() -> bool {
-        false
+        Self::save_display_preference(DisplayPreference::ToolCallDetails(show))
     }
 
     /// One-time migration: flip a persisted legacy `swarm_spawn_mode =
@@ -451,80 +381,37 @@ impl Config {
     /// Returns `true` when it rewrote the config. Best-effort: errors are
     /// logged and swallowed.
     pub fn migrate_legacy_swarm_spawn_mode_once() -> bool {
-        let Ok(dir) = jcode_dir() else {
-            return false;
-        };
-        let marker = dir.join("migrations").join("swarm-spawn-mode-inline");
-        if marker.exists() {
-            return false;
-        }
-        let write_marker = || {
-            if let Some(parent) = marker.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(
-                &marker,
-                "swarm_spawn_mode default migration: visible -> inline\n",
-            );
-        };
-
-        let path = dir.join("config.toml");
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            // No config file (fresh install): nothing to migrate.
-            write_marker();
-            return false;
-        };
-
-        let mut changed = false;
-        let migrated: Vec<String> = content
-            .lines()
-            .map(|line| {
-                if changed {
-                    return line.to_string();
-                }
-                let trimmed = line.trim_start();
-                let Some(rest) = trimmed.strip_prefix("swarm_spawn_mode") else {
-                    return line.to_string();
-                };
-                let Some(value) = rest.trim_start().strip_prefix('=') else {
-                    return line.to_string();
-                };
+        migrate_line_once(LineMigration {
+            marker: "swarm-spawn-mode-inline",
+            marker_text: "swarm_spawn_mode default migration: visible -> inline\n",
+            key: "swarm_spawn_mode",
+            rewrite: |value| {
                 let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
-                if matches!(value, "visible" | "headed") {
-                    changed = true;
-                    let indent = &line[..line.len() - trimmed.len()];
-                    format!("{indent}swarm_spawn_mode = \"inline\"")
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect();
+                matches!(value, "visible" | "headed").then(|| "\"inline\"".to_string())
+            },
+            migrated: "Migrated legacy swarm_spawn_mode \"visible\" to \"inline\" in config.toml",
+        })
+    }
 
-        if !changed {
-            write_marker();
-            return false;
-        }
-
-        let mut new_content = migrated.join("\n");
-        if content.ends_with('\n') {
-            new_content.push('\n');
-        }
-        match std::fs::write(&path, new_content) {
-            Ok(()) => {
-                Self::invalidate_cache();
-                write_marker();
-                crate::logging::info(
-                    "Migrated legacy swarm_spawn_mode \"visible\" to \"inline\" in config.toml",
-                );
-                true
-            }
-            Err(err) => {
-                crate::logging::warn(&format!(
-                    "swarm_spawn_mode migration failed to write config: {err}"
-                ));
-                false
-            }
-        }
+    /// One-time migration: raise a persisted `[dictation] timeout_secs = 90`
+    /// to the current 300 s default.
+    ///
+    /// 90 s was the old default, and a full `Config::save()` baked it into
+    /// users' config.toml. That value cuts any dictation command at a minute
+    /// and a half, so a long dictation was lost. A user who explicitly sets 90
+    /// after the migration is never raised again. Best-effort, returns `true`
+    /// when it rewrote the config.
+    pub fn migrate_legacy_dictation_timeout_once() -> bool {
+        migrate_line_once(LineMigration {
+            marker: "dictation-timeout-300",
+            marker_text: "dictation timeout_secs default migration: 90 -> 300\n",
+            key: "timeout_secs",
+            rewrite: |value| {
+                let value = value.split('#').next().unwrap_or("");
+                (value.trim() == "90").then(|| "300".to_string())
+            },
+            migrated: "Migrated legacy dictation timeout_secs 90 to 300 in config.toml",
+        })
     }
 
     /// One-time migration: flip a persisted `idle_animation = true` to `false`.
@@ -539,284 +426,111 @@ impl Config {
     /// Returns `true` when it rewrote the config. Best-effort: errors are
     /// logged and swallowed.
     pub fn migrate_idle_animation_off_once() -> bool {
-        let Ok(dir) = jcode_dir() else {
-            return false;
-        };
-        let marker = dir.join("migrations").join("idle-animation-off");
-        if marker.exists() {
-            return false;
-        }
-        let write_marker = || {
-            if let Some(parent) = marker.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&marker, "idle_animation forced migration: true -> false\n");
-        };
-
-        let path = dir.join("config.toml");
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            // No config file (fresh install): nothing to migrate.
-            write_marker();
-            return false;
-        };
-
-        let mut changed = false;
-        let migrated: Vec<String> = content
-            .lines()
-            .map(|line| {
-                if changed {
-                    return line.to_string();
-                }
-                let trimmed = line.trim_start();
-                let Some(rest) = trimmed.strip_prefix("idle_animation") else {
-                    return line.to_string();
-                };
-                let Some(value) = rest.trim_start().strip_prefix('=') else {
-                    return line.to_string();
-                };
+        migrate_line_once(LineMigration {
+            marker: "idle-animation-off",
+            marker_text: "idle_animation forced migration: true -> false\n",
+            key: "idle_animation",
+            rewrite: |value| {
                 let value = value.split('#').next().unwrap_or("");
-                if value.trim() == "true" {
+                (value.trim() == "true").then(|| "false".to_string())
+            },
+            migrated: "Migrated idle_animation \"true\" to \"false\" in config.toml",
+        })
+    }
+}
+
+/// A one-time rewrite of a single top-level `key = value` line in config.toml.
+struct LineMigration<F: Fn(&str) -> Option<String>> {
+    /// File under `~/.jcode/migrations/` recording that the migration ran.
+    marker: &'static str,
+    marker_text: &'static str,
+    key: &'static str,
+    /// Given the text after `=`, the replacement value, or `None` to leave the
+    /// line alone.
+    rewrite: F,
+    migrated: &'static str,
+}
+
+/// Rewrite the first matching `key = value` line, keeping every other byte of
+/// the file, and drop a marker so the migration runs at most once. Returns
+/// whether it rewrote the config. Best-effort: errors are logged and
+/// swallowed.
+fn migrate_line_once<F: Fn(&str) -> Option<String>>(migration: LineMigration<F>) -> bool {
+    let Ok(dir) = jcode_dir() else {
+        return false;
+    };
+    let marker = dir.join("migrations").join(migration.marker);
+    if marker.exists() {
+        return false;
+    }
+    let write_marker = || {
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&marker, migration.marker_text);
+    };
+
+    let path = dir.join("config.toml");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        // No config file (fresh install): nothing to migrate.
+        write_marker();
+        return false;
+    };
+
+    let mut changed = false;
+    let migrated: Vec<String> = content
+        .lines()
+        .map(|line| {
+            if changed {
+                return line.to_string();
+            }
+            let trimmed = line.trim_start();
+            let Some(rest) = trimmed.strip_prefix(migration.key) else {
+                return line.to_string();
+            };
+            let Some(value) = rest.trim_start().strip_prefix('=') else {
+                return line.to_string();
+            };
+            match (migration.rewrite)(value) {
+                Some(replacement) => {
                     changed = true;
                     let indent = &line[..line.len() - trimmed.len()];
-                    format!("{indent}idle_animation = false")
-                } else {
-                    line.to_string()
+                    format!("{indent}{} = {replacement}", migration.key)
                 }
-            })
-            .collect();
+                None => line.to_string(),
+            }
+        })
+        .collect();
 
-        if !changed {
+    if !changed {
+        write_marker();
+        return false;
+    }
+
+    let mut new_content = migrated.join("\n");
+    if content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    match std::fs::write(&path, new_content) {
+        Ok(()) => {
+            super::invalidate_config_cache();
             write_marker();
-            return false;
+            crate::logging::info(migration.migrated);
+            true
         }
-
-        let mut new_content = migrated.join("\n");
-        if content.ends_with('\n') {
-            new_content.push('\n');
-        }
-        match std::fs::write(&path, new_content) {
-            Ok(()) => {
-                Self::invalidate_cache();
-                write_marker();
-                crate::logging::info(
-                    "Migrated idle_animation \"true\" to \"false\" in config.toml",
-                );
-                true
-            }
-            Err(err) => {
-                crate::logging::warn(&format!(
-                    "idle_animation migration failed to write config: {err}"
-                ));
-                false
-            }
-        }
-    }
-
-    fn normalize_external_auth_source_id(source_id: &str) -> String {
-        source_id.trim().to_ascii_lowercase()
-    }
-
-    pub(crate) fn trusted_external_auth_path_entry(
-        source_id: &str,
-        path: &std::path::Path,
-    ) -> anyhow::Result<String> {
-        let source_id = Self::normalize_external_auth_source_id(source_id);
-        if source_id.is_empty() {
-            anyhow::bail!("External auth source id cannot be empty");
-        }
-        let canonical = crate::storage::validate_external_auth_file(path)?;
-        Ok(format!(
-            "{}|{}",
-            source_id,
-            canonical.to_string_lossy().to_ascii_lowercase()
-        ))
-    }
-
-    pub fn external_auth_source_allowed(source_id: &str) -> bool {
-        let source_id = Self::normalize_external_auth_source_id(source_id);
-        if source_id.is_empty() {
-            return false;
-        }
-
-        Self::trusted_external_auth_lists()
-            .0
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
-    }
-
-    pub fn external_auth_source_allowed_for_path(source_id: &str, path: &std::path::Path) -> bool {
-        let Ok(entry) = Self::trusted_external_auth_path_entry(source_id, path) else {
-            return false;
-        };
-
-        Self::trusted_external_auth_lists()
-            .1
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-    }
-
-    /// Fresh `(trusted_external_sources, trusted_external_source_paths)`.
-    ///
-    /// Trust checks must observe a just-saved decision immediately, so they
-    /// cannot use the throttled [`config()`] snapshot. Re-parsing config.toml
-    /// on every call was the alternative, and a single auth probe makes a dozen
-    /// of these checks (~0.5ms of TOML parsing each, on the TUI's first frame).
-    /// Memoize the two lists keyed on everything that can change them: the
-    /// config path, the file's mtime and length, and the env override.
-    fn trusted_external_auth_lists() -> TrustedExternalAuthLists {
-        let path = Self::path();
-        let metadata = path.as_ref().and_then(|path| std::fs::metadata(path).ok());
-        let key: TrustedExternalAuthKey = (
-            path,
-            metadata.as_ref().and_then(|meta| meta.modified().ok()),
-            metadata.as_ref().map(std::fs::Metadata::len),
-            std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES").ok(),
-        );
-        if let Ok(guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock()
-            && let Some((cached_key, lists)) = guard.as_ref()
-            && *cached_key == key
-        {
-            return lists.clone();
-        }
-
-        let cfg = Self::load();
-        let lists = std::sync::Arc::new((
-            cfg.auth.trusted_external_sources,
-            cfg.auth.trusted_external_source_paths,
-        ));
-        if let Ok(mut guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock() {
-            *guard = Some((key, lists.clone()));
-        }
-        lists
-    }
-
-    /// Startup-sensitive variant that uses the process-cached config snapshot.
-    ///
-    /// This avoids reloading config.toml repeatedly during cold-start probes.
-    pub fn external_auth_source_allowed_for_path_cached(
-        source_id: &str,
-        path: &std::path::Path,
-    ) -> bool {
-        let Ok(entry) = Self::trusted_external_auth_path_entry(source_id, path) else {
-            return false;
-        };
-
-        if config()
-            .auth
-            .trusted_external_source_paths
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-        {
-            return true;
-        }
-
-        // The global config snapshot can be initialized before an auth flow saves
-        // a new path-bound trust decision, or before tests switch JCODE_HOME. Fall
-        // back to a fresh read on cache misses so fast auth probes remain correct
-        // without penalizing the common already-trusted path. The memo re-stats
-        // config.toml, so it is as fresh as a full reload.
-        Self::trusted_external_auth_lists()
-            .1
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-    }
-
-    pub fn allow_external_auth_source(source_id: &str) -> anyhow::Result<()> {
-        let source_id = Self::normalize_external_auth_source_id(source_id);
-        if source_id.is_empty() {
-            anyhow::bail!("External auth source id cannot be empty");
-        }
-
-        let mut cfg = Self::load_for_update()?;
-        if !cfg
-            .auth
-            .trusted_external_sources
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
-        {
-            cfg.auth.trusted_external_sources.push(source_id.clone());
-            cfg.auth.trusted_external_sources.sort();
-            cfg.auth.trusted_external_sources.dedup();
-            cfg.save()?;
-        }
-
-        crate::logging::info(&format!(
-            "Saved trusted external auth source to config: {}",
-            source_id
-        ));
-        Ok(())
-    }
-
-    pub fn allow_external_auth_source_for_path(
-        source_id: &str,
-        path: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        let entry = Self::trusted_external_auth_path_entry(source_id, path)?;
-        let mut cfg = Self::load_for_update()?;
-        if !cfg
-            .auth
-            .trusted_external_source_paths
-            .iter()
-            .any(|value| value.trim().eq_ignore_ascii_case(&entry))
-        {
-            cfg.auth.trusted_external_source_paths.push(entry.clone());
-            cfg.auth.trusted_external_source_paths.sort();
-            cfg.auth.trusted_external_source_paths.dedup();
-            cfg.save()?;
-        }
-        crate::logging::info(&format!(
-            "Saved trusted external auth source path: {}",
-            entry
-        ));
-        Ok(())
-    }
-
-    pub fn revoke_external_auth_source_for_path(
-        source_id: &str,
-        path: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        let entry = Self::trusted_external_auth_path_entry(source_id, path)?;
-        let mut cfg = Self::load_for_update()?;
-        let before = cfg.auth.trusted_external_source_paths.len();
-        cfg.auth
-            .trusted_external_source_paths
-            .retain(|value| !value.trim().eq_ignore_ascii_case(&entry));
-        if cfg.auth.trusted_external_source_paths.len() != before {
-            cfg.save()?;
-            crate::logging::info(&format!(
-                "Removed trusted external auth source path: {}",
-                entry
+        Err(err) => {
+            crate::logging::warn(&format!(
+                "{} migration failed to write config: {err}",
+                migration.key
             ));
+            false
         }
-        Ok(())
-    }
-
-    /// Remove a source-level (non-path) trust decision, e.g. for credentials
-    /// that have no stable on-disk path (macOS Keychain items).
-    pub fn revoke_external_auth_source(source_id: &str) -> anyhow::Result<()> {
-        let source_id = Self::normalize_external_auth_source_id(source_id);
-        if source_id.is_empty() {
-            return Ok(());
-        }
-        let mut cfg = Self::load_for_update()?;
-        let before = cfg.auth.trusted_external_sources.len();
-        cfg.auth
-            .trusted_external_sources
-            .retain(|value| !value.trim().eq_ignore_ascii_case(&source_id));
-        if cfg.auth.trusted_external_sources.len() != before {
-            cfg.save()?;
-            crate::logging::info(&format!(
-                "Removed trusted external auth source: {}",
-                source_id
-            ));
-        }
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod issue_1056_tests {
-    use super::Config;
+    use super::{Config, desktop_hidden_models, desktop_hidden_models_from};
 
     struct EnvGuard {
         key: &'static str,
@@ -920,5 +634,38 @@ reasoning_effort = "max"
 
         assert!(error.to_string().contains("Failed to parse config file"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    /// Desktop owns `[desktop.models] hidden`; the terminal picker reads the
+    /// same section out of the same file.
+    #[test]
+    fn desktop_hidden_models_reads_the_section_desktop_writes() {
+        assert_eq!(
+            desktop_hidden_models_from(
+                "# my settings\nmodel = \"openai:gpt-5\"\n\n[provider]\ndefault_provider = \"openai\"\n\n[desktop.models]\nhidden = [\"openai-oauth:gpt-5.6-sol\", \" b:y \", \"b:y\"]\n\n[desktop.appearance]\ntheme = \"dark\"\n"
+            ),
+            ["b:y", "openai-oauth:gpt-5.6-sol"]
+        );
+        // Nothing hidden: no section, an empty list, or a config we cannot read.
+        assert!(desktop_hidden_models_from("model = \"x\"\n").is_empty());
+        assert!(desktop_hidden_models_from("[desktop.models]\nhidden = []\n").is_empty());
+        assert!(desktop_hidden_models_from("[desktop.models]\nhidden = [").is_empty());
+    }
+
+    #[test]
+    fn desktop_hidden_models_follow_the_config_file() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", home.path());
+        let path = home.path().join("config.toml");
+        assert!(desktop_hidden_models().is_empty());
+        std::fs::write(
+            &path,
+            "[desktop.models]\nhidden = [\"claude-oauth:claude-opus-5-5\"]\n",
+        )
+        .unwrap();
+        assert_eq!(desktop_hidden_models(), ["claude-oauth:claude-opus-5-5"]);
+        std::fs::remove_file(&path).unwrap();
+        assert!(desktop_hidden_models().is_empty());
     }
 }

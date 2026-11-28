@@ -1,0 +1,1657 @@
+//! Background task management tool
+//!
+//! Allows the agent to list, wait on, inspect, read output from, and manage
+//! background tasks.
+
+use super::{Tool, ToolContext, ToolOutput};
+use crate::background;
+use crate::bus::BackgroundTaskStatus;
+use anyhow::Result;
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
+#[path = "bg_dependency_wait.rs"]
+mod dependency_wait;
+use dependency_wait::wait_on_await_dependency;
+
+fn default_watch_notify() -> bool {
+    true
+}
+
+fn default_watch_wake() -> bool {
+    true
+}
+
+fn default_wait_return_on_progress() -> bool {
+    true
+}
+
+const DEFAULT_WAIT_SECONDS: u64 = 60;
+/// A wait never holds a turn past the blocking ceiling (15 minutes).
+const MAX_WAIT_SECONDS: u64 = super::MAX_BLOCKING_TOOL_WAIT_SECS;
+const DEFAULT_TAIL_LINES: usize = 80;
+const DEFAULT_WAIT_PREVIEW_LINES: usize = 40;
+const MAX_OUTPUT_BYTES: usize = 50_000;
+
+/// The wait keeps its resolved targets even if the task list changes during exec.
+#[derive(serde::Serialize, Deserialize)]
+struct WaitIntent {
+    task_ids: Vec<String>,
+    deadline: chrono::DateTime<chrono::Utc>,
+}
+
+impl WaitIntent {
+    fn path(ctx: &ToolContext) -> Option<std::path::PathBuf> {
+        if ctx.execution_mode != jcode_tool_core::ToolExecutionMode::AgentTurn {
+            return None;
+        }
+        let mut id = Sha256::new();
+        for component in [&ctx.session_id, &ctx.message_id, &ctx.tool_call_id] {
+            id.update((component.len() as u64).to_le_bytes());
+            id.update(component);
+        }
+        Some(
+            crate::storage::runtime_dir()
+                .join("bg-wait-intents")
+                .join(format!("{:x}.json", id.finalize())),
+        )
+    }
+
+    fn remaining(&self) -> Duration {
+        (self.deadline - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default()
+    }
+}
+
+fn prune_wait_intents(dir: &std::path::Path) {
+    use std::sync::{Mutex, OnceLock};
+    static LAST_PRUNED: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+    let mut last = LAST_PRUNED
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|time| time.elapsed() < Duration::from_secs(3600)) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    drop(last);
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > Duration::from_secs(7 * 86400))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Fallback for old in-flight calls that have no persisted WaitIntent.
+/// Round elapsed time down to retain the last partial second, since the
+/// public wait API takes whole seconds. An expired wait does a status poll.
+pub(crate) fn replay_wait_input(
+    mut input: Value,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Value {
+    if let Some(started_at) = started_at
+        && let Some(fields) = input.as_object_mut()
+    {
+        let elapsed = (chrono::Utc::now() - started_at)
+            .to_std()
+            .unwrap_or_default();
+        let requested = match fields.get("max_wait_seconds") {
+            None | Some(Value::Null) => None,
+            Some(value) => match value.as_u64() {
+                Some(seconds) => Some(seconds),
+                None => return input,
+            },
+        };
+        let original = requested
+            .unwrap_or(DEFAULT_WAIT_SECONDS)
+            .min(MAX_WAIT_SECONDS);
+        fields.insert(
+            "max_wait_seconds".into(),
+            original.saturating_sub(elapsed.as_secs()).into(),
+        );
+    }
+    input
+}
+
+pub struct BgTool;
+
+impl BgTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[derive(Deserialize)]
+struct BgInput {
+    /// Action to perform: list, status, output, tail, cancel, cleanup, watch, delivery, subscribe, wait
+    #[serde(default)]
+    action: Option<String>,
+    /// Short display label describing why this tool call is being made.
+    #[serde(deserialize_with = "deserialize_intent")]
+    intent: String,
+    /// Task ID (for single-task actions)
+    #[serde(default)]
+    task_id: Option<String>,
+    /// Task IDs (for multi-task wait/status/output where supported)
+    #[serde(default)]
+    task_ids: Option<Vec<String>>,
+    /// Use the latest matching task when task_id is omitted
+    #[serde(default)]
+    latest: Option<bool>,
+    /// Restrict implicit selection/listing to this session. Defaults to false for list and true for implicit selection.
+    #[serde(default)]
+    session_only: Option<bool>,
+    /// Status filter, either a string or array of strings: running/completed/failed/superseded/terminal/all
+    #[serde(default)]
+    status_filter: Option<Value>,
+    /// Max age in hours for cleanup (default: 24)
+    #[serde(default)]
+    max_age_hours: Option<u64>,
+    /// Dry-run cleanup without deleting files
+    #[serde(default)]
+    dry_run: Option<bool>,
+    /// Whether to notify on completion when using watch/delivery (default: true)
+    #[serde(default)]
+    notify: Option<bool>,
+    /// Whether to wake on completion when using watch/delivery (default: true)
+    #[serde(default)]
+    wake: Option<bool>,
+    /// For watch/delivery: also arm a stall watchdog that wakes the agent after
+    /// this many seconds with no new output or progress (resets on activity)
+    #[serde(default)]
+    stall_wake_seconds: Option<u64>,
+    /// Max seconds to block when using wait (default: 60, capped at 900)
+    #[serde(default)]
+    max_wait_seconds: Option<u64>,
+    /// Whether wait should return on progress/checkpoint events (default: true)
+    #[serde(default)]
+    return_on_progress: Option<bool>,
+    /// Multi-task wait mode: any, all, first_failure
+    #[serde(default)]
+    wait_mode: Option<String>,
+    /// Tail only the last N lines for output/tail and wait previews
+    #[serde(default)]
+    tail_lines: Option<usize>,
+    /// Alias for tail_lines
+    #[serde(default)]
+    lines: Option<usize>,
+    /// Include an output preview when wait returns; failed tasks preview by default
+    #[serde(default)]
+    include_output_preview: Option<bool>,
+    /// Optional grace period for detached cancellation before SIGKILL
+    #[serde(default)]
+    graceful_timeout_ms: Option<u64>,
+}
+
+fn deserialize_intent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    let intent = String::deserialize(deserializer)?;
+    if intent.trim().is_empty() {
+        return Err(serde::de::Error::custom(
+            "bg intent must be a nonblank string",
+        ));
+    }
+    Ok(intent)
+}
+
+fn infer_action_from_intent(intent: Option<&str>) -> Option<&'static str> {
+    let intent = intent?.trim().to_ascii_lowercase();
+    if intent.is_empty() {
+        return None;
+    }
+
+    if intent.contains("wait") || intent.contains("await") {
+        Some("wait")
+    } else if intent.contains("tail") {
+        Some("tail")
+    } else if intent.contains("output") || intent.contains("log") {
+        Some("output")
+    } else if intent.contains("status") || intent.contains("progress") || intent.contains("check") {
+        Some("status")
+    } else if intent.contains("cancel") || intent.contains("stop") {
+        Some("cancel")
+    } else if intent.contains("clean") {
+        Some("cleanup")
+    } else if intent.contains("list") || intent.contains("show") {
+        Some("list")
+    } else {
+        None
+    }
+}
+
+fn resolve_action(params: &BgInput) -> Result<String> {
+    if let Some(action) = params
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return Ok(action.to_ascii_lowercase());
+    }
+
+    if let Some(action) = infer_action_from_intent(Some(&params.intent)) {
+        return Ok(action.to_string());
+    }
+
+    Err(anyhow::anyhow!(
+        "Missing required bg action. Use one of: list, status, output, tail, cancel, cleanup, delivery, wait. For example: bg action=\"wait\"."
+    ))
+}
+
+fn status_label(status: &BackgroundTaskStatus) -> &'static str {
+    match status {
+        BackgroundTaskStatus::Running => "running",
+        BackgroundTaskStatus::Completed => "completed",
+        BackgroundTaskStatus::Superseded => "superseded",
+        BackgroundTaskStatus::Interrupted => "interrupted",
+        BackgroundTaskStatus::Failed => "failed",
+    }
+}
+
+fn is_terminal(status: &BackgroundTaskStatus) -> bool {
+    !matches!(status, BackgroundTaskStatus::Running)
+}
+
+fn is_success(status: &BackgroundTaskStatus, exit_code: Option<i32>) -> Option<bool> {
+    match status {
+        BackgroundTaskStatus::Running | BackgroundTaskStatus::Interrupted => None,
+        BackgroundTaskStatus::Completed => Some(exit_code.unwrap_or(0) == 0),
+        BackgroundTaskStatus::Superseded => Some(true),
+        BackgroundTaskStatus::Failed => Some(false),
+    }
+}
+
+fn parse_status_filter(value: Option<&Value>) -> HashSet<&'static str> {
+    let mut set = HashSet::new();
+    let Some(value) = value else {
+        return set;
+    };
+
+    let mut add = |raw: &str| match raw.to_ascii_lowercase().as_str() {
+        "running" => {
+            set.insert("running");
+        }
+        "completed" | "success" | "succeeded" => {
+            set.insert("completed");
+        }
+        "failed" | "failure" | "error" => {
+            set.insert("failed");
+        }
+        "superseded" => {
+            set.insert("superseded");
+        }
+        "interrupted" => {
+            set.insert("interrupted");
+        }
+        "terminal" | "finished" | "done" => {
+            set.insert("completed");
+            set.insert("failed");
+            set.insert("superseded");
+            set.insert("interrupted");
+        }
+        "all" | "any" => {}
+        _ => {}
+    };
+
+    match value {
+        Value::String(s) => add(s),
+        Value::Array(items) => {
+            for item in items {
+                if let Some(s) = item.as_str() {
+                    add(s);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    set
+}
+
+fn task_matches_filter(task: &background::TaskStatusFile, filter: &HashSet<&str>) -> bool {
+    filter.is_empty() || filter.contains(status_label(&task.status))
+}
+
+fn task_metadata(
+    manager: &background::BackgroundTaskManager,
+    task: &background::TaskStatusFile,
+) -> Value {
+    json!({
+        "task_id": task.task_id,
+        "display_name": task.display_name,
+        "tool_name": task.tool_name,
+        "status": status_label(&task.status),
+        "is_terminal": is_terminal(&task.status),
+        "is_success": is_success(&task.status, task.exit_code),
+        "exit_code": task.exit_code,
+        "error": task.error,
+        "session_id": task.session_id,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+        "duration_secs": task.duration_secs,
+        "notify": task.notify,
+        "wake": task.wake,
+        "pid": task.pid,
+        "detached": task.detached,
+        "progress": task.progress,
+        "event_history": task.event_history,
+        "output_file": manager.output_path_for(&task.task_id).to_string_lossy(),
+        "status_file": manager.status_path_for(&task.task_id).to_string_lossy(),
+    })
+}
+
+fn format_task_details(task: &background::TaskStatusFile) -> String {
+    let mut output = format!(
+        "Task: {}\n\
+         Name: {}\n\
+         Tool: {}\n\
+         Status: {}\n\
+         Session: {}\n\
+         Started: {}\n",
+        task.task_id,
+        crate::message::background_task_display_label(
+            &task.tool_name,
+            task.display_name.as_deref()
+        ),
+        task.tool_name,
+        status_label(&task.status),
+        task.session_id,
+        task.started_at,
+    );
+
+    if let Some(completed) = task.completed_at.as_ref() {
+        output.push_str(&format!("Completed: {}\n", completed));
+    }
+    if let Some(duration) = task.duration_secs {
+        output.push_str(&format!("Duration: {:.2}s\n", duration));
+    }
+    if let Some(exit_code) = task.exit_code {
+        output.push_str(&format!("Exit code: {}\n", exit_code));
+    }
+    if let Some(progress) = task.progress.as_ref() {
+        output.push_str(&format!(
+            "Progress: {}\n",
+            crate::background::format_progress_display(progress, 18)
+        ));
+        output.push_str(&format!("Progress updated: {}\n", progress.updated_at));
+    }
+    output.push_str(&format!("Notify: {}\n", task.notify));
+    output.push_str(&format!("Wake: {}\n", task.wake));
+    if let Some(error) = task.error.as_ref() {
+        output.push_str(&format!("Error: {}\n", error));
+    }
+
+    if !task.event_history.is_empty() {
+        output.push_str("Recent events:\n");
+        let start = task.event_history.len().saturating_sub(5);
+        for event in &task.event_history[start..] {
+            let message = event
+                .message
+                .as_deref()
+                .filter(|message| !message.is_empty())
+                .map(|message| format!(" · {}", crate::util::truncate_str(message, 80)))
+                .unwrap_or_default();
+            output.push_str(&format!(
+                "- {:?} · {}{}\n",
+                event.kind, event.timestamp, message
+            ));
+        }
+    }
+
+    output
+}
+
+fn tail_lines(output: &str, lines: usize) -> String {
+    if lines == 0 {
+        return String::new();
+    }
+    let collected: Vec<&str> = output.lines().rev().take(lines).collect();
+    collected.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
+fn output_preview(output: &str, tail: Option<usize>) -> (String, bool) {
+    if let Some(lines) = tail {
+        let tailed = tail_lines(output, lines);
+        let truncated = tailed.len() < output.len();
+        return (tailed, truncated);
+    }
+
+    if output.len() > MAX_OUTPUT_BYTES {
+        (
+            format!(
+                "{}...\n\n(Output truncated. Use `read` tool on the output file for full content, or `bg action=\"tail\"` for recent lines.)",
+                crate::util::truncate_str(output, MAX_OUTPUT_BYTES)
+            ),
+            true,
+        )
+    } else {
+        (output.to_string(), false)
+    }
+}
+
+fn wait_reason_label(reason: background::BackgroundTaskWaitReason) -> &'static str {
+    match reason {
+        background::BackgroundTaskWaitReason::AlreadyFinished => "already_finished",
+        background::BackgroundTaskWaitReason::Finished => "finished",
+        background::BackgroundTaskWaitReason::Progress => "progress",
+        background::BackgroundTaskWaitReason::Checkpoint => "checkpoint",
+        background::BackgroundTaskWaitReason::Stalled => "stalled",
+        background::BackgroundTaskWaitReason::Timeout => "timeout",
+    }
+}
+
+const RECENT_FINISHED_PER_SESSION: usize = 12;
+const RECENT_FINISHED_TOTAL: usize = 200;
+
+async fn filtered_tasks(
+    manager: &background::BackgroundTaskManager,
+    ctx: &ToolContext,
+    params: &BgInput,
+    listing: bool,
+) -> Vec<background::TaskStatusFile> {
+    let session = params
+        .session_only
+        .unwrap_or(!listing)
+        .then_some(ctx.session_id.as_str());
+    let (per_session, total) = if listing {
+        (RECENT_FINISHED_PER_SESSION, RECENT_FINISHED_TOTAL)
+    } else {
+        let latest = usize::from(params.latest.unwrap_or(false));
+        (latest, latest)
+    };
+    let filter = parse_status_filter(params.status_filter.as_ref());
+    manager
+        .list_recent_matching(session, per_session, total, move |task| {
+            task_matches_filter(task, &filter)
+        })
+        .await
+}
+
+async fn resolve_task_ids(
+    manager: &background::BackgroundTaskManager,
+    ctx: &ToolContext,
+    params: &BgInput,
+    action: &str,
+    allow_multiple: bool,
+) -> Result<Vec<String>> {
+    let task_ids = params.task_ids.as_deref().unwrap_or(&[]);
+    if !task_ids.is_empty() {
+        if !allow_multiple && task_ids.len() > 1 {
+            return Err(anyhow::anyhow!(
+                "action '{}' accepts only one task_id; got {} task_ids",
+                action,
+                task_ids.len()
+            ));
+        }
+        return Ok(task_ids.to_vec());
+    }
+    if let Some(task_id) = params.task_id.clone() {
+        return Ok(vec![task_id]);
+    }
+
+    let mut tasks = filtered_tasks(manager, ctx, params, false).await;
+    if params.latest.unwrap_or(false) {
+        return tasks
+            .first()
+            .map(|task| vec![task.task_id.clone()])
+            .ok_or_else(|| anyhow::anyhow!("No matching background tasks found for latest=true"));
+    }
+
+    tasks.retain(|task| task.status == BackgroundTaskStatus::Running);
+    match tasks.as_slice() {
+        [task] => Ok(vec![task.task_id.clone()]),
+        [] => Err(anyhow::anyhow!(
+            "task_id is required for {} action unless exactly one matching running task exists in this session. Try `bg action=\"list\" status_filter=\"running\" session_only=true` or pass latest=true.",
+            action
+        )),
+        _ => Err(anyhow::anyhow!(
+            "Multiple matching running tasks found; pass task_id, task_ids, or latest=true. Matching task IDs: {}",
+            tasks
+                .iter()
+                .map(|task| task.task_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn task_label(task: &background::TaskStatusFile) -> String {
+    crate::message::background_task_display_label(&task.tool_name, task.display_name.as_deref())
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Name what is being waited on so status rows say more than "a background task".
+fn task_wait_reason(task: &background::TaskStatusFile) -> String {
+    format!("Waiting for {}", task_label(task))
+}
+
+const USER_MESSAGE_NOTE: &str = "A user message arrived while waiting, so the wait ended early. The user's message is delivered right after this result: handle it first. The task keeps running; resume the wait later if still needed.";
+
+/// State of one durable `await-*` dependency inside a multi-target wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AwaitWaitStatus {
+    Running,
+    Resolved,
+    Expired,
+}
+
+impl AwaitWaitStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Resolved => "completed",
+            Self::Expired => "expired",
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+
+    /// An expired wait will never resolve, so `first_failure` stops on it.
+    fn is_failure(self) -> bool {
+        matches!(self, Self::Expired)
+    }
+}
+
+/// One durable dependency observed during a multi-target wait.
+#[derive(Clone, Debug)]
+struct AwaitWaitState {
+    id: String,
+    status: AwaitWaitStatus,
+    summary: Option<String>,
+}
+
+impl AwaitWaitState {
+    /// Read the durable state without requiring a live process. A record that
+    /// is gone (expired, superseded, or never written) is unknown, not finished.
+    fn observe(id: &str) -> Option<Self> {
+        let dependency = crate::todo::await_dependency::load(&crate::storage::runtime_dir(), id)?;
+        let summary = dependency.outcome_summary();
+        let status = match (summary.is_some(), dependency.is_running()) {
+            (true, _) => AwaitWaitStatus::Resolved,
+            (false, true) => AwaitWaitStatus::Running,
+            (false, false) => AwaitWaitStatus::Expired,
+        };
+        Some(Self {
+            id: id.to_string(),
+            status,
+            summary,
+        })
+    }
+}
+
+/// Result of a wait over more than one target, process-backed or durable.
+#[derive(Debug)]
+struct WaitManyOutcome {
+    reason: String,
+    tasks: Vec<background::TaskStatusFile>,
+    dependencies: Vec<AwaitWaitState>,
+    /// Ids that matched neither a task nor a durable dependency.
+    unknown: Vec<String>,
+}
+
+async fn wait_many(
+    manager: &background::BackgroundTaskManager,
+    session_id: &str,
+    task_ids: &[String],
+    max_wait: Duration,
+    return_on_progress: bool,
+    mode: &str,
+) -> Result<WaitManyOutcome> {
+    let incoming = crate::incoming_message::watch(session_id);
+    let deadline = Instant::now() + max_wait;
+    let mut last_progress = std::collections::HashMap::new();
+    let mut wait_guard = None;
+    let mut task_changes = manager.subscribe_status_changes();
+    let mut await_completions = crate::await_members_state::subscribe_await_completion();
+    for task_id in task_ids {
+        if let Some(task) = manager.status(task_id).await {
+            last_progress.insert(task_id.clone(), task.progress.clone());
+        }
+    }
+
+    loop {
+        let mut tasks = Vec::new();
+        let mut dependencies = Vec::new();
+        let mut unknown = Vec::new();
+        for task_id in task_ids {
+            // A durable `await-*` dependency has no process-backed status.
+            // Dropping it would let `all` report a pending swarm wait as
+            // finished because the list of status files came back empty.
+            if is_await_dependency_id(task_id) {
+                match AwaitWaitState::observe(task_id) {
+                    Some(state) => dependencies.push(state),
+                    None => unknown.push(task_id.clone()),
+                }
+                continue;
+            }
+            match manager.status(task_id).await {
+                Some(task) => tasks.push(task),
+                None => unknown.push(task_id.clone()),
+            }
+        }
+
+        let outcome = |reason: &str| WaitManyOutcome {
+            reason: reason.to_string(),
+            tasks: tasks.clone(),
+            dependencies: dependencies.clone(),
+            unknown: unknown.clone(),
+        };
+        if tasks.is_empty() && dependencies.is_empty() {
+            // Nothing to observe is not the same as everything finished.
+            return Ok(outcome("missing"));
+        }
+        if mode == "first_failure"
+            && (tasks
+                .iter()
+                .any(|task| matches!(task.status, BackgroundTaskStatus::Failed))
+                || dependencies
+                    .iter()
+                    .any(|dependency| dependency.status.is_failure()))
+        {
+            return Ok(outcome("first_failure"));
+        }
+        if mode == "all"
+            && tasks.iter().all(|task| is_terminal(&task.status))
+            && dependencies
+                .iter()
+                .all(|dependency| dependency.status.is_terminal())
+        {
+            return Ok(outcome("all_finished"));
+        }
+        if mode != "all"
+            && (tasks.iter().any(|task| is_terminal(&task.status))
+                || dependencies
+                    .iter()
+                    .any(|dependency| dependency.status.is_terminal()))
+        {
+            return Ok(outcome("any_finished"));
+        }
+        if return_on_progress {
+            for task in &tasks {
+                let previous = last_progress.get(&task.task_id).cloned().unwrap_or(None);
+                if task.progress != previous {
+                    return Ok(outcome("progress"));
+                }
+            }
+        }
+
+        if max_wait > Duration::ZERO && incoming.is_pending() {
+            return Ok(outcome("user_message"));
+        }
+        if Instant::now() >= deadline {
+            return Ok(outcome("timeout"));
+        }
+        for task in &tasks {
+            last_progress.insert(task.task_id.clone(), task.progress.clone());
+        }
+        wait_guard.get_or_insert_with(|| {
+            let running: Vec<_> = tasks
+                .iter()
+                .filter(|task| !is_terminal(&task.status))
+                .collect();
+            let running_dependencies: Vec<_> = dependencies
+                .iter()
+                .filter(|dependency| !dependency.status.is_terminal())
+                .collect();
+            let reason = match running.as_slice() {
+                [task] if running_dependencies.is_empty() => task_wait_reason(task),
+                _ => format!(
+                    "Waiting for {} background tasks: {}",
+                    running.len() + running_dependencies.len(),
+                    running
+                        .iter()
+                        .map(|task| task_label(task))
+                        .chain(
+                            running_dependencies
+                                .iter()
+                                .map(|dependency| format!("swarm members ({})", dependency.id))
+                        )
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            crate::wait_registry::register(session_id, &reason)
+        });
+        // External writers and detached process exits cannot signal our watches.
+        let reconcile_external = !unknown.is_empty()
+            || !dependencies.is_empty()
+            || tasks.iter().any(|task| {
+                !is_terminal(&task.status)
+                    && (task.detached || !manager.is_live_task(&task.task_id))
+            });
+        let wake_at = if reconcile_external {
+            deadline.min(Instant::now() + Duration::from_secs(1))
+        } else {
+            deadline
+        };
+        tokio::select! {
+            _ = async {
+                while matches!(task_changes.recv().await, Ok(id) if !task_ids.contains(&id)) {}
+            } => {}
+            _ = await_completions.changed(), if !dependencies.is_empty() => {}
+            _ = incoming.arrived() => {}
+            _ = tokio::time::sleep_until(wake_at.into()) => {}
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for BgTool {
+    fn name(&self) -> &str {
+        "bg"
+    }
+
+    fn description(&self) -> &str {
+        "Manage background tasks. Prefer action='wait' over polling or sleeping."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        // Advertise one spelling per capability. `execute` still accepts the
+        // unadvertised aliases (watch, subscribe, lines), an array
+        // status_filter, and the rarely needed dry_run and graceful_timeout_ms,
+        // so older transcripts and prompts keep working without every request
+        // paying for them.
+        let mut intent_schema = super::intent_schema_property();
+        intent_schema["minLength"] = json!(1);
+        intent_schema["pattern"] = json!("\\S");
+        json!({
+            "type": "object",
+            "required": ["action", "intent"],
+            "properties": {
+                "intent": intent_schema,
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "status", "output", "tail", "cancel", "cleanup", "delivery", "wait"],
+                    "description": "delivery sets notify/wake on a running task."
+                },
+                "task_id": { "type": "string", "description": "Omit with latest." },
+                "task_ids": { "type": "array", "items": {"type":"string"}, "description": "Multi-task wait/status." },
+                "latest": { "type": "boolean", "description": "Use the latest matching task." },
+                "session_only": { "type": "boolean", "description": "Only this session's tasks." },
+                "status_filter": {
+                    "type": "string",
+                    "enum": ["running", "completed", "failed", "superseded", "terminal"]
+                },
+                "max_age_hours": { "type": "integer", "description": "cleanup: default 24." },
+                "notify": { "type": "boolean", "description": "delivery: default true." },
+                "wake": { "type": "boolean", "description": "delivery: default true." },
+                "stall_wake_seconds": { "type": "integer", "description": "delivery: also wake after N seconds without output (min 30)." },
+                "max_wait_seconds": { "type": "integer", "description": "wait: default 60, cap 900, 0 checks without blocking." },
+                "return_on_progress": { "type": "boolean", "description": "wait: also return on first progress event. Default true." },
+                "wait_mode": { "type": "string", "enum": ["any", "all", "first_failure"], "description": "Multi-task wait. Default any." },
+                "tail_lines": { "type": "integer", "description": "Last N lines for output/tail/wait preview." },
+                "include_output_preview": { "type": "boolean", "description": "wait: include recent output. Failed tasks always do." }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let params: BgInput = serde_json::from_value(input)?;
+        let action = resolve_action(&params)?;
+        let manager = background::global();
+
+        match action.as_str() {
+            "list" => {
+                let tasks = filtered_tasks(manager, &ctx, &params, true).await;
+                if tasks.is_empty() {
+                    return Ok(ToolOutput::new("No matching background tasks found.")
+                        .with_title("bg list"));
+                }
+
+                let mut output = format!(
+                    "Background Tasks (all matching running tasks and up to {RECENT_FINISHED_PER_SESSION} recent finished tasks per session, {RECENT_FINISHED_TOTAL} finished total):\n\n"
+                );
+                output.push_str(&format!(
+                    "{:<12} {:<28} {:<10} {:<12} {:<10} {:<28} {}\n",
+                    "TASK_ID", "NAME", "TOOL", "STATUS", "DURATION", "PROGRESS", "SESSION"
+                ));
+                output.push_str(&"-".repeat(121));
+                output.push('\n');
+
+                for task in &tasks {
+                    let duration = task
+                        .duration_secs
+                        .map(|d| format!("{:.1}s", d))
+                        .unwrap_or_else(|| "running".to_string());
+                    let progress = task
+                        .progress
+                        .as_ref()
+                        .map(|progress| crate::background::format_progress_display(progress, 10))
+                        .unwrap_or_else(|| "-".to_string());
+                    let display_name = crate::message::background_task_display_label(
+                        &task.tool_name,
+                        task.display_name.as_deref(),
+                    );
+                    output.push_str(&format!(
+                        "{:<12} {:<28} {:<10} {:<12} {:<10} {:<28} {}\n",
+                        task.task_id,
+                        crate::util::truncate_str(&display_name, 28),
+                        task.tool_name,
+                        status_label(&task.status),
+                        duration,
+                        crate::util::truncate_str(&progress, 28),
+                        &task.session_id[..8.min(task.session_id.len())]
+                    ));
+                }
+
+                Ok(ToolOutput::new(output).with_title("bg list").with_metadata(json!({
+                    "tasks": tasks.iter().map(|task| task_metadata(manager, task)).collect::<Vec<_>>(),
+                    "count": tasks.len(),
+                })))
+            }
+
+            "status" => {
+                let task_ids = resolve_task_ids(manager, &ctx, &params, "status", true).await?;
+                let mut tasks = Vec::new();
+                let mut output = String::new();
+                for task_id in task_ids {
+                    if is_await_dependency_id(&task_id) {
+                        if !output.is_empty() {
+                            output.push_str("\n---\n");
+                        }
+                        output.push_str(&await_dependency_status_text(&task_id)?);
+                        continue;
+                    }
+                    let task = manager
+                        .status(&task_id)
+                        .await
+                        .ok_or_else(|| anyhow::anyhow!("Task not found: {}", task_id))?;
+                    if !output.is_empty() {
+                        output.push_str("\n---\n");
+                    }
+                    output.push_str(&format_task_details(&task));
+                    if matches!(task.status, BackgroundTaskStatus::Failed) {
+                        crate::logging::warn(&format!(
+                            "[tool:bg] task {} ({}) failed in session {} exit_code={:?} error={}",
+                            task.task_id,
+                            task.tool_name,
+                            task.session_id,
+                            task.exit_code,
+                            task.error.as_deref().unwrap_or("<none>")
+                        ));
+                    }
+                    tasks.push(task);
+                }
+                Ok(ToolOutput::new(output).with_title("bg status").with_metadata(json!({
+                    "tasks": tasks.iter().map(|task| task_metadata(manager, task)).collect::<Vec<_>>(),
+                    "task": tasks.first().map(|task| task_metadata(manager, task)),
+                })))
+            }
+
+            "output" | "tail" => {
+                let task_id = resolve_task_ids(manager, &ctx, &params, "output", false)
+                    .await?
+                    .remove(0);
+                let tail = if action == "tail" {
+                    Some(
+                        params
+                            .tail_lines
+                            .or(params.lines)
+                            .unwrap_or(DEFAULT_TAIL_LINES),
+                    )
+                } else {
+                    params.tail_lines.or(params.lines)
+                };
+                let output = manager.output(&task_id).await.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Output not found for task: {}. Task may not exist or output file was deleted.",
+                        task_id
+                    )
+                })?;
+                let (rendered, truncated) = output_preview(&output, tail);
+                let status = manager.status(&task_id).await;
+                Ok(ToolOutput::new(rendered)
+                    .with_title(format!("bg {} {}", action, task_id))
+                    .with_metadata(json!({
+                        "task_id": task_id,
+                        "task": status.as_ref().map(|task| task_metadata(manager, task)),
+                        "tail_lines": tail,
+                        "truncated": truncated,
+                        "output_bytes": output.len(),
+                    })))
+            }
+
+            "cancel" => {
+                let task_id = resolve_task_ids(manager, &ctx, &params, "cancel", false)
+                    .await?
+                    .remove(0);
+                let grace = Duration::from_millis(params.graceful_timeout_ms.unwrap_or(400));
+                match manager.cancel_with_grace(&task_id, grace).await? {
+                    true => Ok(ToolOutput::new(format!("Task {} cancelled.", task_id))
+                        .with_title(format!("bg cancel {}", task_id))
+                        .with_metadata(json!({"task_id": task_id, "cancelled": true, "graceful_timeout_ms": grace.as_millis()}))),
+                    false => Err(anyhow::anyhow!(
+                        "Task {} not found or already completed.",
+                        task_id
+                    )),
+                }
+            }
+
+            "cleanup" => {
+                let max_age = params.max_age_hours.unwrap_or(24);
+                let filter = parse_status_filter(params.status_filter.as_ref());
+                let dry_run = params.dry_run.unwrap_or(false);
+                let result = manager.cleanup_filtered(max_age, &filter, dry_run).await?;
+                Ok(ToolOutput::new(format!(
+                    "{} {} old task files (older than {} hours). Skipped {} running task file(s).",
+                    if dry_run { "Would remove" } else { "Removed" },
+                    result.removed_files,
+                    max_age,
+                    result.skipped_running_files
+                ))
+                .with_title("bg cleanup")
+                .with_metadata(json!({
+                    "removed_files": result.removed_files,
+                    "matched_files": result.matched_files,
+                    "skipped_running_files": result.skipped_running_files,
+                    "dry_run": dry_run,
+                    "max_age_hours": max_age,
+                })))
+            }
+
+            "watch" | "delivery" | "subscribe" => {
+                let task_id = resolve_task_ids(manager, &ctx, &params, "delivery", false)
+                    .await?
+                    .remove(0);
+                let notify = params.notify.unwrap_or_else(default_watch_notify);
+                let wake = params.wake.unwrap_or_else(default_watch_wake);
+                let stall_armed = match params.stall_wake_seconds {
+                    Some(requested) => manager.arm_stall_watchdog(&task_id, requested).await,
+                    None => None,
+                };
+                match manager.update_delivery(&task_id, notify, wake).await? {
+                    Some(task) => {
+                        let stall_line = match stall_armed {
+                            Some(effective) => format!(
+                                "\nStall watchdog: wake after {}s of no output/progress (resets on activity)",
+                                effective
+                            ),
+                            None => String::new(),
+                        };
+                        Ok(ToolOutput::new(format!(
+                            "Updated background task delivery for {}.\nStatus: {}\nNotify: {}\nWake: {}{}",
+                            task_id,
+                            status_label(&task.status),
+                            task.notify,
+                            task.wake,
+                            stall_line
+                        ))
+                        .with_title(format!("bg delivery {}", task_id))
+                        .with_metadata(json!({
+                            "task_id": task.task_id,
+                            "task": task_metadata(manager, &task),
+                            "status": status_label(&task.status),
+                            "notify": task.notify,
+                            "wake": task.wake,
+                            "stall_wake_seconds": stall_armed,
+                        })))
+                    }
+                    None => Err(anyhow::anyhow!("Task not found: {}", task_id)),
+                }
+            }
+
+            "wait" => {
+                let requested_wait = params.max_wait_seconds.unwrap_or(DEFAULT_WAIT_SECONDS);
+                let capped_wait = requested_wait.min(MAX_WAIT_SECONDS);
+                let intent_path = WaitIntent::path(&ctx);
+                let intent = intent_path
+                    .as_deref()
+                    .and_then(|path| crate::storage::read_json::<WaitIntent>(path).ok());
+                let (task_ids, wait_duration) = if let Some(intent) = intent {
+                    let remaining = intent.remaining();
+                    (intent.task_ids, remaining)
+                } else {
+                    let task_ids = resolve_task_ids(manager, &ctx, &params, "wait", true).await?;
+                    let duration = Duration::from_secs(capped_wait);
+                    if let Some(path) = intent_path {
+                        if let Some(parent) = path.parent() {
+                            prune_wait_intents(parent);
+                        }
+                        let intent = WaitIntent {
+                            task_ids: task_ids.clone(),
+                            deadline: chrono::Utc::now()
+                                + chrono::Duration::seconds(capped_wait as i64),
+                        };
+                        crate::storage::write_json_fast(&path, &intent)?;
+                    }
+                    (task_ids, duration)
+                };
+                // watch/delivery only updates notification settings and does not
+                // block. Only the actual wait action owns foreground metadata.
+
+                // `swarm await_members` returns a durable `await-...` dependency
+                // id, not a process-backed background task. Wait on its state.
+                if let [task_id] = task_ids.as_slice()
+                    && is_await_dependency_id(task_id)
+                {
+                    return wait_on_await_dependency(&ctx, task_id, wait_duration).await;
+                }
+
+                if task_ids.len() > 1 {
+                    let mode = params.wait_mode.as_deref().unwrap_or("any");
+                    let mode = if matches!(mode, "all" | "first_failure") {
+                        mode
+                    } else {
+                        "any"
+                    };
+                    let outcome = wait_many(
+                        manager,
+                        &ctx.session_id,
+                        &task_ids,
+                        wait_duration,
+                        params
+                            .return_on_progress
+                            .unwrap_or_else(default_wait_return_on_progress),
+                        mode,
+                    )
+                    .await?;
+                    let reason = outcome.reason.clone();
+                    let mut output =
+                        format!("Multi-task wait returned: {}\nMode: {}\n\n", reason, mode);
+                    if reason == "user_message" {
+                        output.push_str(USER_MESSAGE_NOTE);
+                        output.push_str("\n\n");
+                    }
+                    for task in &outcome.tasks {
+                        output.push_str(&format!(
+                            "- {} · {} · {}\n",
+                            task.task_id,
+                            crate::message::background_task_display_label(
+                                &task.tool_name,
+                                task.display_name.as_deref()
+                            ),
+                            status_label(&task.status)
+                        ));
+                    }
+                    for dependency in &outcome.dependencies {
+                        output.push_str(&format!(
+                            "- {} · await dependency · {}\n",
+                            dependency.id,
+                            dependency.status.label()
+                        ));
+                    }
+                    for missing in &outcome.unknown {
+                        output.push_str(&format!("- {} · not found\n", missing));
+                    }
+                    return Ok(ToolOutput::new(output).with_title("bg wait multiple").with_metadata(json!({
+                        "wait_reason": reason,
+                        "wait_mode": mode,
+                        "timed_out": reason == "timeout",
+                        "max_wait_seconds": capped_wait,
+                        "tasks": outcome.tasks.iter().map(|task| task_metadata(manager, task)).collect::<Vec<_>>(),
+                        "await_dependencies": outcome.dependencies.iter().map(|dependency| json!({
+                            "task_id": dependency.id,
+                            "status": dependency.status.label(),
+                            "summary": dependency.summary,
+                        })).collect::<Vec<_>>(),
+                        "missing_task_ids": outcome.unknown,
+                    })));
+                }
+
+                let Some(task_id) = task_ids.into_iter().next() else {
+                    return Err(anyhow::anyhow!(
+                        "Missing task_id; provide a task_id or use latest=true"
+                    ));
+                };
+                let current = manager.status(&task_id).await;
+                let blocking = !wait_duration.is_zero()
+                    && current
+                        .as_ref()
+                        .is_some_and(|task| !is_terminal(&task.status));
+                let wait_reason = current
+                    .as_ref()
+                    .map(task_wait_reason)
+                    .unwrap_or_else(|| "Waiting for background task".to_string());
+                let wait_guard =
+                    blocking.then(|| crate::wait_registry::register(&ctx.session_id, &wait_reason));
+                let incoming = crate::incoming_message::watch(&ctx.session_id);
+                let wait_result = if blocking {
+                    tokio::select! {
+                        biased;
+                        _ = incoming.arrived() => None,
+                        result = manager.wait(
+                            &task_id,
+                            wait_duration,
+                            params
+                                .return_on_progress
+                                .unwrap_or_else(default_wait_return_on_progress),
+                        ) => Some(result),
+                    }
+                } else {
+                    Some(
+                        manager
+                            .wait(
+                                &task_id,
+                                wait_duration,
+                                params
+                                    .return_on_progress
+                                    .unwrap_or_else(default_wait_return_on_progress),
+                            )
+                            .await,
+                    )
+                };
+                drop(wait_guard);
+                let Some(wait_result) = wait_result else {
+                    // A user message is queued behind this wait. Return now so
+                    // the turn injects it instead of hiding it until Ctrl+C.
+                    let Some(task) = manager.status(&task_id).await else {
+                        return Err(anyhow::anyhow!("Task not found: {}", task_id));
+                    };
+                    let mut output = format!("{USER_MESSAGE_NOTE}\n\n");
+                    output.push_str(&format_task_details(&task));
+                    return Ok(ToolOutput::new(output)
+                        .with_title(format!("bg wait {}", task_id))
+                        .with_metadata(json!({
+                            "task_id": task.task_id,
+                            "task": task_metadata(manager, &task),
+                            "display_name": task.display_name,
+                            "status": status_label(&task.status),
+                            "wait_reason": "user_message",
+                            "timed_out": false,
+                            "max_wait_seconds": capped_wait,
+                            "interrupted_by_user_message": true,
+                        })));
+                };
+                match wait_result {
+                    Some(wait_result) => {
+                        let task = wait_result.task;
+                        let reason = wait_result.reason;
+                        let reason_str = wait_reason_label(reason);
+                        let mut output = match reason {
+                            background::BackgroundTaskWaitReason::AlreadyFinished => {
+                                "Background task was already finished.\n\n".to_string()
+                            }
+                            background::BackgroundTaskWaitReason::Finished => {
+                                "Background task finished.\n\n".to_string()
+                            }
+                            background::BackgroundTaskWaitReason::Progress => {
+                                "Background task emitted a progress event.\n\n".to_string()
+                            }
+                            background::BackgroundTaskWaitReason::Checkpoint => {
+                                "Background task emitted a checkpoint event.\n\n".to_string()
+                            }
+                            background::BackgroundTaskWaitReason::Stalled => {
+                                "Background task stall watchdog fired: no output or progress for its stall window. The task is still running; inspect it and decide whether to keep waiting or cancel.\n\n".to_string()
+                            }
+                            background::BackgroundTaskWaitReason::Timeout => format!(
+                                "No terminal event before max wait of {}s. Check again with `bg action=\"wait\" task_id=\"{}\"` or inspect status/output.\n\n",
+                                capped_wait, task_id
+                            ),
+                        };
+                        output.push_str(&format_task_details(&task));
+                        if requested_wait > MAX_WAIT_SECONDS {
+                            output.push_str(&format!(
+                                "Requested wait was capped from {}s to {}s.\n",
+                                requested_wait, MAX_WAIT_SECONDS
+                            ));
+                        }
+
+                        let include_preview = params.include_output_preview.unwrap_or({
+                            matches!(task.status, BackgroundTaskStatus::Failed)
+                                || matches!(reason, background::BackgroundTaskWaitReason::Finished)
+                        });
+                        let mut preview_meta = Value::Null;
+                        if include_preview
+                            && let Some(full_output) = manager.output(&task.task_id).await
+                        {
+                            let tail = Some(
+                                params
+                                    .tail_lines
+                                    .or(params.lines)
+                                    .unwrap_or(DEFAULT_WAIT_PREVIEW_LINES),
+                            );
+                            let (preview, truncated) = output_preview(&full_output, tail);
+                            if !preview.trim().is_empty() {
+                                output.push_str("\nOutput preview:\n```text\n");
+                                output.push_str(&preview);
+                                if !preview.ends_with('\n') {
+                                    output.push('\n');
+                                }
+                                output.push_str("```\n");
+                            }
+                            preview_meta = json!({
+                                "tail_lines": tail,
+                                "truncated": truncated,
+                                "output_bytes": full_output.len(),
+                            });
+                        }
+
+                        Ok(ToolOutput::new(output)
+                            .with_title(format!("bg wait {}", task_id))
+                            .with_metadata(json!({
+                                "task_id": task.task_id,
+                                "task": task_metadata(manager, &task),
+                                "display_name": task.display_name,
+                                "status": status_label(&task.status),
+                                "wait_reason": reason_str,
+                                "timed_out": matches!(reason, background::BackgroundTaskWaitReason::Timeout),
+                                "max_wait_seconds": capped_wait,
+                                "return_on_progress": params.return_on_progress.unwrap_or_else(default_wait_return_on_progress),
+                                "exit_code": task.exit_code,
+                                "progress": task.progress,
+                                "progress_event": wait_result.progress_event,
+                                "event_record": wait_result.event_record,
+                                "output_preview": preview_meta,
+                            })))
+                    }
+                    None => Err(anyhow::anyhow!("Task not found: {}", task_id)),
+                }
+            }
+
+            _ => Err(anyhow::anyhow!(
+                "Unknown action: {}. Valid actions: list, status, output, tail, cancel, cleanup, delivery, wait",
+                action
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::{Result, anyhow};
+
+    #[tokio::test]
+    async fn multi_wait_metadata_tracks_only_blocking_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = background::BackgroundTaskManager::with_output_dir(dir.path().into());
+        let sid = "bg_multi_wait_metadata";
+        let task = manager
+            .spawn("test", sid, |_| async {
+                std::future::pending::<Result<background::TaskResult>>().await
+            })
+            .await;
+        let ids = vec![task.task_id.clone()];
+        let result = wait_many(&manager, sid, &ids, Duration::ZERO, false, "all")
+            .await
+            .unwrap();
+        assert_eq!(result.reason, "timeout");
+        assert_eq!(crate::wait_registry::current(sid), None);
+
+        let mut future = Box::pin(wait_many(
+            &manager,
+            sid,
+            &ids,
+            Duration::from_secs(30),
+            false,
+            "all",
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut future => panic!("unexpected completion: {result:?}"),
+                    _ = tokio::time::sleep(Duration::from_millis(5)) => {
+                        if crate::wait_registry::current(sid).is_some() { break; }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::wait_registry::current(sid).map(|(reason, _)| reason),
+            Some("Waiting for test".into())
+        );
+        drop(future);
+        assert_eq!(crate::wait_registry::current(sid), None);
+        manager.cancel(&task.task_id).await.unwrap();
+    }
+
+    fn test_ctx(session_id: &str) -> ToolContext {
+        ToolContext {
+            session_id: session_id.to_string(),
+            message_id: "m".into(),
+            tool_call_id: "t".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: crate::tool::ToolExecutionMode::Direct,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_applies_status_filter_before_recent_limit() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let manager = background::BackgroundTaskManager::with_output_dir(dir.path().into());
+        let ctx = test_ctx("filter-session");
+        for i in 0..15 {
+            let id = format!("task{i:02}");
+            std::fs::write(
+                manager.status_path_for(&id),
+                serde_json::to_vec(&json!({
+                    "task_id": id,
+                    "tool_name": "bash",
+                    "session_id": ctx.session_id,
+                    "status": if i == 0 { BackgroundTaskStatus::Failed } else { BackgroundTaskStatus::Completed },
+                    "started_at": format!("2026-11-20T01:{i:02}:00Z"),
+                }))?,
+            )?;
+        }
+        let mut input: BgInput =
+            serde_json::from_value(json!({"intent": "list tasks", "action": "list"}))?;
+        assert_eq!(filtered_tasks(&manager, &ctx, &input, true).await.len(), 12);
+        input.status_filter = Some(json!("failed"));
+        let rows = filtered_tasks(&manager, &ctx, &input, true).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].task_id, "task00");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn single_wait_returns_early_when_user_message_is_queued() {
+        let sid = "bg_wait_user_message_single";
+        let task = background::global()
+            .spawn("test", sid, |_| async {
+                std::future::pending::<Result<background::TaskResult>>().await
+            })
+            .await;
+        let started = Instant::now();
+        let notifier = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            crate::incoming_message::notify(sid);
+        });
+        let output = BgTool::new()
+            .execute(
+                json!({
+                    "action": "wait",
+                    "intent": "wait for pending test task",
+                    "task_id": task.task_id,
+                    "max_wait_seconds": 120,
+                }),
+                test_ctx(sid),
+            )
+            .await
+            .expect("wait result");
+        notifier.await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "wait must end right after the message, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            output.output.contains("user message arrived"),
+            "{}",
+            output.output
+        );
+        assert_eq!(output.metadata.unwrap()["wait_reason"], "user_message");
+        assert_eq!(crate::wait_registry::current(sid), None);
+        background::global().cancel(&task.task_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn single_wait_returns_at_once_for_already_queued_user_message() {
+        let sid = "bg_wait_user_message_prequeued";
+        let queue: jcode_agent_runtime::SoftInterruptQueue =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        crate::incoming_message::bind(sid, &queue);
+        queue
+            .lock()
+            .unwrap()
+            .push(jcode_agent_runtime::SoftInterruptMessage {
+                attachments: Vec::new(),
+                active_skill: None,
+                system_reminder: None,
+                content: "hi".into(),
+                images: Vec::new(),
+                urgent: false,
+                source: jcode_agent_runtime::SoftInterruptSource::User,
+                mode: jcode_agent_runtime::QueuedMessageMode::Steer,
+                client_id: None,
+                editing_by: None,
+            });
+        let task = background::global()
+            .spawn("test", sid, |_| async {
+                std::future::pending::<Result<background::TaskResult>>().await
+            })
+            .await;
+        let started = Instant::now();
+        let output = BgTool::new()
+            .execute(
+                json!({
+                    "action": "wait",
+                    "intent": "wait for pending test task",
+                    "task_id": task.task_id,
+                    "max_wait_seconds": 120,
+                }),
+                test_ctx(sid),
+            )
+            .await
+            .expect("wait result");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(output.metadata.unwrap()["wait_reason"], "user_message");
+        background::global().cancel(&task.task_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multi_wait_returns_early_when_user_message_is_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = background::BackgroundTaskManager::with_output_dir(dir.path().into());
+        let sid = "bg_wait_user_message_multi";
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let task = manager
+                .spawn("test", sid, |_| async {
+                    std::future::pending::<Result<background::TaskResult>>().await
+                })
+                .await;
+            ids.push(task.task_id);
+        }
+        let notifier = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            crate::incoming_message::notify(sid);
+        });
+        let started = Instant::now();
+        let reason = wait_many(&manager, sid, &ids, Duration::from_secs(120), false, "all")
+            .await
+            .unwrap()
+            .reason;
+        notifier.await.unwrap();
+        assert_eq!(reason, "user_message");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(crate::wait_registry::current(sid), None);
+        for id in ids {
+            manager.cancel(&id).await.unwrap();
+        }
+    }
+
+    #[test]
+    fn status_filter_schema_is_a_typed_enum_and_arrays_still_parse() -> Result<()> {
+        let schema = BgTool::new().parameters_schema();
+        let filter = &schema["properties"]["status_filter"];
+        assert_eq!(filter["type"], json!("string"));
+        let advertised = filter["enum"]
+            .as_array()
+            .ok_or_else(|| anyhow!("status_filter should define an enum"))?;
+        for value in advertised {
+            assert!(
+                !parse_status_filter(Some(value)).is_empty(),
+                "advertised status_filter {value} selects nothing"
+            );
+        }
+
+        // Unadvertised forms stay accepted at runtime.
+        let both = parse_status_filter(Some(&json!(["running", "failed"])));
+        assert_eq!(both, HashSet::from(["running", "failed"]));
+        assert!(parse_status_filter(Some(&json!("all"))).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn schema_advertises_only_parameters_the_input_accepts() -> Result<()> {
+        let schema = BgTool::new().parameters_schema();
+        let properties = schema["properties"]
+            .as_object()
+            .ok_or_else(|| anyhow!("bg schema should define properties"))?;
+
+        // Every advertised parameter must deserialize into BgInput.
+        for (name, property) in properties {
+            let sample = match property["type"].as_str() {
+                Some("boolean") => json!(true),
+                Some("integer") => json!(1),
+                Some("array") => json!(["a"]),
+                _ => property["enum"][0]
+                    .as_str()
+                    .map_or(json!("x"), |value| json!(value)),
+            };
+            let mut input = json!({"action": "list", "intent": "Check schema"});
+            input[name.as_str()] = sample;
+            assert!(
+                serde_json::from_value::<BgInput>(input).is_ok(),
+                "advertised parameter {name} is rejected"
+            );
+        }
+
+        // Aliases and rarely used knobs are accepted but not paid for per request.
+        for hidden in ["lines", "dry_run", "graceful_timeout_ms"] {
+            assert!(!properties.contains_key(hidden), "{hidden} is advertised");
+        }
+        let actions = schema["properties"]["action"]["enum"]
+            .as_array()
+            .ok_or_else(|| anyhow!("action should define an enum"))?;
+        assert!(!actions.contains(&json!("watch")));
+        assert!(!actions.contains(&json!("subscribe")));
+        let hidden: BgInput = serde_json::from_value(json!({
+            "action": "subscribe",
+            "intent": "Check hidden aliases",
+            "lines": 5,
+            "dry_run": true,
+            "graceful_timeout_ms": 1000,
+            "status_filter": ["running"]
+        }))?;
+        assert_eq!(resolve_action(&hidden)?, "subscribe");
+        assert_eq!(hidden.lines, Some(5));
+        assert_eq!(hidden.dry_run, Some(true));
+        assert_eq!(hidden.graceful_timeout_ms, Some(1000));
+        Ok(())
+    }
+
+    #[test]
+    fn bg_intent_is_required_and_nonblank() {
+        for action in [
+            "list",
+            "status",
+            "output",
+            "tail",
+            "cancel",
+            "cleanup",
+            "watch",
+            "delivery",
+            "subscribe",
+            "wait",
+        ] {
+            assert!(serde_json::from_value::<BgInput>(json!({"action": action})).is_err());
+            for intent in [
+                Value::Null,
+                json!(""),
+                json!(" \t\n"),
+                json!("\u{2003}"),
+                json!(7),
+                json!(false),
+                json!([]),
+                json!({}),
+            ] {
+                assert!(
+                    serde_json::from_value::<BgInput>(json!({"action": action, "intent": intent}))
+                        .is_err(),
+                    "accepted invalid intent for {action}"
+                );
+            }
+            let params: BgInput = serde_json::from_value(
+                json!({"action": action, "intent": " Inspect background work "}),
+            )
+            .unwrap();
+            assert_eq!(resolve_action(&params).unwrap(), action);
+        }
+    }
+
+    #[test]
+    fn bg_schema_requires_nonblank_intent() {
+        for schema in [
+            BgTool::new().parameters_schema(),
+            BgTool::new().to_definition().input_schema,
+        ] {
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("intent"))
+            );
+            assert_eq!(schema["properties"]["intent"]["type"], "string");
+            assert_eq!(schema["properties"]["intent"]["minLength"], 1);
+            assert_eq!(schema["properties"]["intent"]["pattern"], "\\S");
+        }
+    }
+
+    #[test]
+    fn resolve_action_infers_wait_from_intent_only_call() -> Result<()> {
+        let params: BgInput = serde_json::from_value(json!({
+            "intent": "Wait for library tests",
+            "latest": true
+        }))?;
+
+        assert_eq!(resolve_action(&params)?, "wait");
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_action_reports_clear_error_when_missing_and_not_inferable() -> Result<()> {
+        let params: BgInput = serde_json::from_value(json!({
+            "intent": "Background task",
+        }))?;
+
+        let err = resolve_action(&params).expect_err("action should be required");
+        assert!(
+            err.to_string().contains("Missing required bg action"),
+            "err={err:?}"
+        );
+        Ok(())
+    }
+}
+
+/// `swarm await_members` hands back an `await-<key>-<generation>` dependency id.
+/// It lives in the durable await state, so `bg` must not look for it among
+/// process-backed background tasks.
+fn is_await_dependency_id(id: &str) -> bool {
+    id.starts_with(crate::todo::await_dependency::ID_PREFIX)
+}
+
+fn load_await_dependency(id: &str) -> Result<crate::todo::await_dependency::AwaitDependency> {
+    crate::todo::await_dependency::load(&crate::storage::runtime_dir(), id).ok_or_else(|| {
+        anyhow::anyhow!("Await dependency not found: {id}. It may have expired or never existed.")
+    })
+}
+
+fn await_dependency_status_text(id: &str) -> Result<String> {
+    let dependency = load_await_dependency(id)?;
+    Ok(match dependency.outcome_summary() {
+        Some(summary) => format!("Await dependency {id}\nStatus: {summary}"),
+        None if dependency.is_running() => {
+            format!("Await dependency {id}\nStatus: running (waiting on swarm members)")
+        }
+        None => format!("Await dependency {id}\nStatus: expired before resolving"),
+    })
+}
+
+#[cfg(test)]
+#[path = "bg_await_dependency_tests.rs"]
+mod await_dependency_tests;
+
+#[cfg(test)]
+#[path = "bg_completion_signal_tests.rs"]
+mod completion_signal_tests;

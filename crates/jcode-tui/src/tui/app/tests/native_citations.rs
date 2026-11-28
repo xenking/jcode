@@ -18,6 +18,8 @@ fn native_citation_suffix_correction_flushes_pacing_and_preserves_message_bounda
             name: "web_search".into(),
         },
         ServerEvent::ToolDone {
+            codemode: None,
+            ask: None,
             id: "ws_citation".into(),
             name: "web_search".into(),
             output: "Search completed".into(),
@@ -89,7 +91,7 @@ fn native_citation_suffix_correction_keeps_reasoning_prefix_and_ignores_stale_te
     remote.mark_history_loaded();
     let marker = "\u{e200}cite\u{e202}turn0search12\u{e201}";
     let prefix = "Retained reasoning 🦀\nEarlier commentary. ";
-    app.streaming.streaming_text = format!("{prefix}{marker}");
+    app.streaming.streaming_text = format!("{prefix}{marker}").into();
     app.handle_server_event(
         ServerEvent::TextSuffixReplace {
             old_text: marker.into(),
@@ -101,7 +103,7 @@ fn native_citation_suffix_correction_keeps_reasoning_prefix_and_ignores_stale_te
         app.streaming.streaming_text,
         format!("{prefix}[Source](<https://source.example>)")
     );
-    let before = app.streaming.streaming_text.clone();
+    let before = app.streaming.streaming_text.to_string();
     app.handle_server_event(
         ServerEvent::TextSuffixReplace {
             old_text: marker.into(),

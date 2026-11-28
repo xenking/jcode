@@ -1,0 +1,24 @@
+{
+  "billingCycleStart": "1793491200000",
+  "billingCycleEnd": "1796083200000",
+  "membershipType": "enterprise",
+  "planUsage": {
+    "totalSpend": 44997,
+    "includedSpend": 2000,
+    "bonusSpend": 42997,
+    "limit": 2000,
+    "remainingBonus": false,
+    "autoPercentUsed": 34.787619047619046,
+    "apiPercentUsed": 42.35,
+    "totalPercentUsed": 35.9976
+  },
+  "spendLimitUsage": {
+    "totalSpend": 964,
+    "individualLimit": 5000,
+    "individualUsed": 964,
+    "individualRemaining": 4036,
+    "limitType": "user"
+  },
+  "displayThreshold": 200,
+  "enabled": true
+}

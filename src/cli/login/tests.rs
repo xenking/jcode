@@ -14,6 +14,7 @@ fn novita_login_saves_private_key_and_rejects_empty_replacement() {
             openai_compatible_api_key: Some(" novita_test_key ".into()),
             ..LoginOptions::default()
         },
+        None,
     )
     .unwrap();
     let path = crate::storage::app_config_dir()
@@ -37,11 +38,63 @@ fn novita_login_saves_private_key_and_rejects_empty_replacement() {
             openai_compatible_api_key: Some("  ".into()),
             ..LoginOptions::default()
         },
+        None,
     )
     .unwrap_err();
     assert!(err.to_string().contains("No API key provided"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), saved);
     set_or_clear_env("NOVITA_API_KEY", prev_key);
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
+#[test]
+fn account_label_saves_a_second_key_without_touching_the_first() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_key = std::env::var_os("OPENCODE_GO_API_KEY");
+    crate::env::remove_var("OPENCODE_GO_API_KEY");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let profile = crate::provider_catalog::OPENCODE_GO_PROFILE;
+    let login = |key: &str, label: Option<&str>| {
+        login_openai_compatible_flow(
+            &profile,
+            &LoginOptions {
+                openai_compatible_api_key: Some(key.into()),
+                ..LoginOptions::default()
+            },
+            label,
+        )
+    };
+
+    login("sk-first", None).unwrap();
+    login("sk-second", Some("second")).unwrap();
+
+    let env_file = crate::storage::app_config_dir()
+        .unwrap()
+        .join(profile.env_file);
+    let saved = std::fs::read_to_string(env_file).unwrap();
+    assert!(saved.contains("OPENCODE_GO_API_KEY=sk-first"), "{saved}");
+    assert!(!saved.contains("sk-second"), "{saved}");
+    let accounts = crate::provider_catalog::api_key_accounts("opencode-go");
+    let ids: Vec<_> = accounts.iter().map(|a| a.id.to_string()).collect();
+    assert_eq!(ids, ["opencode-go", "opencode-go:second"]);
+    assert!(accounts[0].active, "the unlabelled key keeps serving");
+    let credential = crate::provider_catalog::api_key_credential_for_account(&accounts[1].id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(credential.api_key, "sk-second");
+
+    // Labels are for providers that need a key.
+    let local = login_openai_compatible_flow(
+        &crate::provider_catalog::OPENAI_COMPAT_PROFILE,
+        &LoginOptions::default(),
+        Some("x"),
+    )
+    .unwrap_err();
+    assert!(local.to_string().contains("single key"), "{local}");
+
+    set_or_clear_env("OPENCODE_GO_API_KEY", prev_key);
     set_or_clear_env("JCODE_HOME", prev_home);
 }
 
@@ -186,6 +239,75 @@ fn auto_scriptable_flow_reason_skips_when_scriptable_input_already_explicit() {
         false,
     );
     assert_eq!(reason, None);
+}
+
+#[test]
+fn cursor_browser_login_is_scriptable_but_key_and_app_import_are_not() {
+    let provider =
+        crate::provider_catalog::resolve_login_provider("cursor").expect("resolve cursor");
+    assert_eq!(
+        auto_scriptable_flow_reason(provider, &LoginOptions::default(), false),
+        Some("non_interactive_terminal")
+    );
+    for options in [
+        LoginOptions {
+            openai_compatible_api_key_env: Some("CURSOR_API_KEY".into()),
+            ..LoginOptions::default()
+        },
+        LoginOptions {
+            import_local_app: true,
+            ..LoginOptions::default()
+        },
+    ] {
+        assert_eq!(auto_scriptable_flow_reason(provider, &options, false), None);
+    }
+}
+
+#[tokio::test]
+async fn cursor_print_auth_url_saves_a_resumable_flow_the_sdk_can_complete_or_cancel() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let provider =
+        crate::provider_catalog::resolve_login_provider("cursor").expect("resolve cursor");
+    let options = LoginOptions {
+        print_auth_url: true,
+        json: true,
+        flow_id: Some("cursor-flow".into()),
+        ..LoginOptions::default()
+    };
+
+    let outcome = start_scriptable_login(provider, Some("work"), &options)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, LoginFlowOutcome::Deferred);
+    let pending = pending_login_path("cursor", Some("cursor-flow")).unwrap();
+    let PendingScriptableLogin::Cursor {
+        account_label,
+        challenge,
+    } = load_pending_login(&pending, "cursor").unwrap()
+    else {
+        panic!("expected a pending Cursor login");
+    };
+    assert_eq!(account_label.as_deref(), Some("work"));
+    assert!(
+        challenge
+            .login_url
+            .starts_with("https://cursor.com/loginDeepControl?")
+    );
+    cancel_scriptable_login(
+        provider,
+        &LoginOptions {
+            cancel: true,
+            flow_id: Some("cursor-flow".into()),
+            ..LoginOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(!pending.exists());
+    set_or_clear_env("JCODE_HOME", prev_home);
 }
 
 #[test]
@@ -784,4 +906,54 @@ async fn muse_device_login_slow_down_accumulates_delay_challenge_loop() {
     assert!(delays.windows(2).all(|w| w[0] < w[1]));
 
     set_or_clear_env(auth::muse::EXPERIMENTAL_ENV_VAR, prev_opt_in);
+}
+
+#[test]
+fn obtain_api_key_prefers_flag_then_env_var() {
+    let options = LoginOptions {
+        openai_compatible_api_key: Some("  sk-flag  ".into()),
+        openai_compatible_api_key_env: Some("JCODE_TEST_UNUSED_KEY".into()),
+        ..Default::default()
+    };
+    assert_eq!(obtain_api_key(&options, "Test").unwrap(), "sk-flag");
+
+    let var = "JCODE_TEST_LOGIN_KEY_FROM_ENV";
+    // SAFETY: unique variable name only read by this test.
+    unsafe { std::env::set_var(var, " sk-env ") };
+    let options = LoginOptions {
+        openai_compatible_api_key_env: Some(var.into()),
+        ..Default::default()
+    };
+    assert_eq!(obtain_api_key(&options, "Test").unwrap(), "sk-env");
+    unsafe { std::env::remove_var(var) };
+    assert!(obtain_api_key(&options, "Test").is_err());
+
+    let options = LoginOptions {
+        openai_compatible_api_key_env: Some("BAD NAME".into()),
+        ..Default::default()
+    };
+    assert!(obtain_api_key(&options, "Test").is_err());
+}
+
+#[test]
+fn every_api_key_provider_accepts_api_key_flag_and_oauth_ones_do_not() {
+    for id in [
+        "anthropic-api",
+        "openai-api",
+        "openrouter",
+        "bedrock",
+        "azure",
+        "cursor",
+        "gemini",
+        "openai-compatible",
+    ] {
+        let provider = crate::provider_catalog::resolve_login_provider(id)
+            .unwrap_or_else(|| panic!("resolve {id}"));
+        assert!(target_accepts_api_key(provider.target), "{id}");
+    }
+    for id in ["claude", "openai", "copilot", "antigravity"] {
+        let provider = crate::provider_catalog::resolve_login_provider(id)
+            .unwrap_or_else(|| panic!("resolve {id}"));
+        assert!(!target_accepts_api_key(provider.target), "{id}");
+    }
 }

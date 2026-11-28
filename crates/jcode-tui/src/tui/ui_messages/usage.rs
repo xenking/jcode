@@ -92,6 +92,8 @@ enum CardRow<'a> {
     },
     Alert(&'a str),
     Note(&'a str),
+    /// `✦ 2 resets · 1 usable · expires 15d`, shown green above the gauges.
+    Resets(&'a str),
     Spacer,
 }
 
@@ -108,12 +110,50 @@ fn parse_card_percent(text: &str) -> Option<f32> {
 }
 
 #[cfg(test)]
-#[path = "usage_activity_pair_tests.rs"]
+#[path = "tests/usage_activity_pair_tests.rs"]
 mod activity_pair_tests;
 
 #[cfg(test)]
 mod card_parse_error_tests {
     use super::*;
+
+    #[test]
+    fn warning_card_status_stays_amber_at_shared_threshold() {
+        let card = ProviderCard::parse("*warn\tApproaching limit").unwrap();
+        assert_eq!(
+            card.status_spans(false)[0].style.fg,
+            Some(rgb(255, 200, 100))
+        );
+    }
+
+    #[test]
+    fn legacy_report_status_uses_shared_usage_palette() {
+        for used in [0, 69, 70, 89, 90, 100] {
+            let style = usage_utilization_style(used as f32);
+            assert_eq!(
+                style.fg,
+                Some(crate::tui::info_widget::usage_limit_color(100 - used))
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_gauge_uses_shared_limit_bar() {
+        let raw = "  Weekly: █████░░░░░ 50% · resets in 2h";
+        let actual = usage_report_lines(raw, 50);
+        let expected = crate::tui::info_widget::LimitBar {
+            label: "Weekly",
+            label_column: 8,
+            used_pct: 50,
+            left_pct: 50,
+            reset_time: Some("resets in 2h"),
+            width: 50,
+            display_used: crate::config::config().display.usage_display_used(),
+            columns: None,
+        }
+        .render();
+        assert_eq!(actual, vec![expected]);
+    }
 
     #[test]
     fn activity_table_aligns_metrics_and_preserves_caveats() {
@@ -220,6 +260,8 @@ impl<'a> ProviderCard<'a> {
                     detail(rest, true)
                 } else if let Some(rest) = raw.strip_prefix("! ") {
                     CardRow::Alert(rest)
+                } else if raw.starts_with("✦ ") {
+                    CardRow::Resets(raw)
                 } else {
                     CardRow::Note(raw.strip_prefix("- ").unwrap_or(raw))
                 }
@@ -242,7 +284,7 @@ impl<'a> ProviderCard<'a> {
             CardStatus::Level(level, text) => (
                 match level {
                     "ok" => usage_limit_color(100),
-                    "warn" => usage_limit_color(50),
+                    "warn" => usage_limit_color(30),
                     "crit" => usage_limit_color(0),
                     "busy" => rgb(ACCENT_STYLE.0, ACCENT_STYLE.1, ACCENT_STYLE.2),
                     _ => dim_color(),
@@ -476,6 +518,12 @@ impl<'a> ProviderCard<'a> {
                 CardRow::Note(text) => {
                     for part in wrap_words(text, inner.max(1)) {
                         lines.push(Line::from(note_spans(&part)));
+                    }
+                }
+                CardRow::Resets(text) => {
+                    let style = usage_utilization_style(0.0).bold();
+                    for part in wrap_words(text, inner.max(1)) {
+                        lines.push(Line::from(Span::styled(part, style)));
                     }
                 }
                 CardRow::Spacer => {
@@ -802,47 +850,43 @@ pub(crate) fn usage_report_lines(raw: &str, width: usize) -> Vec<Line<'static>> 
             width,
         )];
     }
-    // Keep each gauge together when possible. On narrow cards put the label
-    // above it rather than wrapping a long label through the middle of a bar.
-    if width >= 6
-        && raw.width() > width
-        && let Some(start) = raw.find(['█', '░'])
+    // Old persisted reports contain literal bars. Parse their percentage and
+    // render them with the same widget as current structured provider cards.
+    if let Some(start) = raw.find(['█', '░'])
         && let Some(end) = raw[start..].find('%').map(|end| start + end + 1)
         && let Some(percent) = raw[start..end].split_whitespace().last()
         && let Ok(value) = percent.trim_end_matches('%').parse::<f32>()
+        && value.is_finite()
     {
-        // The report pads labels to align all providers. Drop that padding
-        // when reflowing a narrow card so short names do not wrap needlessly.
-        let raw_label = &raw[..start];
-        let compact_label = raw_label
-            .trim_end()
-            .strip_suffix(':')
-            .map(|label| format!("{}: ", label.trim_end()));
-        let label = compact_label.as_deref().unwrap_or(raw_label);
-        let original_bar_width = raw[start..]
-            .chars()
-            .take_while(|ch| matches!(ch, '█' | '░'))
-            .count();
-        let keep_label = label.width() + percent.width() + 5 <= width;
-        let prefix = if keep_label { label } else { "" };
-        let bar_width = width
-            .saturating_sub(prefix.width() + percent.width() + 1)
-            .min(original_bar_width);
-        let filled =
-            ((value.clamp(0.0, 100.0) / 100.0 * bar_width as f32).round() as usize).min(bar_width);
-        let gauge = format!(
-            "{prefix}{}{} {percent}",
-            "█".repeat(filled),
-            "░".repeat(bar_width - filled)
-        );
+        let label = raw[..start].trim().trim_end_matches(':').trim_end();
+        let used = value.clamp(0.0, 100.0).round() as u8;
+        let reset = raw[end..]
+            .trim()
+            .strip_prefix('·')
+            .unwrap_or(raw[end..].trim())
+            .trim();
+        let reset = (!reset.is_empty()).then_some(reset);
+        let keep_label = label.width() + 2 + 4 + 10 <= width;
+        let label_column = if keep_label { label.width() + 2 } else { 0 };
+        let bar = crate::tui::info_widget::LimitBar {
+            label: if keep_label { label } else { "" },
+            label_column,
+            used_pct: used,
+            left_pct: 100 - used,
+            reset_time: reset,
+            width: u16::try_from(width).unwrap_or(u16::MAX),
+            display_used: crate::config::config().display.usage_display_used(),
+            columns: None,
+        }
+        .render();
         let mut lines = Vec::new();
         if !keep_label {
-            lines.push(usage_styled_line(label.trim_end()));
+            lines.push(usage_styled_line(label));
         }
-        lines.push(usage_styled_line(&gauge));
-        let countdown = raw[end..].trim();
-        if !countdown.is_empty() {
-            lines.push(usage_styled_line(countdown));
+        let has_reset = reset.is_some_and(|reset| bar.to_string().contains(reset));
+        lines.push(bar);
+        if let Some(reset) = reset.filter(|_| !has_reset) {
+            lines.push(usage_styled_line(reset));
         }
         return lines;
     }
@@ -850,13 +894,8 @@ pub(crate) fn usage_report_lines(raw: &str, width: usize) -> Vec<Line<'static>> 
 }
 
 pub(crate) fn usage_utilization_style(percent: f32) -> Style {
-    Style::default().fg(if percent >= 90.0 {
-        Color::Red
-    } else if percent >= 70.0 {
-        rgb(255, 200, 100)
-    } else {
-        rgb(100, 220, 170)
-    })
+    let used = percent.clamp(0.0, 100.0).round() as u8;
+    Style::default().fg(crate::tui::info_widget::usage_limit_color(100 - used))
 }
 
 pub(crate) fn usage_styled_line(raw: &str) -> Line<'static> {
@@ -899,38 +938,6 @@ pub(crate) fn usage_styled_line(raw: &str) -> Line<'static> {
                 ),
                 Span::styled(format!(" {suffix}"), dim),
             ]);
-        }
-    }
-    if let Some(start) = raw.find(['█', '░']) {
-        let rest = &raw[start..];
-        let end = rest.find(|ch| ch != '█' && ch != '░').unwrap_or(rest.len());
-        let (bar, tail) = rest.split_at(end);
-        let percent = tail
-            .trim_start()
-            .split('%')
-            .next()
-            .and_then(|p| match p.parse::<f32>() {
-                Ok(percent) => Some(percent),
-                Err(error) => {
-                    crate::logging::debug(&format!("Invalid usage report percentage: {error}"));
-                    None
-                }
-            });
-        if let Some(percent) = percent {
-            let style = usage_utilization_style(percent);
-            let filled = bar.trim_end_matches('░');
-            let empty = &bar[filled.len()..];
-            let (value, countdown) = tail.split_once(" · ").unwrap_or((tail, ""));
-            let mut spans = vec![
-                Span::styled(raw[..start].to_owned(), dim),
-                Span::styled(filled.to_owned(), style),
-                Span::styled(empty.to_owned(), dim),
-                Span::styled(value.to_owned(), style.bold()),
-            ];
-            if !countdown.is_empty() {
-                spans.push(Span::styled(format!(" · {countdown}"), dim));
-            }
-            return Line::from(spans);
         }
     }
     let style = if raw.trim_start().starts_with("error:") || raw.trim() == "hard limit reached" {

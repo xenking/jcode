@@ -21,19 +21,37 @@ import {
 } from "./structured.js";
 import {
   API_VERSION_MAJOR,
+  ROUTING_CAPABILITY,
+  SIDE_QUESTIONS_CAPABILITY,
+  TRANSCRIBE_CAPABILITY,
+  MAX_TRANSCRIBE_WAV_BYTES,
   type AppletAction,
   type AnyApiEvent,
   type ApiEvent,
   type ApiRequest,
+  type AskResponse,
+  type Attachment,
   type HistoryMessage,
+  type RewindAnchor,
   type ImageAttachment,
   type ModelRouteInfo,
   type PermissionDecision,
+  type QueuedPrompt,
+  type QueuedPromptEditOutcome,
+  type QueuedPromptMode,
+  type QueuedPromptRemovalOutcome,
   type RenderedImage,
   type RuntimeCommand,
   type ServerFrame,
   type SessionInfo,
+  type RoutingGateChoice,
+  type RoutingIntentAction,
+  type RoutingView,
+  type SideQuestionTopic,
+  type SessionSearchHit,
   type SessionToolDefinition,
+  type SpeedMode,
+  type SpeedOption,
   type TextMatch,
   type TodoEffects,
   type TodoSnapshot,
@@ -50,6 +68,8 @@ export interface RuntimeInfo {
   model?: string;
   providers: string[];
   routes: ModelRouteInfo[];
+  speedMode?: SpeedMode;
+  speedOptions?: SpeedOption[];
 }
 
 export interface FileContent {
@@ -191,6 +211,7 @@ export interface RunOptions {
 export interface SendMessageOptions {
   /** Attach images to the persisted user message. */
   images?: ImageAttachment[];
+  attachments?: Attachment[];
   /** Persist the message as context without starting a model turn. */
   noReply?: boolean;
   /** Wait for message_accepted when starting a normal model turn. */
@@ -285,9 +306,8 @@ export class JcodeClient extends EventEmitter {
    * sockets, so it cannot see or disturb the jcode the user runs
    * interactively. `close()` shuts it down.
    *
-   * Provider logins are inherited from the user by default, because an
-   * instance without credentials cannot reach a model at all. Pass
-   * `inheritLogins: false` to start empty.
+   * Provider logins are NOT inherited from the user by default. Pass
+   * `inheritLogins: true` to link them, or supply credentials yourself.
    */
   static async launch(options: LaunchOptions & ConnectOptions = {}): Promise<JcodeClient> {
     const instance = await launchInstance(options);
@@ -405,16 +425,35 @@ export class JcodeClient extends EventEmitter {
     return this.requestFrame(request);
   }
 
-  private requestFrame(request: ApiRequest, onReply?: (frame: ServerFrame) => void): Promise<ServerFrame> {
+  private requestFrame(
+    request: ApiRequest,
+    onReply?: (frame: ServerFrame) => void,
+    timeoutMs: number = this.requestTimeoutMs,
+  ): Promise<ServerFrame> {
     if (this.closed) return Promise.reject(this.closeError ?? new Error("client closed"));
+    if (request.req === "ask_response" && !this.supports("ask_response_images")
+      && request.response.answers?.some((answer) =>
+        (answer.other_images?.length ?? 0) > 0
+        || Object.values(answer.comment_images ?? {}).some((images) => images.length > 0))) {
+      return Promise.reject(new HarnessError(
+        "unsupported",
+        "This server cannot receive images in ask answers. Update the jcode runtime and API bridge before sending; your answer has not been sent.",
+      ));
+    }
+    if (request.req === "queue_prompt" && request.active_skill != null && !this.supports("queued_prompt_active_skill")) {
+      return Promise.reject(new HarnessError(
+        "unsupported",
+        "This server cannot preserve queued skills. Update the jcode runtime and API bridge before sending; your prompt has not been sent.",
+      ));
+    }
     const id = this.nextId++;
     return new Promise<ServerFrame>((resolve, reject) => {
       const entry: Pending = { resolve, reject, onReply };
-      if (this.requestTimeoutMs > 0) {
+      if (timeoutMs > 0) {
         entry.timer = setTimeout(() => {
           this.pending.delete(id);
-          reject(new HarnessError("timeout", `no reply to ${request.req} within ${this.requestTimeoutMs}ms`));
-        }, this.requestTimeoutMs);
+          reject(new HarnessError("timeout", `no reply to ${request.req} within ${timeoutMs}ms`));
+        }, timeoutMs);
         entry.timer.unref?.();
       }
       this.pending.set(id, entry);
@@ -547,11 +586,16 @@ export class JcodeClient extends EventEmitter {
   }
 
   async attachSession(sessionId: string): Promise<SessionInfo> {
+    return (await this.attachSessionWithPendingAsks(sessionId)).session;
+  }
+
+  /** Attach and read the IDs of questions this connection can answer. Undefined means the runtime cannot provide a snapshot. */
+  async attachSessionWithPendingAsks(sessionId: string): Promise<{ session: SessionInfo; pendingAskIds: string[] | undefined }> {
     const frame = await this.expectReply(
       { req: "attach_session", session_id: sessionId },
       "attached",
     );
-    return frame.session;
+    return { session: frame.session, pendingAskIds: frame.pending_ask_ids };
   }
 
   /** Clone a session's complete persisted context into a new idle session. */
@@ -561,6 +605,39 @@ export class JcodeClient extends EventEmitter {
       "session_forked",
     );
     return frame.session;
+  }
+
+  private requireSideQuestions(): void {
+    if (!this.supports(SIDE_QUESTIONS_CAPABILITY)) {
+      throw new HarnessError("unsupported", "This runtime does not support side questions.");
+    }
+  }
+
+  async forkSideQuestion(parentSessionId: string): Promise<SideQuestionTopic> {
+    this.requireSideQuestions();
+    const frame = await this.expectReply(
+      { req: "fork_side_question", session_id: parentSessionId }, "side_question_forked",
+    );
+    return frame.topic;
+  }
+
+  async listSideQuestions(parentSessionId: string): Promise<SideQuestionTopic[]> {
+    this.requireSideQuestions();
+    const frame = await this.expectReply(
+      { req: "list_side_questions", parent_session_id: parentSessionId }, "side_questions",
+    );
+    return frame.topics;
+  }
+
+  async getSideQuestionHistory(sessionId: string): Promise<HistoryMessage[]> {
+    this.requireSideQuestions();
+    const frame = await this.expectReply({ req: "get_side_question_history", session_id: sessionId }, "history");
+    return frame.messages;
+  }
+
+  async promoteSideQuestion(sessionId: string): Promise<void> {
+    this.requireSideQuestions();
+    await this.requestOk({ req: "promote_side_question", session_id: sessionId });
   }
 
   async detachSession(sessionId: string): Promise<void> {
@@ -605,6 +682,7 @@ export class JcodeClient extends EventEmitter {
         session_id: sessionId,
         content,
         images,
+        attachments: options.attachments,
         no_reply: true,
       });
       return;
@@ -616,8 +694,30 @@ export class JcodeClient extends EventEmitter {
           options.acceptTimeoutMs ?? 10_000,
         )
       : undefined;
-    this.notify({ req: "send_message", session_id: sessionId, content, images });
+    this.notify({ req: "send_message", session_id: sessionId, content, images, attachments: options.attachments });
     await accepted;
+  }
+
+  async sendMessageWithAttachments(sessionId: string, content: string, attachments: Attachment[], options: SendMessageOptions = {}): Promise<void> {
+    await this.sendMessage(sessionId, content, { ...options, attachments });
+  }
+
+  /** Send a prompt with its skill resolved and activated by the daemon. */
+  async sendSkillMessage(
+    sessionId: string,
+    content: string,
+    activeSkill: string,
+    images: ImageAttachment[] = [],
+    systemReminder?: string,
+  ): Promise<void> {
+    this.notify({
+      req: "send_skill_message",
+      session_id: sessionId,
+      content,
+      active_skill: activeSkill,
+      images,
+      system_reminder: systemReminder,
+    });
   }
 
   /** Submit a hidden recovery continuation without awaiting message acceptance. */
@@ -691,6 +791,14 @@ export class JcodeClient extends EventEmitter {
     this.toolCallbacks.abort(sessionId);
   }
 
+  async forceStopTurn(sessionId: string): Promise<void> {
+    if (!this.supports("force_stop_turn_v1")) {
+      throw new HarnessError("unsupported", "This harness does not support force_stop_turn_v1.");
+    }
+    await this.requestOk({ req: "force_stop_turn", session_id: sessionId });
+    this.toolCallbacks.abort(sessionId);
+  }
+
   async softInterrupt(sessionId: string, content: string, urgent = false): Promise<void> {
     await this.softInterruptWithImages(sessionId, content, [], urgent);
   }
@@ -728,9 +836,128 @@ export class JcodeClient extends EventEmitter {
     });
   }
 
+  /** Queue a daemon-owned prompt, retaining its caller ID and delivery mode. */
+  async queuePrompt(sessionId: string, prompt: QueuedPrompt): Promise<void> {
+    await this.queuePromptWithReminder(sessionId, prompt);
+  }
+
+  /** Queue with an explicitly selected skill, or clear it when omitted. */
+  async queuePromptWithSkill(sessionId: string, prompt: QueuedPrompt, activeSkill?: string): Promise<void> {
+    await this.queuePrompt(sessionId, { ...prompt, active_skill: activeSkill });
+  }
+
+  async queuePromptWithReminder(sessionId: string, prompt: QueuedPrompt, systemReminder?: string): Promise<void> {
+    await this.requestOk({
+      req: "queue_prompt", session_id: sessionId, client_id: prompt.client_id,
+      content: prompt.content, images: prompt.images?.length ? prompt.images : undefined,
+      attachments: prompt.attachments?.length ? prompt.attachments : undefined,
+      mode: prompt.mode, system_reminder: systemReminder, active_skill: prompt.active_skill,
+    });
+  }
+
+  /** Hold a queued prompt for editing, or release the hold. */
+  async setQueuedPromptEditing(sessionId: string, clientId: string, promptId: string, editing: boolean): Promise<void> {
+    await this.requestOk({ req: "set_queued_prompt_editing", session_id: sessionId,
+      client_id: clientId, prompt_id: promptId, editing });
+  }
+
+  async editQueuedPrompt(sessionId: string, clientId: string, promptId: string, content: string, images: ImageAttachment[] = [], attachments: Attachment[] = []): Promise<QueuedPromptEditOutcome> {
+    const frame = await this.expectReply({ req: "edit_queued_prompt", session_id: sessionId, client_id: clientId,
+      prompt_id: promptId, content, images, attachments }, "queued_prompt_edited");
+    return frame.outcome;
+  }
+
+  async setQueuedPromptMode(sessionId: string, clientId: string, mode: QueuedPromptMode): Promise<void> {
+    await this.requestOk({ req: "set_queued_prompt_mode", session_id: sessionId, client_id: clientId, mode });
+  }
+
+  async interruptQueuedPrompt(sessionId: string, clientId: string): Promise<void> {
+    await this.requestOk({ req: "interrupt_queued_prompt", session_id: sessionId, client_id: clientId });
+  }
+
+  async interruptQueuedPrompts(sessionId: string, ids: string[]): Promise<void> {
+    await this.requestOk({ req: "interrupt_queued_prompts", session_id: sessionId, ids });
+  }
+
+  async getQueuedPrompts(sessionId: string): Promise<QueuedPrompt[]> {
+    const frame = await this.expectReply({ req: "get_queued_prompts", session_id: sessionId }, "queued_prompts");
+    return frame.prompts;
+  }
+
+  async removeQueuedPrompt(sessionId: string, clientId: string, promptId: string): Promise<QueuedPromptRemovalOutcome> {
+    const frame = await this.expectReply({ req: "remove_queued_prompt", session_id: sessionId, client_id: clientId, prompt_id: promptId }, "queued_prompt_removed");
+    return frame.outcome;
+  }
+
+  async reorderQueuedPrompts(sessionId: string, clientId: string, order: string[]): Promise<void> {
+    await this.requestOk({ req: "reorder_queued_prompts", session_id: sessionId, client_id: clientId, order });
+  }
+
   async getHistory(sessionId: string): Promise<HistoryMessage[]> {
     const { messages } = await this.getHistoryWithImages(sessionId);
     return messages;
+  }
+
+  async getHistoryPage(sessionId: string, before: string | null = null): Promise<{ messages: HistoryMessage[]; images: RenderedImage[]; before: string | null }> {
+    let cursor = before;
+    const rows: string[] = [];
+    let partial: { index: number; start: number; total: number; pieces: string[] } | undefined;
+    do {
+      const frame = await this.expectReply({ req: "get_history_page", session_id: sessionId, before: cursor, limit: 128 }, "history_page");
+      if (!frame.fragments.length && frame.before !== null) throw new HarnessError("protocol", "Empty history page with cursor");
+      for (const fragment of frame.fragments) {
+        const end = fragment.start + Buffer.byteLength(fragment.text, "utf8");
+        if (fragment.start < 0 || end > fragment.total) throw new HarnessError("protocol", "Invalid history fragment");
+        if (partial) {
+          if (fragment.index !== partial.index || fragment.total !== partial.total || end !== partial.start) throw new HarnessError("protocol", "Discontinuous history fragment");
+          partial.pieces.push(fragment.text);
+          if (fragment.start === 0) {
+            rows.push(partial.pieces.reverse().join(""));
+            partial = undefined;
+          } else partial.start = fragment.start;
+        } else {
+          if (end !== fragment.total) throw new HarnessError("protocol", "Incomplete history fragment tail");
+          if (fragment.start === 0) rows.push(fragment.text);
+          else partial = { index: fragment.index, start: fragment.start, total: fragment.total, pieces: [fragment.text] };
+        }
+      }
+      cursor = frame.before;
+      if (partial && cursor === null) throw new HarnessError("protocol", "Truncated history record");
+    } while (partial);
+    const messages: HistoryMessage[] = [];
+    const images: RenderedImage[] = [];
+    let users = 0;
+    for (const row of rows.reverse()) {
+      const record = JSON.parse(row) as { message: HistoryMessage; images: RenderedImage[] };
+      for (const image of record.images) {
+        if (image.history_message_index != null) image.history_message_index += messages.length;
+        if (image.anchor?.kind === "user_prompt") image.anchor.ordinal += users;
+        images.push(image);
+      }
+      if (record.message.role === "user") users++;
+      messages.push(record.message);
+    }
+    return { messages, images, before: cursor };
+  }
+
+  async getHistoryImage(sessionId: string, key: string): Promise<string> {
+    let data = "";
+    let offset = 0;
+    for (;;) {
+      const frame = await this.expectReply({ req: "get_history_image_chunk", session_id: sessionId, key, offset }, "history_image_chunk");
+      const bytes = Buffer.byteLength(frame.data, "utf8");
+      if (frame.key !== key || frame.offset !== offset || (!bytes && offset < frame.total) || offset + bytes > frame.total) throw new HarnessError("protocol", "Invalid image chunk");
+      data += frame.data;
+      offset += bytes;
+      if (offset === frame.total) return data;
+    }
+  }
+
+  async getCompactedHistory(sessionId: string, visibleMessages: number) {
+    return this.expectReply(
+      { req: "get_compacted_history", session_id: sessionId, visible_messages: visibleMessages },
+      "compacted_history",
+    );
   }
 
   async getHistoryWithImages(
@@ -759,6 +986,25 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "rewind", session_id: sessionId, message_index: messageIndex });
   }
 
+  /**
+   * Answer an `ask` tool request. Omit `answers` (or pass `{}`) to decline.
+   *
+   * The runtime is blocked on this reply, so a client that renders ask cards
+   * must answer every `ask_request` it shows.
+   */
+  async respondToAsk(
+    sessionId: string,
+    requestId: string,
+    response: AskResponse,
+  ): Promise<void> {
+    await this.requestOk({
+      req: "ask_response",
+      session_id: sessionId,
+      request_id: requestId,
+      response,
+    });
+  }
+
   async respondToPermission(
     sessionId: string,
     requestId: string,
@@ -781,6 +1027,46 @@ export class JcodeClient extends EventEmitter {
   async listModels(sessionId: string): Promise<{ models: string[]; current?: string }> {
     const frame = await this.expectReply({ req: "list_models", session_id: sessionId }, "models");
     return { models: frame.models ?? [], current: frame.current };
+  }
+
+  /** List routes for a new conversation without creating a session. */
+  async listDraftModels(): Promise<{ current: string | null; routes: ModelRouteInfo[] }> {
+    if (!this.supports("draft_model_catalog")) return { current: null, routes: [] };
+    const frame = await this.expectReply({ req: "list_draft_models" }, "draft_models");
+    return { current: frame.current, routes: frame.routes };
+  }
+
+  /**
+   * Transcribe one recording with the daemon's configured dictation backend.
+   *
+   * `wav` is a mono PCM16 WAV of at most five minutes and 10 MiB (the streaming
+   * providers need 16 kHz). Rejects with `unsupported` before sending anything
+   * when the daemon lacks `transcribe_v1`, and with the daemon's
+   * `transcription_not_configured`, `transcription_unavailable`,
+   * `transcription_timeout`, `audio_too_large` or `invalid_request` codes.
+   * Waits at least ten minutes for the reply: the daemon may wait that long
+   * on its backend. Resolves to "" when no speech was recognised.
+   */
+  async transcribeAudio(wav: Uint8Array, language?: string): Promise<string> {
+    if (!this.supports(TRANSCRIBE_CAPABILITY)) {
+      throw new HarnessError(
+        "unsupported",
+        "This machine's Jcode cannot transcribe voice. Update Jcode on that machine; your recording has not been sent.",
+      );
+    }
+    if (wav.byteLength > MAX_TRANSCRIBE_WAV_BYTES) {
+      throw new HarnessError("audio_too_large", "The recording is larger than 10 MiB. Record a shorter clip.");
+    }
+    const frame = await this.requestFrame(
+      { req: "transcribe_audio", wav: Buffer.from(wav).toString("base64"), language },
+      undefined,
+      this.requestTimeoutMs > 0 ? Math.max(this.requestTimeoutMs, 615_000) : 0,
+    );
+    if (frame.ev === "error") throw new HarnessError(String(frame.code), String(frame.message));
+    if (frame.ev !== "audio_transcript") {
+      throw new HarnessError("unexpected_reply", `expected audio_transcript, got ${frame.ev}`);
+    }
+    return String(frame.text);
   }
 
   /** Runtime identity, route catalog, protocol metadata, and a live health check. */
@@ -823,6 +1109,8 @@ export class JcodeClient extends EventEmitter {
         ),
       ],
       routes,
+      speedMode: frame.speed_mode,
+      speedOptions: frame.speed_options,
     };
   }
 
@@ -881,6 +1169,32 @@ export class JcodeClient extends EventEmitter {
     return frame.matches;
   }
 
+  /** Search every stored session's titles and transcripts. Answers from the
+   * daemon's index, so a client can offer global recall without reading
+   * session files. Needs no attached session. */
+  async searchSessions(
+    query: string,
+    limit?: number,
+  ): Promise<{
+    query: string;
+    titles: SessionSearchHit[];
+    messages: SessionSearchHit[];
+    indexed_sessions: number;
+    truncated: boolean;
+  }> {
+    const frame = await this.expectReply(
+      { req: "search_sessions", query, limit },
+      "session_search",
+    );
+    return {
+      query: frame.query,
+      titles: frame.titles,
+      messages: frame.messages,
+      indexed_sessions: frame.indexed_sessions,
+      truncated: frame.truncated ?? false,
+    };
+  }
+
   /** Persisted todo state for client-side auto-poke and quality gates.
    * Requires the `todo_state` capability. */
   async todoState(sessionId: string): Promise<TodoSnapshot> {
@@ -927,6 +1241,21 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "set_model", session_id: sessionId, model });
   }
 
+  /**
+   * Like `setModel`, and reports whether the switch took effect (`applied`) or
+   * is queued behind the running turn (`queued`). Anything meant for the new
+   * model, such as an effort level, must wait until it has applied.
+   */
+  async setModelSwitch(sessionId: string, model: string): Promise<"queued" | "applied"> {
+    const frame = await this.requestOk({ req: "set_model", session_id: sessionId, model });
+    return frame.ev === "model_switch" && frame.state === "queued" ? "queued" : "applied";
+  }
+
+  /** Withdraw a model switch that `setModel` queued behind a running turn. */
+  async cancelPendingModel(sessionId: string): Promise<void> {
+    await this.requestOk({ req: "cancel_pending_model", session_id: sessionId });
+  }
+
   /** Override a session context budget. Null or zero restores its default. */
   async setContextCap(sessionId: string, maxContextTokens: number | null): Promise<number> {
     if (maxContextTokens !== null && (!Number.isSafeInteger(maxContextTokens) || maxContextTokens < 0)) {
@@ -934,6 +1263,35 @@ export class JcodeClient extends EventEmitter {
     }
     const frame = await this.expectReply({ req: "set_context_cap", session_id: sessionId, max_context_tokens: maxContextTokens }, "context_cap_changed");
     return frame.effective_budget;
+  }
+
+  private requireRouting(): void {
+    if (!this.supports(ROUTING_CAPABILITY)) {
+      throw new HarnessError("unsupported", "This runtime does not support account routing.");
+    }
+  }
+
+  /**
+   * Answer a `routing_gate` event. Rejects when the gate is no longer waiting,
+   * for example because another client answered first.
+   */
+  async answerRoutingGate(sessionId: string, gateId: string, choice: RoutingGateChoice): Promise<void> {
+    this.requireRouting();
+    await this.requestOk({ req: "routing_gate_answer", session_id: sessionId, gate_id: gateId, choice });
+  }
+
+  /** Set or read a routing intent for a session. Resolves to the status text. */
+  async routingIntent(sessionId: string, action: RoutingIntentAction): Promise<string> {
+    this.requireRouting();
+    const frame = await this.expectReply({ req: "routing_intent", session_id: sessionId, action }, "routing_status");
+    return frame.text;
+  }
+
+  /** The routing configuration with live usage. Needs no attached session. */
+  async routingView(): Promise<RoutingView> {
+    this.requireRouting();
+    const frame = await this.expectReply({ req: "get_routing_view" }, "routing_view");
+    return frame.view;
   }
 
   /**
@@ -945,6 +1303,15 @@ export class JcodeClient extends EventEmitter {
    */
   async setReasoningEffort(sessionId: string, effort: string): Promise<void> {
     await this.requestOk({ req: "set_reasoning_effort", session_id: sessionId, effort });
+  }
+
+  /** Persist this session's requested speed. This does not confirm upstream usage. */
+  async setSpeedMode(sessionId: string, speedMode: SpeedMode): Promise<{ speedMode: SpeedMode; speedOptions: SpeedOption[] }> {
+    const frame = await this.expectReply(
+      { req: "set_speed_mode", session_id: sessionId, speed_mode: speedMode },
+      "speed_mode_changed",
+    );
+    return { speedMode: frame.speed_mode, speedOptions: frame.speed_options };
   }
 
   /**
@@ -998,7 +1365,12 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "close_applet", session_id: sessionId, instance });
   }
 
-  /** Restore the history the last `rewind` removed. */
+  /** Rewind to an identified transcript row, retaining its stored message. */
+  async rewindTranscript(sessionId: string, target: RewindAnchor): Promise<void> {
+    await this.requestOk({ req: "rewind_transcript", session_id: sessionId, target });
+  }
+
+  /** Restore the history the last rewind removed. */
   async rewindUndo(sessionId: string): Promise<void> {
     await this.requestOk({ req: "rewind_undo", session_id: sessionId });
   }

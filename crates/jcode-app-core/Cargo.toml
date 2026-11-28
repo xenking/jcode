@@ -31,6 +31,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
+serde_path_to_error = "0.1"
 toml = "0.8"
 
 # CLI
@@ -51,6 +52,7 @@ jcode-applet-types = { path = "../jcode-applet-types" }
 # Embeddings (local inference) live in jcode-base; this crate forwards the
 # `embeddings` feature to jcode-base rather than depending on jcode-embedding.
 jcode-harness-api = { path = "../jcode-harness-api" }
+jcode-sdk = { path = "../jcode-sdk" }
 jcode-productivity-core = { path = "../jcode-productivity-core" }
 jcode-import-core = { path = "../jcode-import-core" }
 
@@ -65,6 +67,7 @@ jcode-agent-runtime = { path = "../jcode-agent-runtime" }
 jcode-ambient-types = { path = "../jcode-ambient-types" }
 jcode-notify-email = { path = "../jcode-notify-email" }
 jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-routing-policy = { path = "../jcode-routing-policy" }
 jcode-schema-dialect = { path = "../jcode-schema-dialect" }
 # NOTE: jcode-app-core does NOT depend on any jcode-tui-* crate. They were
 # unused dead dependency edges here (the TUI declares them itself). Removing
@@ -94,6 +97,7 @@ jcode-plan = { path = "../jcode-plan" }
 jcode-swarm-core = { path = "../jcode-swarm-core" }
 jcode-selfdev-types = { path = "../jcode-selfdev-types" }
 jcode-session-types = { path = "../jcode-session-types" }
+jcode-background-types = { path = "../jcode-background-types" }
 jcode-setup-hints = { path = "../jcode-setup-hints" }
 jcode-task-types = { path = "../jcode-task-types" }
 jcode-tool-core = { path = "../jcode-tool-core" }
@@ -104,7 +108,7 @@ jcode-tool-types = { path = "../jcode-tool-types" }
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
-agentgrep = { git = "https://github.com/1jehuang/agentgrep.git", tag = "v0.2.0" }
+agentgrep = { git = "https://github.com/1jehuang/agentgrep.git", rev = "ff7ba82913f4c3a1d69062767d7661de7de80e4b" }
 
 [features]
 default = ["pdf", "bedrock"]
@@ -126,12 +130,20 @@ pdf = ["dep:jcode-pdf"]
 test-support = ["jcode-base/test-support"]
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }  # Builds screenshot-sized fixtures.
+jcode-harness-api-server = { path = "../jcode-harness-api-server" }
+jcode-provider-anthropic-runtime = { path = "../jcode-provider-anthropic-runtime", default-features = false, features = ["test-support"] }
+jcode-provider-anthropic = { path = "../jcode-provider-anthropic" }
+jcode-provider-openai-runtime = { path = "../jcode-provider-openai-runtime" }
+jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
 # The application consumes a corpus registered by the executable. Only its
 # own documentation tests need to embed the real corpus directly.
 jcode-docs-data = { path = "../jcode-docs-data" }
 # Paused-time browser tests must compile when this package is tested alone,
 # without inheriting test-util from another workspace package's dev-dependencies.
 tokio = { version = "1", features = ["test-util"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 # Used by async streaming tests (ambient/runner_tests, server/client_actions_tests).
 async-stream = "0.3"
 # Enables jcode-base's test-support helpers (storage::lock_test_env,
@@ -145,7 +157,4 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
-# Native desktop control for the `macos_computer_use` tool (synthetic mouse/keyboard
-# events, cursor positioning, display bounds). `highsierra` enables the
-# CGEventCreateScrollWheelEvent2 binding used for scroll.
-core-graphics = { version = "0.23", features = ["highsierra"] }
+jcode-computer = { path = "../jcode-computer" }

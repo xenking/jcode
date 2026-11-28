@@ -2,95 +2,19 @@
 mod rewind;
 mod update;
 use rewind::*;
+#[path = "key_handling_runtime_commands.rs"]
+mod runtime_commands;
+use runtime_commands::apply_remote_effort_direction;
+use runtime_commands::ssh_runtime_command;
 
 use super::*;
 use crate::tui::app as app_mod;
 use crate::tui::app::PendingRemoteRewindNotice;
 use crate::tui::core;
 
-/// Canonical runtime commands never run the similarly named laptop handler.
-/// Keep argument validation and destructive-action confirmation on the daemon.
-fn ssh_runtime_command(input: &str) -> Option<(&'static str, Vec<String>)> {
-    if let Some(command) = super::ssh_host::command(input) {
-        return Some(command);
-    }
-    let mut words = input.split_whitespace();
-    let token = words.next()?;
-    let command = match token {
-        "/poke" => "poke",
-        "/improve" => "improve",
-        "/refactor" => "refactor",
-        "/fix" => "fix",
-        "/skills" => "skills",
-        "/refresh-model-list" => "refresh_model_list",
-        "/context" => "context",
-        "/info" => "info",
-        "/cache" => "cache",
-        "/agents" => "agents",
-        "/subagent-model" => "subagent_model",
-        "/autoreview" => "autoreview",
-        "/autojudge" => "autojudge",
-        "/review" => "review",
-        "/judge" => "judge",
-        "/subagent" => "subagent",
-        "/telemetry" => "telemetry",
-        "/subscription" => "subscription",
-        "/overnight" => "overnight",
-        "/productivity" | "/wrapped" => "productivity",
-        "/initiatives" | "/goals" => "initiatives",
-        "/auth" => "auth",
-        "/logout" => "logout",
-        "/remote" => "remote",
-        "/provider-test-coverage" | "/model-status" => "provider_test_coverage",
-        "/z" | "/zz" | "/zzz" | "/zstatus" => "premium",
-        _ => return None,
-    };
-    let mut args = Vec::new();
-    match token {
-        "/z" => args.push("normal".to_string()),
-        "/zz" => args.push("toggle-one".to_string()),
-        "/zzz" => args.push("toggle-zero".to_string()),
-        "/zstatus" => args.push("status".to_string()),
-        _ => {}
-    }
-    args.extend(words.map(str::to_string));
-    Some((command, args))
-}
-
 #[cfg(test)]
-mod ssh_runtime_routing_tests {
-    #[test]
-    fn ssh_runtime_aliases_preserve_arguments_and_confirmation() {
-        for (input, command, args) in [
-            ("/logout openai", "logout", vec!["openai"]),
-            (
-                "/logout openai confirm",
-                "logout",
-                vec!["openai", "confirm"],
-            ),
-            ("/wrapped status", "productivity", vec!["status"]),
-            ("/goals", "initiatives", vec![]),
-            ("/model-status", "provider_test_coverage", vec![]),
-            ("/z", "premium", vec!["normal"]),
-            ("/zz", "premium", vec!["toggle-one"]),
-            ("/zzz", "premium", vec!["toggle-zero"]),
-            ("/zstatus", "premium", vec!["status"]),
-        ] {
-            let (actual, actual_args) = super::ssh_runtime_command(input).unwrap();
-            assert_eq!(actual, command, "{input}");
-            assert_eq!(actual_args, args, "{input}");
-        }
-        for input in [
-            "/contextual skill",
-            "/home/vm/info",
-            "/logout-custom-skill",
-            "/improve-custom-skill",
-            "/fast-default-custom",
-        ] {
-            assert!(super::ssh_runtime_command(input).is_none(), "{input}");
-        }
-    }
-}
+#[path = "key_handling/ssh_runtime_routing_tests.rs"]
+mod ssh_runtime_routing_tests;
 
 #[cfg(test)]
 pub(in crate::tui::app) use update::reload_stale_remote_server_before_update;
@@ -98,105 +22,10 @@ pub(in crate::tui::app) use update::{
     handle_remote_char_input, handle_remote_update_command, send_interleave_now,
 };
 
-/// Step the remote session's speed tier (Standard -> Fast -> Ultrafast).
-async fn apply_remote_speed_direction(
-    app: &mut App,
-    remote: &mut RemoteConnection,
-    direction: i8,
-) -> Result<()> {
-    use jcode_provider_core::service_tier::{speed_tier_ladder_with_capabilities, step_speed_tier};
-    let (provider_name, provider_model) = app.remote_effort_identity();
-    let ladder = speed_tier_ladder_with_capabilities(
-        provider_name.as_deref(),
-        provider_model.as_deref(),
-        app.remote_available_service_tiers.as_deref(),
-    );
-    let Some((index, next, at_end)) =
-        step_speed_tier(&ladder, app.remote_service_tier.as_deref(), direction)
-    else {
-        app.set_status_notice("Speed tiers not available for this model");
-        return Ok(());
-    };
-    if at_end {
-        app.set_status_notice(app_mod::speed_tier_notice(
-            next,
-            index,
-            ladder.len(),
-            Some(direction),
-        ));
-        return Ok(());
-    }
-    request_remote_service_tier(app, remote, next).await?;
-    Ok(())
-}
-
-async fn request_remote_service_tier(
-    app: &mut App,
-    remote: &mut RemoteConnection,
-    tier: &str,
-) -> Result<()> {
-    // A transient notice acknowledges input without claiming configuration or
-    // provider acceptance. The server acknowledgement replaces it, so fast
-    // round trips do not add a second transcript message.
-    app.set_status_notice(format!(
-        "Speed: {} requested (waiting for server)",
-        app_mod::service_tier_display_label(tier)
-    ));
-    remote.set_service_tier(tier).await
-}
-
-async fn apply_remote_effort_direction(
-    app: &mut App,
-    remote: &mut RemoteConnection,
-    direction: i8,
-) -> Result<()> {
-    // Use the best-known provider/model identity (server-reported when
-    // available, header hints during the pre-History bootstrap window) so
-    // effort cycling works immediately after spawn instead of claiming the
-    // provider does not support it until the History payload settles.
-    let (provider_name, provider_model) = app.remote_effort_identity();
-    let efforts =
-        app_mod::inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref());
-    if efforts.is_empty() {
-        app.set_status_notice("Reasoning effort not available for this provider");
-        return Ok(());
-    }
-    let current = app.remote_reasoning_effort_hint();
-    let current = current.as_deref();
-    let current_index = current
-        .and_then(|c| efforts.iter().position(|e| *e == c))
-        .unwrap_or(efforts.len() - 1);
-    let len = efforts.len();
-    let next_index = if direction > 0 {
-        if current_index + 1 >= len {
-            current_index
-        } else {
-            current_index + 1
-        }
-    } else if current_index == 0 {
-        0
-    } else {
-        current_index - 1
-    };
-    let next_effort = efforts[next_index];
-    if Some(next_effort) == current {
-        let label = app_mod::effort_display_label(next_effort);
-        app.set_status_notice(format!(
-            "Effort: {} (already at {})",
-            label,
-            if direction > 0 { "max" } else { "min" }
-        ));
-    } else {
-        app.remote_reasoning_effort = Some(next_effort.to_string());
-        app.invalidate_model_picker_cache();
-        app.set_status_notice(format!(
-            "Effort: {} (will apply to next request)",
-            app_mod::effort_display_label(next_effort)
-        ));
-        remote.set_reasoning_effort(next_effort).await?;
-    }
-    Ok(())
-}
+#[path = "key_handling/speed_commands.rs"]
+mod speed_commands;
+#[allow(unused_imports)]
+pub(crate) use speed_commands::*;
 
 impl App {
     pub(super) async fn handle_account_picker_command_remote(
@@ -247,6 +76,11 @@ pub(in crate::tui::app) async fn handle_remote_key(
 mod key_events;
 pub(in crate::tui::app) use key_events::handle_remote_key_event;
 use key_events::handle_remote_key_internal;
+
+#[cfg(test)]
+#[path = "key_handling/recovery_queue_guard_tests.rs"]
+mod recovery_queue_guard_tests;
+
 /// Everything a plain Enter does with the composer contents in a remote
 /// session: slash commands, shell commands, and prompts. Shared by the key
 /// handler and by the turn-end dispatcher for commands queued with Ctrl+Enter.
@@ -319,6 +153,28 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         }
         let trimmed = prepared.expanded.trim();
 
+        if trimmed.split_whitespace().next() == Some("/mode") {
+            let argument = trimmed.strip_prefix("/mode").unwrap_or_default().trim();
+            let args = if argument.is_empty() {
+                Vec::new()
+            } else {
+                vec![argument.to_string()]
+            };
+            remote.runtime_command("mode", args).await?;
+            return Ok(());
+        }
+
+        if trimmed.split_whitespace().next() == Some("/acct") {
+            match app_mod::routing_acct::parse_acct(trimmed) {
+                Ok(Some(action)) => {
+                    remote.send_routing_intent(action).await?;
+                }
+                Ok(None) => {}
+                Err(message) => app.push_display_message(DisplayMessage::error(message)),
+            }
+            return Ok(());
+        }
+
         // Before the SSH gate: `/local` must work from a client attached
         // to the cloud copy, because the return is coordinated locally.
         if app_mod::commands_cloud::parse_cloud_command(trimmed).is_some() {
@@ -364,8 +220,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         if super::ssh_sessions::handle_command(app, remote, trimmed).await? {
             return Ok(());
         }
-        if crate::tui::is_ssh_remote()
-            && let Some((command, args)) = ssh_runtime_command(trimmed)
+        if let Some((command, args)) = ssh_runtime_command(trimmed)
+            && (crate::tui::is_ssh_remote() || command == "poke"
+                || (command == "cache" && args == ["resume"]))
         {
             remote.runtime_command(command, args).await?;
             app.set_status_notice(format!("Requested remote {command}"));
@@ -411,7 +268,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         }
 
         if crate::tui::is_ssh_remote() && trimmed.split_whitespace().next() == Some("/git") {
-            if matches!(trimmed, "/git" | "/git status") {
+            if trimmed == "/git" || trimmed.split_whitespace().eq(["/git", "status"]) {
                 // The daemon resolves its own CWD. Never consult local git or
                 // interpolate the remote working directory into a shell string.
                 super::input_dispatch::submit_remote_input_shell(
@@ -422,7 +279,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 )
                 .await?;
             } else {
-                app.push_display_message(DisplayMessage::error("Usage: /git or /git status"));
+                app_mod::commands::handle_git_command(app, trimmed);
             }
             return Ok(());
         }
@@ -524,8 +381,15 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if trimmed == "/update" {
-            handle_remote_update_command(app, remote).await?;
+        if let Some(parsed) = App::parse_update_command_channel(trimmed) {
+            match parsed {
+                Ok(explicit_channel) => {
+                    handle_remote_update_command(app, remote, explicit_channel).await?;
+                }
+                Err(usage) => {
+                    app.set_status_notice(usage);
+                }
+            }
             return Ok(());
         }
 
@@ -541,7 +405,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if app_mod::model_context::is_refresh_model_list_command(trimmed)
+        if app_mod::model_context_messages::is_refresh_model_list_command(trimmed)
             || matches!(trimmed, "/model refresh" | "/models refresh")
         {
             app.pending_remote_model_refresh_snapshot = Some((
@@ -553,7 +417,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 crate::bus::UiActivity::catalog(
                     app.remote_session_id
                         .clone()
-                        .or_else(|| Some(app.session.id.clone())),
+                        .or_else(|| Some(app.session.id().to_owned())),
                     "Model List Refresh Started\n\nAsked the remote server to refresh the provider model catalog. Jcode will show the discovered model and route changes when the server responds.",
                     Some("Refreshing model list..."),
                 ),
@@ -568,6 +432,15 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     )));
                     app.set_status_notice("Model list refresh failed");
                 }
+            }
+            return Ok(());
+        }
+
+        if trimmed == "/model cancel" {
+            if let Err(error) = remote.cancel_pending_model_change().await {
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to cancel the model switch: {error}"
+                )));
             }
             return Ok(());
         }
@@ -603,7 +476,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     .remote_provider_model
                     .clone()
                     .unwrap_or_else(|| app.provider.model());
-                let summary = match app.session.subagent_model.as_deref() {
+                let summary = match app.session.subagent_model() {
                     Some(model) => format!("fixed {}", model),
                     None => format!("inherit current ({})", current_model),
                 };
@@ -619,7 +492,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     .clone()
                     .unwrap_or_else(|| app.provider.model());
                 remote.set_subagent_model(None).await?;
-                app.session.subagent_model = None;
+                app.session
+                    .apply_worker_routing(crate::session::WorkerRouting {
+                        subagent_model: None,
+                        ..app.session.worker_routing()
+                    });
                 app.push_display_message(DisplayMessage::system(format!(
                     "Subagent model reset to inherit the current model ({}).",
                     current_model
@@ -628,7 +505,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 return Ok(());
             }
             remote.set_subagent_model(Some(rest.to_string())).await?;
-            app.session.subagent_model = Some(rest.to_string());
+            app.session
+                .apply_worker_routing(crate::session::WorkerRouting {
+                    subagent_model: Some(rest.to_string()),
+                    ..app.session.worker_routing()
+                });
             app.push_display_message(DisplayMessage::system(format!(
                 "Subagent model pinned to {} for this session.",
                 rest
@@ -682,11 +563,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             let label = current
                 .map(app_mod::effort_display_label)
                 .unwrap_or("default");
-            let (provider_name, provider_model) = app.remote_effort_identity();
-            let efforts = app_mod::inferred_reasoning_efforts(
-                provider_name.as_deref(),
-                provider_model.as_deref(),
-            );
+            let efforts = app.remote_available_efforts();
             if efforts.is_empty() {
                 app.push_display_message(DisplayMessage::system(
                     "Reasoning effort not available for this provider.".to_string(),
@@ -718,11 +595,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 app.push_display_message(DisplayMessage::error("Usage: /effort <level>"));
                 return Ok(());
             }
-            let (provider_name, provider_model) = app.remote_effort_identity();
-            let efforts = app_mod::inferred_reasoning_efforts(
-                provider_name.as_deref(),
-                provider_model.as_deref(),
-            );
+            let efforts = app.remote_available_efforts();
             if efforts.contains(&level) {
                 app.remote_reasoning_effort = Some(level.to_string());
                 app.invalidate_model_picker_cache();
@@ -731,7 +604,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     app_mod::effort_display_label(level)
                 ));
             }
-            remote.set_reasoning_effort(level).await?;
+            remote
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::ReasoningEffort(
+                    level,
+                ))
+                .await?;
             return Ok(());
         }
 
@@ -867,7 +744,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 app.push_display_message(DisplayMessage::error("Usage: /transport <mode>"));
                 return Ok(());
             }
-            remote.set_transport(mode).await?;
+            remote
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Transport(mode))
+                .await?;
             return Ok(());
         }
 
@@ -891,7 +770,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/autoreview on" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Autoreview, true)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Autoreview,
+                    enabled: true,
+                })
                 .await?;
             app.set_autoreview_feature_enabled(true);
             app.set_status_notice("Autoreview: ON");
@@ -903,7 +785,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/autoreview off" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Autoreview, false)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Autoreview,
+                    enabled: false,
+                })
                 .await?;
             app.set_autoreview_feature_enabled(false);
             app.set_status_notice("Autoreview: OFF");
@@ -948,7 +833,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/autojudge on" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Autojudge, true)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Autojudge,
+                    enabled: true,
+                })
                 .await?;
             app.set_autojudge_feature_enabled(true);
             app.set_status_notice("Autojudge: ON");
@@ -960,7 +848,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/autojudge off" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Autojudge, false)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Autojudge,
+                    enabled: false,
+                })
                 .await?;
             app.set_autojudge_feature_enabled(false);
             app.set_status_notice("Autojudge: OFF");
@@ -1118,7 +1009,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         if trimmed == "/memory" {
             let new_state = !app.memory_enabled;
             remote
-                .set_feature(crate::protocol::FeatureToggle::Memory, new_state)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Memory,
+                    enabled: new_state,
+                })
                 .await?;
             app.set_memory_feature_enabled(new_state);
             let label = if new_state { "ON" } else { "OFF" };
@@ -1132,7 +1026,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/memory on" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Memory, true)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Memory,
+                    enabled: true,
+                })
                 .await?;
             app.set_memory_feature_enabled(true);
             app.set_status_notice("Memory: ON");
@@ -1144,7 +1041,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/memory off" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Memory, false)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Memory,
+                    enabled: false,
+                })
                 .await?;
             app.set_memory_feature_enabled(false);
             app.set_status_notice("Memory: OFF");
@@ -1166,6 +1066,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             app.clear_provider_messages();
             app.clear_display_messages();
             app.queued_messages.clear();
+            app.queued_images.clear();
             app.queued_commands.clear();
             app.pasted_contents.clear();
             app.pending_images.clear();
@@ -1192,12 +1093,16 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if trimmed == "/btw" || trimmed.starts_with("/btw ") || trimmed.starts_with("/fork ") {
-            let prompt = trimmed
-                .strip_prefix("/btw")
-                .or_else(|| trimmed.strip_prefix("/fork"))
-                .unwrap_or_default()
-                .trim();
+        // `/btw` is a side card, not a new window: it shares the daemon's
+        // backend with Desktop's side question instead of forking a chat.
+        if (trimmed == "/btw" || trimmed.starts_with("/btw "))
+            && app_mod::commands::handle_btw_command(app, trimmed)
+        {
+            return Ok(());
+        }
+
+        if trimmed.starts_with("/fork ") {
+            let prompt = trimmed.strip_prefix("/fork").unwrap_or_default().trim();
             if prompt.is_empty() {
                 app.push_display_message(DisplayMessage::error(
                     "Usage: /btw <question>".to_string(),
@@ -1208,6 +1113,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             // parent's next message.
             let images = app.take_pending_image_payloads();
             let prepared = input::PreparedInput {
+                pasted_contents: Vec::new(),
                 raw_input: prompt.to_string(),
                 expanded: prompt.to_string(),
                 images,
@@ -1273,7 +1179,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/swarm on" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Swarm, true)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Swarm,
+                    enabled: true,
+                })
                 .await?;
             app.set_swarm_feature_enabled(true);
             app.set_status_notice("Swarm: ON");
@@ -1285,7 +1194,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/swarm off" {
             remote
-                .set_feature(crate::protocol::FeatureToggle::Swarm, false)
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Feature {
+                    feature: crate::protocol::FeatureToggle::Swarm,
+                    enabled: false,
+                })
                 .await?;
             app.set_swarm_feature_enabled(false);
             app.set_status_notice("Swarm: OFF");
@@ -1342,7 +1254,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 ));
             }
             let name = app.session.display_name().to_string();
-            let msg = if let Some(ref lbl) = app.session.save_label {
+            let msg = if let Some(ref lbl) = app.session.save_label() {
                 format!(
                     "📌 Session {} saved as \"{}\". It will appear at the top of /resume.",
                     name, lbl,
@@ -1597,7 +1509,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 ));
                 return Ok(());
             };
-            remote.set_compaction_mode(mode).await?;
+            remote
+                .apply_session_policy(crate::tui::backend::SessionPolicyChange::Compaction(mode))
+                .await?;
             return Ok(());
         }
 
@@ -1614,7 +1528,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
             if trimmed == "/z" {
                 app.provider.set_premium_mode(PremiumMode::Normal);
-                let _ = remote.set_premium_mode(PremiumMode::Normal as u8).await;
+                let _ = remote
+                    .apply_session_policy(crate::tui::backend::SessionPolicyChange::Premium(
+                        PremiumMode::Normal as u8,
+                    ))
+                    .await;
                 let _ = crate::config::Config::set_copilot_premium(None);
                 app.set_status_notice("Premium: normal");
                 app.push_display_message(DisplayMessage::system(
@@ -1630,7 +1548,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             };
             if current == mode {
                 app.provider.set_premium_mode(PremiumMode::Normal);
-                let _ = remote.set_premium_mode(PremiumMode::Normal as u8).await;
+                let _ = remote
+                    .apply_session_policy(crate::tui::backend::SessionPolicyChange::Premium(
+                        PremiumMode::Normal as u8,
+                    ))
+                    .await;
                 let _ = crate::config::Config::set_copilot_premium(None);
                 app.set_status_notice("Premium: normal");
                 app.push_display_message(DisplayMessage::system(
@@ -1638,7 +1560,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 ));
             } else {
                 app.provider.set_premium_mode(mode);
-                let _ = remote.set_premium_mode(mode as u8).await;
+                let _ = remote
+                    .apply_session_policy(crate::tui::backend::SessionPolicyChange::Premium(
+                        mode as u8,
+                    ))
+                    .await;
                 let config_val = match mode {
                     PremiumMode::Zero => "zero",
                     PremiumMode::OnePerSession => "one",
@@ -1655,61 +1581,6 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     "Premium mode: {}. Toggle off with /z. (saved to config)",
                     label,
                 )));
-            }
-            return Ok(());
-        }
-
-        if let Some(command) = app_mod::commands::parse_poke_command(trimmed) {
-            match command {
-                Err(error) => app.push_display_message(DisplayMessage::error(error)),
-                Ok(app_mod::commands::PokeCommand::Status) => {
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_status_message(app),
-                    ));
-                }
-                Ok(app_mod::commands::PokeCommand::Off) => {
-                    let cleared = app_mod::commands::disable_auto_poke(app);
-                    app.set_status_notice("Poke: OFF");
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_disabled_message(cleared),
-                    ));
-                }
-                Ok(app_mod::commands::PokeCommand::Trigger)
-                | Ok(app_mod::commands::PokeCommand::On) => {
-                    match app_mod::commands::activate_auto_poke(app) {
-                        app_mod::commands::PokeActivation::EnabledNoIncomplete => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_enabled_without_incomplete_message(),
-                            ));
-                        }
-                        app_mod::commands::PokeActivation::Queued => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_queued_display_message(),
-                            ));
-                        }
-                        app_mod::commands::PokeActivation::SendNow {
-                            incomplete_count,
-                            poke_msg,
-                        } => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_triggered_display_message(incomplete_count),
-                            ));
-
-                            let _ = begin_remote_send(
-                                app,
-                                remote,
-                                poke_msg,
-                                vec![],
-                                true,
-                                None,
-                                true,
-                                0,
-                            )
-                            .await;
-                            app.visible_turn_started = Some(Instant::now());
-                        }
-                    }
-                }
             }
             return Ok(());
         }
@@ -1739,7 +1610,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     let session_id = app
                         .remote_session_id
                         .clone()
-                        .unwrap_or_else(|| app.session.id.clone());
+                        .unwrap_or_else(|| app.session.id().to_owned());
                     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
                     let incomplete: Vec<_> = todos
                         .iter()
@@ -1750,7 +1621,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                         .improve_mode
                         .or_else(|| {
                             app.session
-                                .improve_mode
+                                .improve_mode()
                                 .map(app_mod::commands::restore_improve_mode)
                         })
                         .filter(|mode| mode.is_improve());
@@ -1763,8 +1634,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     };
 
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode =
-                            Some(app_mod::commands::session_improve_mode_for(mode));
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: Some(app_mod::commands::session_improve_mode_for(mode)),
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt = app_mod::commands::build_improve_resume_prompt(mode, &incomplete);
@@ -1795,7 +1668,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     let session_id = app
                         .remote_session_id
                         .clone()
-                        .unwrap_or_else(|| app.session.id.clone());
+                        .unwrap_or_else(|| app.session.id().to_owned());
                     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
                     let has_incomplete = todos
                         .iter()
@@ -1805,7 +1678,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                         .improve_mode
                         .or_else(|| {
                             app.session
-                                .improve_mode
+                                .improve_mode()
                                 .map(app_mod::commands::restore_improve_mode)
                         })
                         .filter(|mode| mode.is_improve());
@@ -1819,7 +1692,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     }
 
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode = None;
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: None,
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = None;
                     let stop_prompt = app_mod::commands::improve_stop_prompt();
@@ -1850,8 +1726,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 Ok(app_mod::commands::ImproveCommand::Run { plan_only, focus }) => {
                     let mode = app_mod::commands::improve_mode_for(plan_only);
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode =
-                            Some(app_mod::commands::session_improve_mode_for(mode));
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: Some(app_mod::commands::session_improve_mode_for(mode)),
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt =
@@ -1895,7 +1773,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     let session_id = app
                         .remote_session_id
                         .clone()
-                        .unwrap_or_else(|| app.session.id.clone());
+                        .unwrap_or_else(|| app.session.id().to_owned());
                     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
                     let incomplete: Vec<_> = todos
                         .iter()
@@ -1906,7 +1784,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                         .improve_mode
                         .or_else(|| {
                             app.session
-                                .improve_mode
+                                .improve_mode()
                                 .map(app_mod::commands::restore_improve_mode)
                         })
                         .filter(|mode| mode.is_refactor());
@@ -1919,8 +1797,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     };
 
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode =
-                            Some(app_mod::commands::session_improve_mode_for(mode));
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: Some(app_mod::commands::session_improve_mode_for(mode)),
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt = app_mod::commands::build_refactor_resume_prompt(mode, &incomplete);
@@ -1951,7 +1831,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     let session_id = app
                         .remote_session_id
                         .clone()
-                        .unwrap_or_else(|| app.session.id.clone());
+                        .unwrap_or_else(|| app.session.id().to_owned());
                     let todos = crate::todo::load_todos(&session_id).unwrap_or_default();
                     let has_incomplete = todos
                         .iter()
@@ -1961,7 +1841,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                         .improve_mode
                         .or_else(|| {
                             app.session
-                                .improve_mode
+                                .improve_mode()
                                 .map(app_mod::commands::restore_improve_mode)
                         })
                         .filter(|mode| mode.is_refactor());
@@ -1975,7 +1855,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                     }
 
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode = None;
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: None,
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = None;
                     let stop_prompt = app_mod::commands::refactor_stop_prompt();
@@ -2006,8 +1889,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 Ok(app_mod::commands::RefactorCommand::Run { plan_only, focus }) => {
                     let mode = app_mod::commands::refactor_mode_for(plan_only);
                     persist_remote_session_metadata(app, |session| {
-                        session.improve_mode =
-                            Some(app_mod::commands::session_improve_mode_for(mode));
+                        session.apply_autonomy(crate::session::Autonomy {
+                            improve_mode: Some(app_mod::commands::session_improve_mode_for(mode)),
+                            ..session.autonomy()
+                        });
                     })?;
                     app.improve_mode = Some(mode);
                     let prompt =
@@ -2069,13 +1954,29 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         match app.send_action(false) {
             SendAction::Submit => submit_prepared_remote_input(app, remote, prepared).await?,
             SendAction::Queue => {
-                app.queued_messages.push(prepared.expanded);
+                update::send_prepared_queued_prompt(
+                    app,
+                    prepared,
+                    crate::protocol::QueuedPromptMode::AfterYield,
+                    remote,
+                )
+                .await;
             }
             SendAction::Interleave => {
-                app.send_interleave_now(prepared.expanded, prepared.images, remote)
-                    .await;
+                update::send_prepared_queued_prompt(
+                    app,
+                    prepared,
+                    crate::protocol::QueuedPromptMode::Steer,
+                    remote,
+                )
+                .await;
             }
         }
     }
     Ok(())
 }
+
+#[path = "key_handling/slash_routing.rs"]
+mod slash_routing;
+#[allow(unused_imports)]
+pub(crate) use slash_routing::*;

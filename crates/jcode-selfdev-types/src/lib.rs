@@ -3,6 +3,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub mod runtime_generation;
+pub use runtime_generation::{
+    DesiredSelection, FileIdentity, GenerationVerdict, ImmutableTarget, ServingIdentity,
+};
+
 mod desktop;
 pub use desktop::desktop_repo_root;
 

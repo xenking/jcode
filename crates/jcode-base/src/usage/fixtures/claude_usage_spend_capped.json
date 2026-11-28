@@ -1,0 +1,15 @@
+{
+  "five_hour": null,
+  "seven_day": null,
+  "seven_day_opus": null,
+  "seven_day_sonnet": null,
+  "limits": [],
+  "spend": {
+    "enabled": true,
+    "limit": {"amount_minor": 30000, "exponent": 2, "currency": "USD"},
+    "used": {"amount_minor": 10587, "exponent": 2, "currency": "USD"}
+  },
+  "extra_usage": null,
+  "juniper_tide": null,
+  "cedar_ember": null
+}

@@ -75,7 +75,9 @@ pub fn spawn_command_in_new_terminal(command: &TerminalCommand, cwd: &Path) -> R
 /// running (or it is this process, see `JCODE_COMPANION`), so callers fall back.
 fn try_spawn_via_companion(command: &TerminalCommand, cwd: &Path) -> bool {
     // Tests must never reach a real companion on the developer's desktop.
-    if std::env::var_os("JCODE_COMPANION").is_some() || crate::auth::running_in_test_harness() {
+    if std::env::var_os("JCODE_COMPANION").is_some()
+        || crate::harness_detect::running_in_test_harness()
+    {
         return false;
     }
     try_spawn_via_companion_with(command, cwd, |request| {

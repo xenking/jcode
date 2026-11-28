@@ -930,7 +930,7 @@ fn replace_streaming_text_resets_reasoning_tail_and_never_panics_on_multibyte() 
 fn strip_reasoning_partial_tail_snaps_to_char_boundary() {
     let mut app = create_test_app();
     // Two 3-byte characters: 6 bytes total.
-    app.streaming.streaming_text = "\u{6f22}\u{5b57}".to_string();
+    app.streaming.streaming_text = "\u{6f22}\u{5b57}".to_string().into();
     // Claim a 2-byte tail so new_len = 4, which is *not* a char boundary.
     app.reasoning_partial_len = 2;
     app.strip_reasoning_partial_tail();
@@ -948,7 +948,7 @@ fn anchor_current_reasoning_block_snaps_block_start_to_char_boundary() {
     with_reasoning_current_home(|| {
         let mut app = create_test_app();
         // Two 3-byte characters.
-        app.streaming.streaming_text = "\u{6f22}\u{5b57}".to_string();
+        app.streaming.streaming_text = "\u{6f22}\u{5b57}".to_string().into();
         // Offset 4 is within the buffer but inside the second character.
         app.reasoning_block_start = Some(4);
         app.reasoning_streaming = true;

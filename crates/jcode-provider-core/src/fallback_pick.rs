@@ -20,6 +20,7 @@ fn api_method_is_oauth(api_method: &ModelRouteApiMethod) -> bool {
         ModelRouteApiMethod::ClaudeOAuth
             | ModelRouteApiMethod::OpenAIOAuth
             | ModelRouteApiMethod::CodeAssistOAuth
+            | ModelRouteApiMethod::AntigravityHttps
             | ModelRouteApiMethod::GrokBuild
     )
 }
@@ -191,6 +192,8 @@ mod tests {
 
     fn route(model: &str, provider: &str, api_method: &str, available: bool) -> ModelRoute {
         ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.to_string(),
             provider: provider.to_string(),
             api_method: api_method.to_string(),
@@ -198,6 +201,8 @@ mod tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }
     }
 
@@ -395,6 +400,8 @@ mod generation_tests {
 
     fn route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
         ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.to_string(),
             provider: provider.to_string(),
             api_method: api_method.to_string(),
@@ -402,6 +409,8 @@ mod generation_tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }
     }
 
@@ -421,6 +430,7 @@ mod generation_tests {
 /// (`claude:<label>`, `openai:<label>`, `anthropic-api`, `openai-api`, ...).
 /// Unlabeled OAuth routes return `None` because they name no account.
 pub fn route_pool_key(api_method: &str) -> Option<String> {
+    let api_method = api_method.trim();
     if let Some((method, label)) = api_method.split_once('@') {
         let provider = match method {
             "claude-oauth" => "claude",
@@ -429,10 +439,19 @@ pub fn route_pool_key(api_method: &str) -> Option<String> {
         };
         return Some(format!("{provider}:{label}"));
     }
+    if let Some(profile) = api_method.strip_prefix("openai-compatible:") {
+        let profile = profile.trim();
+        return (!profile.is_empty()).then(|| profile.to_string());
+    }
     match api_method {
-        "claude-oauth" | "openai-oauth" | "" => None,
+        "claude-oauth" | "openai-oauth" | "remote-catalog" | "current" | "openai-compatible"
+        | "" => None,
         "claude-api" | "anthropic-api" | "anthropic-api-key" => Some("anthropic-api".into()),
         "openai-api" | "openai-api-key" => Some("openai-api".into()),
+        "https" => Some("antigravity".into()),
+        "code-assist-oauth" => Some("gemini".into()),
+        "jcode-subscription" => Some("jcode".into()),
+        "grok-build" | "grok-build-acp" => Some("grok-build".into()),
         other => Some(other.into()),
     }
 }
@@ -513,6 +532,8 @@ mod unified_rank_tests {
             "OpenAI"
         };
         ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.into(),
             provider: provider.into(),
             api_method: api_method.into(),
@@ -520,6 +541,8 @@ mod unified_rank_tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }
     }
 
@@ -553,6 +576,8 @@ mod unified_rank_account_tests {
     #[test]
     fn spent_account_does_not_exclude_sibling_account() {
         let routes = vec![ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "claude-opus-5-5".into(),
             provider: "Anthropic".into(),
             api_method: "claude-oauth@claude-otter".into(),
@@ -560,6 +585,8 @@ mod unified_rank_account_tests {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }];
         let ranked = rank_fallback_routes(
             &routes,
@@ -572,5 +599,84 @@ mod unified_rank_account_tests {
             &["claude:claude-fox".into(), "claude:claude-otter".into()],
         );
         assert_eq!(ranked, vec![0]);
+    }
+
+    #[test]
+    fn route_pool_key_maps_transport_methods_to_account_pool_keys() {
+        assert_eq!(route_pool_key("https").as_deref(), Some("antigravity"));
+        assert_eq!(
+            route_pool_key("code-assist-oauth").as_deref(),
+            Some("gemini")
+        );
+        assert_eq!(
+            route_pool_key("jcode-subscription").as_deref(),
+            Some("jcode")
+        );
+        assert_eq!(
+            route_pool_key("grok-build-acp").as_deref(),
+            Some("grok-build")
+        );
+        assert_eq!(
+            route_pool_key("openai-compatible:zai").as_deref(),
+            Some("zai")
+        );
+        assert_eq!(route_pool_key("remote-catalog"), None);
+    }
+
+    #[test]
+    fn antigravity_https_route_respects_pool_priority_and_excludes_sibling_on_quota() {
+        let routes = vec![
+            ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
+                model: "gemini-4-neon-high".into(),
+                provider: "Antigravity".into(),
+                api_method: "https".into(),
+                available: true,
+                detail: String::new(),
+                usage: None,
+                cheapness: None,
+                account: None,
+                icon: None,
+            },
+            ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
+                model: "claude-opus-5-5".into(),
+                provider: "Anthropic".into(),
+                api_method: "claude-oauth@claude-otter".into(),
+                available: true,
+                detail: String::new(),
+                usage: None,
+                cheapness: None,
+                account: None,
+                icon: None,
+            },
+        ];
+        // Failing on Antigravity quota excludes sibling Antigravity models and picks next pool member.
+        let ranked = rank_fallback_routes(
+            &routes,
+            "gemini-4-neon-low",
+            "Antigravity",
+            "https",
+            FallbackPickOptions {
+                credential_failure: true,
+            },
+            &["antigravity".into(), "claude:claude-otter".into()],
+        );
+        assert_eq!(ranked, vec![1]);
+
+        // Failing on OpenAI picks priority-0 Antigravity ("https") before priority-1 Claude.
+        let ranked_from_openai = rank_fallback_routes(
+            &routes,
+            "gpt-5.4",
+            "OpenAI",
+            "openai-oauth@openai-otter",
+            FallbackPickOptions {
+                credential_failure: true,
+            },
+            &["antigravity".into(), "claude:claude-otter".into()],
+        );
+        assert_eq!(ranked_from_openai, vec![0, 1]);
     }
 }

@@ -162,12 +162,12 @@ export interface LaunchOptions {
   /** Working directory for sessions created in this instance. */
   workingDir?: string;
   /**
-   * Share the user's provider logins with the instance. Defaults to `true`.
+   * Share the user's provider logins with the instance. Defaults to `false`.
    *
-   * Without credentials a fresh instance cannot talk to any model, so the
-   * default is the one that works. It does mean the embedding application
-   * spends the user's provider quota, so pass `false` to start empty and
-   * supply credentials yourself.
+   * Without credentials a fresh instance cannot talk to any model, so supply
+   * your own (or pass `true`). Inheriting links the user's credential files, so
+   * the embedding application spends the user's provider quota and token
+   * refreshes write through to the user's own files. Opt in deliberately.
    */
   inheritLogins?: boolean;
   /** Path to the jcode binary. Defaults to the npm-bundled runtime, then `jcode` on PATH. */
@@ -549,7 +549,7 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
     }
   }
 
-  if (options.inheritLogins ?? true) {
+  if (options.inheritLogins ?? false) {
     inheritCredentials(userJcodeHome(), jcodeHome);
   }
 

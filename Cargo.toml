@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.99.1"
+version = "1.1.0"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -25,6 +25,7 @@ members = [
     "crates/jcode-batch-types",
     "crates/jcode-build-support",
     "crates/jcode-compaction-core",
+    "crates/jcode-computer",
     "crates/jcode-config-types",
     "crates/jcode-command-risk",
     "crates/jcode-core",
@@ -41,6 +42,7 @@ members = [
     "crates/jcode-protocol",
     "crates/jcode-selfdev-types",
     "crates/jcode-session-types",
+    "crates/jcode-slash-command",
     "crates/jcode-setup-hints",
     "crates/jcode-storage",
     "crates/jcode-side-panel-types",
@@ -70,6 +72,8 @@ members = [
     "crates/jcode-tui-markdown",
     "crates/jcode-tui-messages",
     "crates/jcode-usage-types",
+    "crates/jcode-routing-policy",
+    "crates/jcode-routing-meters",
     "crates/jcode-tui-core",
     "crates/jcode-tui-mermaid",
     "crates/jcode-task-types",
@@ -138,9 +142,6 @@ path = "src/bin/tui_bench.rs"
 required-features = ["dev-bins"]
 
 [dependencies]
-# Memory allocator (reduces fragmentation for long-running server)
-tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"], optional = true }
-
 # Async runtime
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 futures = "0.3"
@@ -152,13 +153,14 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] 
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["raw_value"] }
 uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+jcode-sdk = { path = "crates/jcode-sdk" }
 
 # File operations
 
@@ -175,6 +177,7 @@ sha2 = "0.10"
 hex = "0.4"
 open = "5"               # Open URLs in browser
 jcode-tui-style = { path = "crates/jcode-tui-style" }
+jcode-session-types = { path = "crates/jcode-session-types" }
 jcode-tui-session-picker = { path = "crates/jcode-tui-session-picker", features = ["serde"] }
 
 # Streaming
@@ -190,6 +193,7 @@ unicode-width = "0.2"
 # PDF parsing (behind feature flag)
 jcode-build-meta = { path = "crates/jcode-build-meta" }
 jcode-docs-data = { path = "crates/jcode-docs-data" }
+jcode-routing-policy = { path = "crates/jcode-routing-policy" }
 # Tiny leaf helpers (console/env/fs/id) used directly by the cli layer.
 # Presentation layer: the terminal UI (`tui`) + offline replay (`video_export`),
 # compiled as a separate rustc unit. It re-exports the application core
@@ -223,7 +227,7 @@ tempfile = "3"
 [features]
 # Memory recall uses Jev Decisions and needs no local inference stack.
 # Keep embeddings opt-in for historical benchmarks/debugging only.
-default = ["pdf", "bedrock"]
+default = ["pdf", "bedrock", "jemalloc-prof"]
 dev-bins = ["jcode-tui/dev-bins"]
 jemalloc = [
     "dep:tikv-jemallocator",
@@ -253,10 +257,16 @@ pdf = ["jcode-tui/pdf"]
 # anyone who installed jcode from a release artifact. Unix-only because the
 # bridge listens on a Unix socket.
 [target.'cfg(unix)'.dependencies]
+jcode-harness-api = { path = "crates/jcode-harness-api" }
 jcode-harness-api-server = { path = "crates/jcode-harness-api-server" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+# Keep jemalloc prefixed so only jcode's Rust global allocator uses it, not C
+# dependencies or other binaries (including allocation-counting test probes).
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
@@ -313,11 +323,21 @@ codegen-units = 16
 incremental = false
 
 [profile.dev]
-debug = 0
+# Line tables keep `file:line` in panic backtraces; full DWARF is what costs
+# size, and this is +0.2% on a measured clean check+test (8.42 GB -> 8.44 GB).
+# Dependencies stay at no debug info at all (see the "*" override below).
+#
+# Do not add keys that equal a default here (or in [profile.test]): cargo puts
+# an explicitly written value on the rustc command line even when it matches
+# the default, and that flag string is part of the unit hash, so a redundant
+# value makes artifacts that are otherwise identical hash differently. See the
+# [profile.test] note near the bottom of this file.
+debug = "line-tables-only"
 incremental = true
 
 [profile.dev.package."*"]
 opt-level = 0
+debug = false
 
 # Keep the idle-animation math kernels fully optimized even in debug-style
 # builds. This crate is pure, dependency-free numeric code (the trig-heavy 3D
@@ -356,10 +376,20 @@ opt-level = 3
 [profile.dev.package.serde_json]
 opt-level = 3
 
+# Same override for `cargo test`: profile package overrides are NOT inherited
+# from the profile a test/bench profile inherits (cargo only inherits the
+# top-level keys), so without this line every test build compiles serde_json a
+# second time, unoptimized, next to the dev-profile copy.
+[profile.test.package.serde_json]
+opt-level = 3
+
 [profile.selfdev.package.serde_json]
 opt-level = 3
 
 [profile.dev.package.serde]
+opt-level = 3
+
+[profile.test.package.serde]
 opt-level = 3
 
 [profile.selfdev.package.serde]
@@ -461,7 +491,7 @@ opt-level = 3
 
 # Keep the text-shaping stack optimized even in dev/selfdev/test builds.
 #
-# cosmic-text + rustybuzz + ttf-parser + swash + yazi do all of the desktop
+# rustybuzz and ttf-parser contribute to the
 # transcript glyph shaping. At opt-level = 0 they are 15-40x slower, which made
 # scrolling real (emoji/markdown-heavy) transcripts janky in dev/selfdev builds
 # even though the production release build was smooth. These are stable
@@ -469,13 +499,6 @@ opt-level = 3
 # 3 costs a one-time compile and is then reused across every iterative jcode
 # rebuild (same rationale as jcode-tui-anim above). It does NOT slow down
 # recompiles of jcode's own crates.
-[profile.dev.package.cosmic-text]
-opt-level = 3
-[profile.selfdev.package.cosmic-text]
-opt-level = 3
-[profile.test.package.cosmic-text]
-opt-level = 3
-
 [profile.dev.package.rustybuzz]
 opt-level = 3
 [profile.selfdev.package.rustybuzz]
@@ -488,27 +511,6 @@ opt-level = 3
 [profile.selfdev.package.ttf-parser]
 opt-level = 3
 [profile.test.package.ttf-parser]
-opt-level = 3
-
-[profile.dev.package.swash]
-opt-level = 3
-[profile.selfdev.package.swash]
-opt-level = 3
-[profile.test.package.swash]
-opt-level = 3
-
-[profile.dev.package.yazi]
-opt-level = 3
-[profile.selfdev.package.yazi]
-opt-level = 3
-[profile.test.package.yazi]
-opt-level = 3
-
-[profile.dev.package.fontdb]
-opt-level = 3
-[profile.selfdev.package.fontdb]
-opt-level = 3
-[profile.test.package.fontdb]
 opt-level = 3
 
 # Keep the raster image pipeline optimized in dev/selfdev/test builds.
@@ -631,12 +633,26 @@ opt-level = 3
 [profile.test.package.tokenizers]
 opt-level = 3
 
+# Keep this table to keys that change nothing but still reach rustc. Cargo puts
+# an explicitly written value on the rustc command line even when it equals the
+# default, and the resulting flag string is part of the unit hash, so a
+# redundant `codegen-units = 256` here made every `cargo test` artifact
+# incompatible with the identical `cargo build` artifact: each dependency was
+# compiled twice, and a `cargo build` after a `cargo test` recompiled ~500
+# crates (272s -> 46s and 1.9 GB of duplicates once removed). Values that test
+# inherits from dev (debug, incremental, codegen-units) belong in [profile.dev]
+# only. Per-package overrides are the exception: cargo does not inherit the
+# package tables, so [profile.test.package.*] has to repeat them.
 [profile.test]
-debug = 0
+debug = "line-tables-only"
 incremental = true
-codegen-units = 256
+
+[profile.test.package."*"]
+opt-level = 0
+debug = false
 
 [dev-dependencies]
+jcode-provider-anthropic-runtime = { path = "crates/jcode-provider-anthropic-runtime", default-features = false, features = ["test-support"] }
 async-stream = "0.3"
 jcode-harness-api = { path = "crates/jcode-harness-api" }
 # Used by tests/context_window_matrix.rs to assert the shared context-window

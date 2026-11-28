@@ -92,6 +92,7 @@ pub(crate) struct UsageInfo {
     pub(crate) cache_read_input_tokens: Option<u32>,
     pub(crate) cache_creation_input_tokens: Option<u32>,
     pub(crate) service_tier: Option<String>,
+    pub(crate) speed: Option<String>,
     pub(crate) cache_creation: Option<CacheCreationUsage>,
 }
 

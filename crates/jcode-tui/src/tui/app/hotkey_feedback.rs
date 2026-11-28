@@ -131,57 +131,57 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
 
     // Configured pane/mode toggles (pre-control shortcuts).
     push(
-        inputs.toggles.auto_poke.binding().cloned(),
+        inputs.toggles.auto_poke.chord(),
         "auto_poke_toggle",
         "toggle auto-poke",
     );
     push(
-        inputs.toggles.copy_selection.binding().cloned(),
+        inputs.toggles.copy_selection.chord(),
         "copy_selection_toggle",
         "toggle copy/selection mode",
     );
     push(
-        inputs.toggles.side_panel.binding().cloned(),
+        inputs.toggles.side_panel.chord(),
         "side_panel_toggle",
         "cycle the side panel (split, fullscreen, hidden)",
     );
     push(
-        inputs.toggles.diagram_pane.binding().cloned(),
+        inputs.toggles.diagram_pane.chord(),
         "diagram_pane_toggle",
         "move the diagram pane (side/top)",
     );
     push(
-        inputs.toggles.diagram_pane_visibility.binding().cloned(),
+        inputs.toggles.diagram_pane_visibility.chord(),
         "diagram_pane_visibility_toggle",
         "show/hide the diagram pane",
     );
     push(
-        inputs.toggles.typing_scroll_lock.binding().cloned(),
+        inputs.toggles.typing_scroll_lock.chord(),
         "typing_scroll_lock_toggle",
         "toggle typing scroll lock",
     );
     push(
-        inputs.toggles.diff_mode_cycle.binding().cloned(),
+        inputs.toggles.diff_mode_cycle.chord(),
         "diff_mode_cycle",
         "cycle the diff display mode",
     );
     push(
-        inputs.toggles.commit_log.binding().cloned(),
+        inputs.toggles.commit_log.chord(),
         "commit_log",
         "show the project commit log",
     );
     push(
-        inputs.toggles.info_widget.binding().cloned(),
+        inputs.toggles.info_widget.chord(),
         "info_widget_toggle",
         "toggle the info widget",
     );
     push(
-        inputs.toggles.todo_card.binding().cloned(),
+        inputs.toggles.todo_card.chord(),
         "todo_card_toggle",
         "show/dismiss the inline todo card",
     );
     push(
-        inputs.toggles.swarm_panel_focus.binding().cloned(),
+        inputs.toggles.swarm_panel_focus.chord(),
         "swarm_panel_focus",
         "focus the swarm panel",
     );
@@ -1197,26 +1197,28 @@ mod tests {
     fn registry_covers_every_toggle_binding() {
         let registry = test_inputs_registry(false);
         let toggles = crate::tui::keybind::load_toggle_keys();
-        let toggle_bindings: &[(&str, Option<&KeyBinding>)] = &[
-            ("auto_poke_toggle", toggles.auto_poke.binding()),
-            ("side_panel_toggle", toggles.side_panel.binding()),
-            ("copy_selection_toggle", toggles.copy_selection.binding()),
-            ("diagram_pane_toggle", toggles.diagram_pane.binding()),
+        let toggle_bindings: &[(&str, Option<KeyBinding>)] = &[
+            ("auto_poke_toggle", toggles.auto_poke.chord()),
+            ("side_panel_toggle", toggles.side_panel.chord()),
+            ("copy_selection_toggle", toggles.copy_selection.chord()),
+            ("diagram_pane_toggle", toggles.diagram_pane.chord()),
             (
                 "diagram_pane_visibility_toggle",
-                toggles.diagram_pane_visibility.binding(),
+                toggles.diagram_pane_visibility.chord(),
             ),
             (
                 "typing_scroll_lock_toggle",
-                toggles.typing_scroll_lock.binding(),
+                toggles.typing_scroll_lock.chord(),
             ),
-            ("diff_mode_cycle", toggles.diff_mode_cycle.binding()),
-            ("commit_log", toggles.commit_log.binding()),
-            ("info_widget_toggle", toggles.info_widget.binding()),
-            ("swarm_panel_focus", toggles.swarm_panel_focus.binding()),
+            ("diff_mode_cycle", toggles.diff_mode_cycle.chord()),
+            ("commit_log", toggles.commit_log.chord()),
+            ("info_widget_toggle", toggles.info_widget.chord()),
+            ("swarm_panel_focus", toggles.swarm_panel_focus.chord()),
         ];
         for (name, binding) in toggle_bindings {
-            let Some(binding) = binding else { continue };
+            let Some(binding) = binding.as_ref() else {
+                continue;
+            };
             assert!(
                 lookup(&registry, true, binding.code, binding.modifiers).is_some(),
                 "toggle `{name}` chord {:?} is not resolvable in the feedback registry",

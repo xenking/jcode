@@ -1,4 +1,8 @@
-#[cfg(feature = "jemalloc")]
+#[cfg(all(
+    not(test),
+    feature = "jemalloc",
+    any(target_os = "macos", target_os = "linux")
+))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -11,18 +15,25 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 // narenas:4            — limit arena count (17 threads don't need 64 arenas)
 // prof:true            — enable profiling support in jemalloc-prof builds
 // prof_active:false    — keep sampling disabled until explicitly enabled at runtime
-#[cfg(all(feature = "jemalloc", not(feature = "jemalloc-prof")))]
-// jemalloc reads this exact exported symbol name at startup.
-#[allow(non_upper_case_globals)]
-#[unsafe(no_mangle)]
-pub static malloc_conf: Option<&'static [u8; 50]> =
+#[cfg(all(
+    not(test),
+    feature = "jemalloc",
+    not(feature = "jemalloc-prof"),
+    any(target_os = "macos", target_os = "linux")
+))]
+// Prefixed tikv-jemalloc reads this symbol before main.
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static MALLOC_CONF: Option<&'static [u8; 50]> =
     Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4\0");
 
-#[cfg(feature = "jemalloc-prof")]
-// jemalloc reads this exact exported symbol name at startup.
-#[allow(non_upper_case_globals)]
-#[unsafe(no_mangle)]
-pub static malloc_conf: Option<&'static [u8; 78]> =
+#[cfg(all(
+    not(test),
+    feature = "jemalloc-prof",
+    any(target_os = "macos", target_os = "linux")
+))]
+// Prefixed tikv-jemalloc reads this symbol before main.
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static MALLOC_CONF: Option<&'static [u8; 78]> =
     Some(b"dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:4,prof:true,prof_active:false\0");
 
 use anyhow::Result;
@@ -106,13 +117,24 @@ fn run_main() -> Result<()> {
     configure_system_allocator();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    // SessionStart hooks should be effectively invisible to Claude Code and
-    // Codex. Handle this tiny callback before the Tokio runtime and normal Jcode
-    // startup path so it does not initialize providers, start cleanup threads,
-    // check for updates, or emit first-run telemetry disclosure text into the
-    // parent CLI's hook output.
-    if let Some(source) = cli_launch_hint_source_invocation() {
-        return jcode::setup_hints::run_setup_hotkey(false, false, false, Some(&source));
+    #[cfg(unix)]
+    {
+        use jcode::tool::{background_worker, detached_jobs};
+        if std::env::args_os().nth(1).as_deref()
+            == Some(std::ffi::OsStr::new(background_worker::ARG))
+        {
+            return detached_jobs::run();
+        }
+        background_worker::enable();
+    }
+
+    // Stale SessionStart hooks written by older versions still call
+    // `setup-hotkey --notify-cli-launch <cli>`. Answer before the Tokio runtime
+    // and normal startup so they stay instant and silent: remove the hook and
+    // exit 0.
+    if is_legacy_cli_hook_invocation(std::env::args().skip(1)) {
+        jcode::setup_hints::remove_legacy_cli_launch_hooks();
+        return Ok(());
     }
 
     // The macOS global-hotkey listener must run on the real main thread with a
@@ -159,23 +181,16 @@ fn args_are_macos_hotkey_listener(args: impl IntoIterator<Item = String>) -> boo
         && args.iter().any(|a| a == "--listen-macos-hotkey")
 }
 
-fn cli_launch_hint_source_invocation() -> Option<String> {
-    cli_launch_hint_source(std::env::args().skip(1))
-}
-
-fn cli_launch_hint_source(args: impl IntoIterator<Item = String>) -> Option<String> {
+fn is_legacy_cli_hook_invocation(args: impl IntoIterator<Item = String>) -> bool {
     let args: Vec<String> = args.into_iter().collect();
-    if args.first().map(String::as_str) != Some("setup-hotkey") {
-        return None;
-    }
-    let index = args.iter().position(|arg| arg == "--notify-cli-launch")?;
-    args.get(index + 1).cloned()
+    args.first().map(String::as_str) == Some("setup-hotkey")
+        && args.iter().any(|a| a == "--notify-cli-launch")
 }
 
 #[cfg(test)]
 mod tests {
     use super::args_are_macos_hotkey_listener;
-    use super::cli_launch_hint_source;
+    use super::is_legacy_cli_hook_invocation;
     use super::parse_alloc_tuning;
 
     #[test]
@@ -224,22 +239,17 @@ mod tests {
     }
 
     #[test]
-    fn detects_cli_launch_hint_callback() {
-        assert_eq!(
-            cli_launch_hint_source(argv(&["setup-hotkey", "--notify-cli-launch", "claude"])),
-            Some("claude".to_string())
-        );
-    }
-
-    #[test]
-    fn ignores_launch_hint_flag_on_other_commands_or_without_value() {
-        assert_eq!(
-            cli_launch_hint_source(argv(&["serve", "--notify-cli-launch", "codex"])),
-            None
-        );
-        assert_eq!(
-            cli_launch_hint_source(argv(&["setup-hotkey", "--notify-cli-launch"])),
-            None
-        );
+    fn detects_legacy_cli_hook_callback_only_for_setup_hotkey() {
+        assert!(is_legacy_cli_hook_invocation(argv(&[
+            "setup-hotkey",
+            "--notify-cli-launch",
+            "claude"
+        ])));
+        assert!(!is_legacy_cli_hook_invocation(argv(&[
+            "serve",
+            "--notify-cli-launch",
+            "codex"
+        ])));
+        assert!(!is_legacy_cli_hook_invocation(argv(&["setup-hotkey"])));
     }
 }

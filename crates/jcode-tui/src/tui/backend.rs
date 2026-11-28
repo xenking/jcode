@@ -5,133 +5,27 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+mod debug_events;
+mod local_tools;
+#[path = "backend_screen.rs"]
+mod screen;
 mod ssh_sessions;
+use ssh_sessions::subscribe_history_base;
 
-use crate::message::ToolCall;
+pub use debug_events::{DebugEvent, DebugMessage};
+
+#[path = "backend_protocol_io.rs"]
+mod protocol_io;
+
 use crate::protocol::{AuthChanged, FeatureToggle, HistoryBase, Request, ServerEvent};
 use crate::server;
 use crate::transport::{Stream, WriteHalf};
 use crate::tui::remote_diff::RemoteDiffTracker;
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
-
-fn subscribe_history_base(base: Option<HistoryBase>, ssh_remote: bool) -> Option<HistoryBase> {
-    if ssh_remote {
-        Some(HistoryBase::recent(128))
-    } else {
-        base
-    }
-}
-
-/// Debug events broadcast by local harnesses via debug socket.
-/// These expose the full internal state for debugging/comparison.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum DebugEvent {
-    /// Full state snapshot (sent on connect)
-    StateSnapshot {
-        display_messages: Vec<DebugMessage>,
-        streaming_text: String,
-        streaming_tool_calls: Vec<ToolCall>,
-        input: String,
-        cursor_pos: usize,
-        is_processing: bool,
-        scroll_offset: usize,
-        status: String,
-        provider_name: String,
-        provider_model: String,
-        mcp_servers: Vec<String>,
-        skills: Vec<String>,
-        session_id: Option<String>,
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read_input_tokens: Option<u64>,
-        cache_creation_input_tokens: Option<u64>,
-        queued_messages: Vec<String>,
-    },
-
-    /// Text delta appended to streaming_text
-    TextDelta { text: String },
-
-    /// Tool started
-    ToolStart { id: String, name: String },
-
-    /// Tool input delta
-    ToolInput { delta: String },
-
-    /// Tool about to execute
-    ToolExec { id: String, name: String },
-
-    /// Tool completed
-    ToolDone {
-        id: String,
-        name: String,
-        output: String,
-        is_error: bool,
-    },
-
-    /// Message added to display_messages
-    MessageAdded { message: DebugMessage },
-
-    /// Streaming text cleared (turn complete)
-    StreamingCleared,
-
-    /// Processing state changed
-    ProcessingChanged { is_processing: bool },
-
-    /// Status changed
-    StatusChanged { status: String },
-
-    /// Token usage update
-    TokenUsage {
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read_input_tokens: Option<u64>,
-        cache_creation_input_tokens: Option<u64>,
-    },
-
-    /// Input changed (user typing)
-    InputChanged { input: String, cursor_pos: usize },
-
-    /// Scroll offset changed
-    ScrollChanged { offset: usize },
-
-    /// Message queued
-    MessageQueued { content: String },
-
-    /// Queued message sent
-    QueuedMessageSent { index: usize },
-
-    /// Session ID set
-    SessionId { id: String },
-
-    /// Thinking started
-    ThinkingStart,
-
-    /// Thinking ended
-    ThinkingEnd,
-
-    /// Compaction occurred
-    Compaction { trigger: String, pre_tokens: u64 },
-
-    /// Error occurred
-    Error { message: String },
-}
-
-/// Simplified message for debug serialization
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DebugMessage {
-    pub role: String,
-    pub content: String,
-    pub tool_calls: Vec<String>,
-    pub duration_secs: Option<f32>,
-    pub title: Option<String>,
-    pub tool_data: Option<ToolCall>,
-}
 
 /// Events emitted by backends during message processing
 #[derive(Debug, Clone)]
@@ -256,10 +150,14 @@ pub struct RemoteConnection {
     _dummy_peer: Option<Stream>,
     session_id: Option<String>,
     cloud_authority: Option<std::sync::Weak<std::sync::atomic::AtomicBool>>,
+    screen_feed: Option<screen::ScreenFeed>,
+    pub(crate) jarvis_tools_configured: bool,
+    pub(crate) local_tools_request: Option<u64>,
     cloud_callbacks: Vec<tokio::task::AbortHandle>,
     client_instance_id: Option<String>,
     next_request_id: u64,
     pending_runtime_commands: std::collections::HashSet<u64>,
+    pending_context_meters: std::collections::HashSet<u64>,
     // Bootstrap Done is not turn completion. Retain ids for duplicate acks.
     control_done_ids: std::sync::Mutex<std::collections::VecDeque<u64>>,
     request_timings: super::cloud_latency::RequestTimings,
@@ -282,6 +180,11 @@ pub struct RemoteConnection {
     /// The connected server accepts `Request::ClientFocus`. Learned from its
     /// Pong, so an older server is never sent a request it would reject.
     server_accepts_focus: bool,
+    server_accepts_queued_prompts: bool,
+    server_accepts_queue_editing: bool,
+    server_accepts_file_attachments: bool,
+    server_accepts_force_stop: bool,
+    last_keyboard_cancel: Option<Instant>,
     /// Last (focused, hidden) state reported to this server, if any.
     reported_focus: Option<(bool, bool)>,
     last_account_usage_poll: Option<Instant>,
@@ -340,22 +243,34 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
         .is_none_or(|total| total > MAX_REMOTE_PROTOCOL_FRAME_BYTES)
 }
 
+pub(crate) enum SessionPolicyChange<'a> {
+    Premium(u8),
+    ReasoningEffort(&'a str),
+    ServiceTier(&'a str),
+    Transport(&'a str),
+    Feature {
+        feature: FeatureToggle,
+        enabled: bool,
+    },
+    Compaction(crate::config::CompactionMode),
+}
+
 pub(crate) trait RemoteEventState {
+    fn finish_local_tools_request(&mut self, _id: u64, _accepted: bool) -> bool {
+        false
+    }
     /// Replay has no outstanding control requests. Live connections track IDs.
     fn finish_runtime_command(&mut self, _id: u64) -> bool {
         false
     }
-
-    fn handle_tool_start(&mut self, id: &str, name: &str);
-    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str);
-    fn get_tool_input(&self, id: &str) -> serde_json::Value;
-    fn handle_tool_exec(&mut self, id: &str, name: &str);
-    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String;
-    // Replays deliberately do not use wall-clock time: playback speed is arbitrary.
-    fn take_tool_duration(&mut self, _id: &str) -> Option<f32> {
+    fn request_context_meter(&mut self, _session_id: &str) -> Option<u64> {
         None
     }
-    fn clear_pending(&mut self);
+    fn finish_context_meter(&mut self, _id: u64) -> bool {
+        false
+    }
+
+    fn tool_events(&mut self) -> &mut RemoteDiffTracker;
     fn call_output_tokens_seen(&mut self) -> &mut u64;
     fn reset_call_output_tokens_seen(&mut self);
     fn set_session_id(&mut self, id: String);
@@ -413,7 +328,7 @@ impl RemoteConnection {
     }
 
     /// Connect to the server
-    pub async fn connect() -> Result<Self> {
+    async fn connect() -> Result<Self> {
         Self::connect_with_session(None, None, false, None, false, None).await
     }
 
@@ -429,8 +344,7 @@ impl RemoteConnection {
         allow_session_takeover: bool,
         remote_working_dir: Option<&str>,
     ) -> Result<Self> {
-        let mut timing = super::cloud_latency::Span::new("connect");
-        timing.operation("socket_connect");
+        let mut timing = super::cloud_latency::Span::new("connect").during("socket_connect");
         let connect_start = Instant::now();
         let socket_connect_start = Instant::now();
         let socket_path = server::socket_path();
@@ -459,28 +373,37 @@ impl RemoteConnection {
             outbound_pending: Default::default(),
             _dummy_peer: None,
             session_id: None,
+            server_accepts_force_stop: false,
+            last_keyboard_cancel: None,
             cloud_authority: None,
+            screen_feed: None,
+            jarvis_tools_configured: false,
+            local_tools_request: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: client_instance_id.map(str::to_string),
             // Keep reattached turn Done distinct from bootstrap acknowledgments.
             next_request_id: (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62),
             pending_runtime_commands: Default::default(),
+            pending_context_meters: Default::default(),
             control_done_ids: Default::default(),
             request_timings: Default::default(),
-            tool_diff: RemoteDiffTracker::default(),
+            tool_diff: RemoteDiffTracker::live(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
             #[cfg(test)]
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
             server_accepts_focus: false,
+            server_accepts_queued_prompts: false,
+            server_accepts_queue_editing: false,
+            server_accepts_file_attachments: false,
             reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
         };
 
         let connection_setup_ms = connection_setup_start.elapsed().as_millis();
-        timing.operation("ssh_ready");
+        timing = timing.during("ssh_ready");
         let ssh_ready_start = Instant::now();
         // The local SSH adapter accepts before OpenSSH authenticates. A Unix
         // connect/write alone must not reset reconnect backoff or show success.
@@ -490,7 +413,7 @@ impl RemoteConnection {
 
         let ssh_ready_ms = ssh_ready_start.elapsed().as_millis();
         // Subscribe to events
-        timing.operation("subscribe");
+        timing = timing.during("subscribe");
         let subscribe_start = Instant::now();
         let (working_dir, selfdev) = super::subscribe_metadata(remote_working_dir);
         let resume_target = resume_session
@@ -502,6 +425,7 @@ impl RemoteConnection {
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
+            supports_applets: None,
             supports_server_failover: false,
             supports_turn_identity: true,
             id: conn.next_request_id,
@@ -519,7 +443,7 @@ impl RemoteConnection {
             } else {
                 crate::terminal_launch::snapshot_client_terminal_env()
             },
-            client_name: None,
+            client_name: Some("jcode-tui".into()),
         })
         .await?;
         let subscribe_ms = subscribe_start.elapsed().as_millis();
@@ -527,7 +451,7 @@ impl RemoteConnection {
 
         // If resuming a session, the target-aware Subscribe attaches directly to
         // that session and returns History, so avoid a second bootstrap request.
-        timing.operation("bootstrap_request");
+        timing = timing.during("bootstrap_request");
         let bootstrap_request_start = Instant::now();
         let mut bootstrap_request = "get_history";
         if resume_target.is_none() {
@@ -570,7 +494,7 @@ impl RemoteConnection {
             bootstrap_request,
         ));
 
-        timing.operation("complete");
+        timing = timing.during("complete");
         timing.finish("ok");
         Ok(conn)
     }
@@ -615,81 +539,6 @@ impl RemoteConnection {
             Request::BackgroundTool { id } => Some(base("background_tool", *id)),
             _ => None,
         }
-    }
-
-    async fn send_request_with_interrupt_trigger(
-        &self,
-        request: Request,
-        interrupt_trigger: Option<&str>,
-    ) -> Result<()> {
-        let control_id = match &request {
-            Request::Subscribe { id, .. }
-            | Request::GetHistory { id }
-            | Request::ResumeSession { id, .. }
-            | Request::GetModelCatalog { id, .. }
-            | Request::AccountUsage { id }
-            | Request::GetState { id } => Some(*id),
-            _ => None,
-        };
-        if let Some(id) = control_id {
-            let mut ids = self
-                .control_done_ids
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if ids.len() >= 256 {
-                ids.pop_front();
-            }
-            ids.push_back(id);
-        }
-        let json = serde_json::to_string(&request)? + "\n";
-        let interrupt_log = self.interrupt_request_log_fields(&request, interrupt_trigger);
-        if let Some(fields) = &interrupt_log {
-            crate::logging::info(&format!(
-                "REMOTE_INTERRUPT_SEND_START {} json_bytes={}",
-                fields,
-                json.len()
-            ));
-        }
-
-        let mut timing = super::cloud_latency::begin_request(&request);
-        let total_start = Instant::now();
-        let backlogged = self
-            .outbound_pending
-            .load(std::sync::atomic::Ordering::Acquire)
-            > 0;
-        let result = match self.enqueue_outbound(json.into_bytes()) {
-            Err(error) => Err(error),
-            Ok(_) if backlogged => Ok(()),
-            // Surface prompt write failures (broken pipe) to the caller, but
-            // never wait longer than a short bound: a full socket must not
-            // stall the loop that drains server events.
-            Ok(done) => match tokio::time::timeout(OUTBOUND_RESULT_WAIT, done).await {
-                Ok(Ok(Err(error))) => Err(anyhow::anyhow!(error)),
-                Ok(Err(_)) => Err(anyhow::anyhow!("remote connection writer closed")),
-                Ok(Ok(Ok(()))) | Err(_) => Ok(()),
-            },
-        };
-        if let Some(fields) = &interrupt_log {
-            match &result {
-                Ok(()) => crate::logging::info(&format!(
-                    "REMOTE_INTERRUPT_SEND_OK {} queued total_ms={}",
-                    fields,
-                    total_start.elapsed().as_millis()
-                )),
-                Err(error) => crate::logging::warn(&format!(
-                    "REMOTE_INTERRUPT_SEND_ERR {} total_ms={} error={}",
-                    fields,
-                    total_start.elapsed().as_millis(),
-                    error
-                )),
-            }
-        }
-        if let Some(timing) = &mut timing {
-            timing.finish(if result.is_ok() { "ok" } else { "error" });
-        }
-        result?;
-        self.request_timings.request_sent(&request);
-        Ok(())
     }
 
     /// Queue bytes for the connection writer task, spawning it on first use.
@@ -786,7 +635,7 @@ impl RemoteConnection {
 
     /// Send a message to the server
     /// Send a message to the server and return the request ID
-    pub async fn send_message(&mut self, content: String) -> Result<u64> {
+    async fn send_message(&mut self, content: String) -> Result<u64> {
         self.send_message_with_images_and_reminder(content, vec![], None)
             .await
     }
@@ -807,16 +656,18 @@ impl RemoteConnection {
 
     /// Runtime failures share the Error wire variant with chat failures. Keep
     /// request ownership so the client can render them without ending a turn.
-    pub fn finish_runtime_command(&mut self, id: u64) -> bool {
+    fn finish_runtime_command(&mut self, id: u64) -> bool {
         self.pending_runtime_commands.remove(&id)
     }
 
     /// Clear the server-side conversation and replace it with a fresh session.
     pub async fn clear(&mut self) -> Result<u64> {
-        let had_cloud_authority = self.cloud_authority.is_some();
+        let had_cloud_authority = self.cloud_authority.is_some()
+            || self.jarvis_tools_configured
+            || self.local_tools_request.is_some();
         self.revoke_cloud_authority();
         if had_cloud_authority {
-            self.configure_cloud_tools(Default::default()).await?;
+            self.clear_local_tools().await?;
         }
         let id = self.next_request_id;
         self.next_request_id += 1;
@@ -825,7 +676,7 @@ impl RemoteConnection {
     }
 
     /// Send a message with images to the server and return the request ID
-    pub async fn send_message_with_images(
+    async fn send_message_with_images(
         &mut self,
         content: String,
         images: Vec<(String, String)>,
@@ -851,15 +702,56 @@ impl RemoteConnection {
         system_reminder: Option<String>,
         active_skill: Option<String>,
     ) -> Result<u64> {
+        self.send_message_with_attachments(
+            content,
+            images,
+            Vec::new(),
+            system_reminder,
+            active_skill,
+        )
+        .await
+    }
+
+    async fn send_message_with_attachments(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        attachments: Vec<jcode_session_types::Attachment>,
+        system_reminder: Option<String>,
+        active_skill: Option<String>,
+    ) -> Result<u64> {
+        self.send_message_with_attachments_and_origin(
+            content,
+            images,
+            attachments,
+            system_reminder,
+            active_skill,
+            false,
+        )
+        .await
+    }
+
+    pub(crate) async fn send_message_with_attachments_and_origin(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        attachments: Vec<jcode_session_types::Attachment>,
+        system_reminder: Option<String>,
+        active_skill: Option<String>,
+        jarvis_voice: bool,
+    ) -> Result<u64> {
         // Output token usage snapshots are cumulative within a single API call.
+        self.last_keyboard_cancel = None;
         // Reset per-call watermark before sending the next user request.
         self.reset_call_output_tokens_seen();
 
         let id = self.next_request_id;
         let request = Request::Message {
             id,
+            jarvis_voice,
             content,
             images,
+            attachments,
             system_reminder,
             active_skill,
             no_reply: false,
@@ -946,10 +838,44 @@ impl RemoteConnection {
     pub fn note_server_capabilities(&mut self, capabilities: &[String]) {
         if capabilities
             .iter()
+            .any(|cap| cap == jcode_session_types::FILE_ATTACHMENTS_CAPABILITY)
+        {
+            self.server_accepts_file_attachments = true;
+        }
+        if capabilities.iter().any(|cap| cap == "force_stop_turn_v1") {
+            self.server_accepts_force_stop = true;
+        }
+        if capabilities
+            .iter()
+            .any(|capability| capability == "queued_prompts")
+        {
+            self.server_accepts_queued_prompts = true;
+        }
+        if capabilities
+            .iter()
+            .any(|capability| capability == "queued_prompt_editing")
+        {
+            self.server_accepts_queue_editing = true;
+        }
+        if capabilities
+            .iter()
             .any(|capability| capability == crate::protocol::CLIENT_FOCUS_CAPABILITY)
         {
             self.server_accepts_focus = true;
         }
+    }
+
+    pub fn supports_queued_prompts(&self) -> bool {
+        self.server_accepts_queued_prompts
+    }
+
+    pub fn supports_file_attachments(&self) -> bool {
+        self.server_accepts_file_attachments
+    }
+
+    /// The daemon can hold a queued prompt open for in-place editing.
+    pub fn supports_queued_prompt_editing(&self) -> bool {
+        self.server_accepts_queue_editing
     }
 
     /// Tell the server whether this window has focus, and whether an
@@ -1017,10 +943,12 @@ impl RemoteConnection {
     /// Resume a specific session by ID
     pub async fn resume_session(&mut self, session_id: &str) -> Result<()> {
         if self.session_id.as_deref() != Some(session_id) {
-            let had_cloud_authority = self.cloud_authority.is_some();
+            let had_cloud_authority = self.cloud_authority.is_some()
+                || self.jarvis_tools_configured
+                || self.local_tools_request.is_some();
             self.revoke_cloud_authority();
             if had_cloud_authority {
-                self.configure_cloud_tools(Default::default()).await?;
+                self.clear_local_tools().await?;
             }
         }
         let request = Request::ResumeSession {
@@ -1029,7 +957,7 @@ impl RemoteConnection {
             client_instance_id: self.client_instance_id.clone(),
             client_has_local_history: false,
             allow_session_takeover: false,
-            client_name: None,
+            client_name: Some("jcode-tui".into()),
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
@@ -1042,6 +970,9 @@ impl RemoteConnection {
         // History application replaces the display vector, so repeated payloads
         // remain idempotent rather than appending duplicate messages.
         self.has_loaded_history = false;
+        if self.server_accepts_queued_prompts {
+            self.get_queued_prompts().await?;
+        }
         Ok(())
     }
 
@@ -1116,6 +1047,15 @@ impl RemoteConnection {
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
+        Ok(id)
+    }
+
+    /// Withdraw a model switch the daemon deferred until the turn ends.
+    pub async fn cancel_pending_model_change(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::CancelPendingModelChange { id })
+            .await?;
         Ok(id)
     }
 
@@ -1199,63 +1139,32 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
-    /// Set Copilot premium request conservation mode on the server
-    pub async fn set_premium_mode(&mut self, mode: u8) -> Result<()> {
-        let request = Request::SetPremiumMode {
-            id: self.next_request_id,
-            mode,
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Set reasoning effort on the server (for OpenAI models)
-    pub async fn set_reasoning_effort(&mut self, effort: &str) -> Result<()> {
-        let request = Request::SetReasoningEffort {
-            id: self.next_request_id,
-            effort: effort.to_string(),
-            target_session_id: None,
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Set service tier on the server (for OpenAI models)
-    pub async fn set_service_tier(&mut self, service_tier: &str) -> Result<()> {
-        let request = Request::SetServiceTier {
-            id: self.next_request_id,
-            service_tier: service_tier.to_string(),
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Set connection transport on the server (for OpenAI models)
-    pub async fn set_transport(&mut self, transport: &str) -> Result<()> {
-        let request = Request::SetTransport {
-            id: self.next_request_id,
-            transport: transport.to_string(),
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Toggle a runtime feature on the server for this session
-    pub async fn set_feature(&mut self, feature: FeatureToggle, enabled: bool) -> Result<()> {
-        let request = Request::SetFeature {
-            id: self.next_request_id,
-            feature,
-            enabled,
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Set compaction mode on the server for this session.
-    pub async fn set_compaction_mode(&mut self, mode: crate::config::CompactionMode) -> Result<()> {
-        let request = Request::SetCompactionMode {
-            id: self.next_request_id,
-            mode,
+    pub(crate) async fn apply_session_policy(
+        &mut self,
+        change: SessionPolicyChange<'_>,
+    ) -> Result<()> {
+        let id = self.next_request_id;
+        let request = match change {
+            SessionPolicyChange::Premium(mode) => Request::SetPremiumMode { id, mode },
+            SessionPolicyChange::ReasoningEffort(effort) => Request::SetReasoningEffort {
+                id,
+                effort: effort.to_string(),
+                target_session_id: None,
+            },
+            SessionPolicyChange::ServiceTier(service_tier) => Request::SetServiceTier {
+                id,
+                service_tier: service_tier.to_string(),
+            },
+            SessionPolicyChange::Transport(transport) => Request::SetTransport {
+                id,
+                transport: transport.to_string(),
+            },
+            SessionPolicyChange::Feature { feature, enabled } => Request::SetFeature {
+                id,
+                feature,
+                enabled,
+            },
+            SessionPolicyChange::Compaction(mode) => Request::SetCompactionMode { id, mode },
         };
         self.next_request_id += 1;
         self.send_request(request).await
@@ -1329,8 +1238,39 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    /// Answer a routing spending-limit gate.
+    pub async fn send_routing_gate_answer(
+        &mut self,
+        gate_id: &str,
+        choice: crate::protocol::RoutingGateChoice,
+    ) -> Result<()> {
+        let request = Request::RoutingGateAnswer {
+            id: self.next_request_id,
+            gate_id: gate_id.to_string(),
+            choice,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
+    /// Send a routing intent and return its request id. The daemon answers
+    /// with `ServerEvent::RoutingIntentResult` carrying the same id.
+    pub async fn send_routing_intent(
+        &mut self,
+        action: crate::protocol::RoutingIntentAction,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::RoutingIntent { id, action })
+            .await?;
+        // Failures share the Error wire shape. Track the id so they print
+        // as notices instead of ending an unrelated turn.
+        self.pending_runtime_commands.insert(id);
+        Ok(id)
+    }
+
     /// Send stdin input back to a running command
-    pub async fn send_stdin_response(&mut self, request_id: &str, input: &str) -> Result<()> {
+    async fn send_stdin_response(&mut self, request_id: &str, input: &str) -> Result<()> {
         let request = Request::StdinResponse {
             id: self.next_request_id,
             request_id: request_id.to_string(),
@@ -1355,6 +1295,28 @@ impl RemoteConnection {
             .await
     }
 
+    /// A repeated keyboard stop within five seconds escalates when supported.
+    pub async fn keyboard_cancel(&mut self, reason: &'static str) -> Result<bool> {
+        let now = Instant::now();
+        let force = self.server_accepts_force_stop
+            && self
+                .last_keyboard_cancel
+                .is_some_and(|last| now.duration_since(last) <= Duration::from_secs(5));
+        self.last_keyboard_cancel = Some(now);
+        if force && let Some(session_id) = self.session_id.clone() {
+            let request = Request::ForceStopTurn {
+                id: self.next_request_id,
+                session_id,
+            };
+            self.next_request_id += 1;
+            self.send_request_with_interrupt_trigger(request, Some(reason))
+                .await?;
+            return Ok(true);
+        }
+        self.cancel_with_reason(reason).await?;
+        Ok(false)
+    }
+
     /// Move the currently executing tool to background
     pub async fn background_tool(&mut self) -> Result<()> {
         let request = Request::BackgroundTool {
@@ -1373,8 +1335,20 @@ impl RemoteConnection {
         images: Vec<(String, String)>,
         urgent: bool,
     ) -> Result<u64> {
+        self.soft_interrupt_with_origin(content, images, urgent, false)
+            .await
+    }
+
+    pub(crate) async fn soft_interrupt_with_origin(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        urgent: bool,
+        jarvis_voice: bool,
+    ) -> Result<u64> {
         let id = self.next_request_id;
         let request = Request::SoftInterrupt {
+            jarvis_voice,
             id,
             content,
             images,
@@ -1386,6 +1360,95 @@ impl RemoteConnection {
         self.next_request_id += 1;
         self.send_request_with_interrupt_trigger(request, Some("soft_interrupt"))
             .await?;
+        Ok(id)
+    }
+
+    pub async fn queue_prompt(&mut self, prompt: crate::protocol::QueuedPrompt) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::QueuePrompt {
+            id,
+            client_id: prompt.client_id,
+            content: prompt.content,
+            images: prompt.images,
+            attachments: prompt.attachments,
+            mode: prompt.mode,
+            system_reminder: None,
+            active_skill: prompt.active_skill,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    pub async fn set_queued_prompt_mode(
+        &mut self,
+        client_id: String,
+        mode: crate::protocol::QueuedPromptMode,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SetQueuedPromptMode {
+            id,
+            client_id,
+            mode,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    pub async fn interrupt_queued_prompt(&mut self, client_id: String) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::InterruptQueuedPrompt { id, client_id })
+            .await?;
+        Ok(id)
+    }
+
+    pub async fn get_queued_prompts(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetQueuedPrompts { id }).await?;
+        Ok(id)
+    }
+
+    /// Hold a queued prompt open for editing (or release the hold) so the
+    /// daemon cannot deliver it while the composer edits it.
+    pub async fn set_queued_prompt_editing(
+        &mut self,
+        prompt_id: String,
+        editing: bool,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SetQueuedPromptEditing {
+            id,
+            client_id: "jcode-tui".into(),
+            prompt_id,
+            editing,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Replace a still-queued prompt in place, keeping its position and mode.
+    pub async fn edit_queued_prompt(
+        &mut self,
+        prompt_id: String,
+        content: String,
+        images: Vec<(String, String)>,
+        attachments: Vec<jcode_session_types::Attachment>,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::EditQueuedPrompt {
+            id,
+            client_id: "jcode-tui".into(),
+            prompt_id,
+            content,
+            images,
+            attachments,
+        })
+        .await?;
         Ok(id)
     }
 
@@ -1456,88 +1519,6 @@ impl RemoteConnection {
             .await
     }
 
-    /// Read the next event from the server.
-    ///
-    /// This is **cancellation safe** and may be used directly as a branch in a
-    /// `tokio::select!`. Every byte pulled from the socket is moved into the
-    /// persistent [`Self::read_buffer`] immediately, and the only `.await`
-    /// point is [`AsyncBufReadExt::fill_buf`], which tokio guarantees reads
-    /// nothing when its future is dropped. A previous implementation used
-    /// `BufReader::read_line`, which tokio documents as **not** cancellation
-    /// safe: when a large payload (e.g. a multi-megabyte `History` event for a
-    /// session with images) was mid-read and a sibling `select!` branch (a
-    /// redraw tick, terminal event, or bus event) completed first, the
-    /// `read_line` future was dropped and the bytes it had already consumed
-    /// from the socket were lost. That desynced the newline-framed protocol
-    /// stream: the next read began mid-payload, surfaced as "stray non-JSON
-    /// protocol line" warnings, the real `History` was discarded, and the
-    /// session stayed stuck on "loading session…" until a manual `/restart`.
-    pub async fn next_event(&mut self) -> RemoteRead {
-        let mut stray_lines = 0usize;
-        loop {
-            // Serve any complete line already buffered before touching the
-            // socket. This drains backlog left by a previous (possibly
-            // cancelled) call before issuing a new read.
-            if let Some(line) = self.take_buffered_line() {
-                match self.classify_protocol_line(line, &mut stray_lines) {
-                    LineOutcome::Event(event) => return RemoteRead::Event(*event),
-                    LineOutcome::Skip => continue,
-                    LineOutcome::Disconnect(reason) => return RemoteRead::Disconnected(reason),
-                }
-            }
-
-            // No complete line yet: pull more bytes. `fill_buf` is cancel safe,
-            // so if a `select!` peer wins the race here nothing is read or lost.
-            let chunk = match self.reader.fill_buf().await {
-                Ok(buf) => buf,
-                Err(error) => {
-                    crate::logging::warn(&format!(
-                        "RemoteConnection::next_event: io error={} (session_id={:?}, client_instance_id={:?})",
-                        error, self.session_id, self.client_instance_id
-                    ));
-                    return RemoteRead::Disconnected(RemoteDisconnectReason::Io(error.to_string()));
-                }
-            };
-            if chunk.is_empty() {
-                // EOF. Surface any trailing partial line for diagnostics, then
-                // report a clean peer-closed disconnect.
-                if self.read_buffer.is_empty() {
-                    crate::logging::warn(&format!(
-                        "RemoteConnection::next_event: peer closed (session_id={:?}, client_instance_id={:?})",
-                        self.session_id, self.client_instance_id
-                    ));
-                } else {
-                    let preview: String = String::from_utf8_lossy(&self.read_buffer)
-                        .chars()
-                        .take(240)
-                        .collect();
-                    crate::logging::warn(&format!(
-                        "RemoteConnection::next_event: peer closed mid-line, discarding {} buffered bytes preview={:?} (session_id={:?}, client_instance_id={:?})",
-                        self.read_buffer.len(),
-                        preview,
-                        self.session_id,
-                        self.client_instance_id
-                    ));
-                    self.read_buffer.clear();
-                    self.read_buffer_scan_start = 0;
-                }
-                return RemoteRead::Disconnected(RemoteDisconnectReason::PeerClosed);
-            }
-            let len = chunk.len();
-            if remote_protocol_frame_exceeds_limit(self.read_buffer.len(), len) {
-                self.reader.consume(len);
-                self.read_buffer.clear();
-                self.read_buffer_scan_start = 0;
-                return RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(format!(
-                    "remote protocol frame exceeded {} bytes",
-                    MAX_REMOTE_PROTOCOL_FRAME_BYTES
-                )));
-            }
-            self.read_buffer.extend_from_slice(chunk);
-            self.reader.consume(len);
-        }
-    }
-
     /// Split off the next complete newline-delimited line (without the trailing
     /// `\n`) from the persistent read buffer, leaving any partial remainder in
     /// place for the next read.
@@ -1576,102 +1557,8 @@ impl RemoteConnection {
         Some(line)
     }
 
-    /// Decide what a single decoded protocol line means: a real event, a line
-    /// to skip (blank/stray), or a fatal protocol/transport error.
-    fn classify_protocol_line(&self, line: Vec<u8>, stray_lines: &mut usize) -> LineOutcome {
-        let text = match String::from_utf8(line) {
-            Ok(text) => text,
-            Err(error) => {
-                *stray_lines += 1;
-                let preview: String = String::from_utf8_lossy(error.as_bytes())
-                    .chars()
-                    .take(240)
-                    .collect();
-                crate::logging::warn(&format!(
-                    "RemoteConnection::next_event: skipping stray non-UTF-8 protocol line {}/{} preview={:?} (session_id={:?}, client_instance_id={:?})",
-                    *stray_lines,
-                    MAX_STRAY_REMOTE_PROTOCOL_LINES,
-                    preview,
-                    self.session_id,
-                    self.client_instance_id
-                ));
-                if *stray_lines >= MAX_STRAY_REMOTE_PROTOCOL_LINES {
-                    return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(
-                        "too many stray non-JSON protocol lines".to_string(),
-                    ));
-                }
-                return LineOutcome::Skip;
-            }
-        };
-        let trimmed = text.trim_start();
-        if trimmed.trim().is_empty() {
-            crate::logging::warn(&format!(
-                "RemoteConnection::next_event: skipping blank line (session_id={:?}, client_instance_id={:?})",
-                self.session_id, self.client_instance_id
-            ));
-            return LineOutcome::Skip;
-        }
-        if !trimmed.starts_with('{') {
-            *stray_lines += 1;
-            let preview: String = text.chars().take(240).collect();
-            crate::logging::warn(&format!(
-                "RemoteConnection::next_event: skipping stray non-JSON protocol line {}/{} preview={:?} (session_id={:?}, client_instance_id={:?})",
-                *stray_lines,
-                MAX_STRAY_REMOTE_PROTOCOL_LINES,
-                preview,
-                self.session_id,
-                self.client_instance_id
-            ));
-            if *stray_lines >= MAX_STRAY_REMOTE_PROTOCOL_LINES {
-                return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(
-                    "too many stray non-JSON protocol lines".to_string(),
-                ));
-            }
-            return LineOutcome::Skip;
-        }
-        match self.request_timings.parse_event(&text) {
-            Ok(ServerEvent::Done { id })
-                if self
-                    .control_done_ids
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .contains(&id) =>
-            {
-                LineOutcome::Skip
-            }
-            Ok(event) => LineOutcome::Event(Box::new(event)),
-            Err(error) => {
-                // A single unparseable JSON line (e.g. the tail half of a frame
-                // split by a lost write, or an event variant this client build
-                // doesn't know) must not kill the whole session. Count it
-                // against the stray-line budget and resync on the next line;
-                // only give up if the stream keeps failing to parse (which
-                // indicates a real protocol/version mismatch). See issue #422:
-                // huge sessions used to die permanently on one corrupt frame.
-                *stray_lines += 1;
-                let preview: String = text.chars().take(240).collect();
-                crate::logging::warn(&format!(
-                    "RemoteConnection::next_event: skipping unparseable protocol line {}/{} error={} preview={:?} (session_id={:?}, client_instance_id={:?})",
-                    *stray_lines,
-                    MAX_STRAY_REMOTE_PROTOCOL_LINES,
-                    error,
-                    preview,
-                    self.session_id,
-                    self.client_instance_id
-                ));
-                if *stray_lines >= MAX_STRAY_REMOTE_PROTOCOL_LINES {
-                    return LineOutcome::Disconnect(RemoteDisconnectReason::Protocol(format!(
-                        "too many unparseable protocol lines; last error: {}",
-                        error
-                    )));
-                }
-                LineOutcome::Skip
-            }
-        }
-    }
-
     /// Get writer for sending requests
-    pub fn writer(&self) -> Arc<Mutex<WriteHalf>> {
+    fn writer(&self) -> Arc<Mutex<WriteHalf>> {
         Arc::clone(&self.writer)
     }
 
@@ -1693,20 +1580,29 @@ impl RemoteConnection {
             outbound_pending: Default::default(),
             _dummy_peer: Some(b),
             session_id: None,
+            server_accepts_force_stop: false,
+            last_keyboard_cancel: None,
             cloud_authority: None,
+            screen_feed: None,
+            jarvis_tools_configured: false,
+            local_tools_request: None,
             cloud_callbacks: Vec::new(),
             client_instance_id: None,
             next_request_id: 1,
             pending_runtime_commands: Default::default(),
+            pending_context_meters: Default::default(),
             control_done_ids: Default::default(),
             request_timings: Default::default(),
-            tool_diff: RemoteDiffTracker::default(),
+            tool_diff: RemoteDiffTracker::live(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
             #[cfg(test)]
             protocol_bytes_scanned: 0,
             has_loaded_history: false,
             server_accepts_focus: false,
+            server_accepts_queued_prompts: false,
+            server_accepts_queue_editing: false,
+            server_accepts_file_attachments: false,
             reported_focus: None,
             last_account_usage_poll: None,
             call_output_tokens_seen: 0,
@@ -1718,6 +1614,18 @@ impl RemoteConnection {
         self._dummy_peer.take()
     }
 
+    /// Make every later write on a dummy connection fail with a broken pipe,
+    /// whatever happened to the peer. Dropping the peer is not enough: a child
+    /// process another test spawns concurrently can inherit a copy of the peer
+    /// descriptor (the socketpair is not close-on-exec until a follow-up call),
+    /// which keeps the peer open and lets the write succeed. Shutting down our
+    /// own write side cannot leak that way.
+    #[cfg(test)]
+    pub(crate) fn fail_dummy_writes(&mut self) {
+        let mut writer = self.writer.try_lock().expect("dummy writer is idle");
+        let _ = futures::FutureExt::now_or_never(writer.shutdown());
+    }
+
     #[cfg(test)]
     pub(crate) fn next_request_id_for_test(&self) -> u64 {
         self.next_request_id
@@ -1725,6 +1633,11 @@ impl RemoteConnection {
 
     /// Set session ID
     pub fn set_session_id(&mut self, id: String) {
+        if self.session_id.as_deref() != Some(id.as_str()) {
+            self.stop_screen_context();
+            self.jarvis_tools_configured = false;
+            self.local_tools_request = None;
+        }
         self.session_id = Some(id);
     }
 
@@ -1746,43 +1659,13 @@ impl RemoteConnection {
         self.has_loaded_history = true;
     }
 
-    /// Handle tool start - begin tracking for diff generation
-    pub fn handle_tool_start(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_start(id, name);
-    }
-
-    /// Handle tool input delta
-    pub fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
-        self.tool_diff.handle_tool_input(id, delta);
-    }
-
-    /// Get parsed input for this call (before handle_tool_exec clears it)
-    pub fn get_tool_input(&self, id: &str) -> serde_json::Value {
-        self.tool_diff.tool_input_json(id)
-    }
-
-    /// Handle tool exec - cache file content if edit/write
-    pub fn handle_tool_exec(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_exec(id, name);
-    }
-
-    /// Handle tool done - generate diff if we have pending data
-    pub fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
-        self.tool_diff.finish_tool(id, name, output)
-    }
-
-    /// Clear pending diff state
-    pub fn clear_pending(&mut self) {
-        self.tool_diff.clear();
-    }
-
     /// Per-API-call output token watermark (for TPS delta accumulation).
     pub fn call_output_tokens_seen(&mut self) -> &mut u64 {
         &mut self.call_output_tokens_seen
     }
 
     /// Reset per-call output token watermark.
-    pub fn reset_call_output_tokens_seen(&mut self) {
+    fn reset_call_output_tokens_seen(&mut self) {
         self.call_output_tokens_seen = 0;
     }
 }

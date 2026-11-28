@@ -1,4 +1,8 @@
 use super::*;
+#[path = "ui_frame_metrics_flicker_events.rs"]
+mod flicker_events;
+use flicker_events::maybe_record_flicker_event;
+
 use serde::Serialize;
 use std::collections::{VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
@@ -122,71 +126,6 @@ pub(crate) struct FrameInputAttribution {
     pub event: Option<String>,
     pub scroll_delta: Option<i32>,
     pub model_picker_open: bool,
-}
-
-/// Milliseconds from reading a key event off the terminal to the frame carrying
-/// it being flushed, for the most recent keystrokes.
-///
-/// This is the number the user actually feels, and nothing measured it: existing
-/// stats cover render and flush cost *within* a draw, so a keystroke that waited
-/// a long time before any draw started looked perfectly fast. Kept as a small
-/// ring so a single unlucky frame cannot be mistaken for a trend.
-static KEY_TO_PAINT_MS: Mutex<Vec<f64>> = Mutex::new(Vec::new());
-
-/// When the pending keystroke was read, if a frame carrying it has not yet been
-/// flushed. Only the oldest unpainted keystroke is tracked: that is the one whose
-/// latency the user perceives, and it bounds the rest.
-static PENDING_KEY_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-
-/// Record that a key event was just read from the terminal.
-pub(crate) fn note_key_event_read() {
-    let mut slot = PENDING_KEY_AT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if slot.is_none() {
-        *slot = Some(std::time::Instant::now());
-    }
-}
-
-/// Record that a frame has been flushed, closing out any pending keystroke.
-pub(crate) fn note_frame_painted() {
-    let pending = {
-        let mut slot = PENDING_KEY_AT
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        slot.take()
-    };
-    if let Some(at) = pending {
-        let mut samples = KEY_TO_PAINT_MS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        samples.push(at.elapsed().as_secs_f64() * 1000.0);
-        const MAX_SAMPLES: usize = 64;
-        if samples.len() > MAX_SAMPLES {
-            let excess = samples.len() - MAX_SAMPLES;
-            samples.drain(0..excess);
-        }
-    }
-}
-
-/// Key-to-paint latency summary for `draw-stats`.
-pub(crate) fn key_to_paint_debug_json() -> serde_json::Value {
-    let samples = KEY_TO_PAINT_MS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
-    if samples.is_empty() {
-        return serde_json::Value::Null;
-    }
-    let mut sorted = samples.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let pick = |q: f64| sorted[((sorted.len() as f64 * q) as usize).min(sorted.len() - 1)];
-    serde_json::json!({
-        "samples": sorted.len(),
-        "p50_ms": pick(0.5),
-        "p95_ms": pick(0.95),
-        "max_ms": sorted[sorted.len() - 1],
-    })
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -522,23 +461,24 @@ pub(super) fn note_full_prep_cache_lookup(elapsed: Duration) {
     with_frame_perf_stats_mut(|stats| stats.full_prep_cache_lookup_ms += duration_ms(elapsed));
 }
 
-pub(super) fn note_prep_restage(elapsed: Duration) {
-    with_frame_perf_stats_mut(|stats| stats.prep_restage_ms += duration_ms(elapsed));
+pub(super) enum PrepPhase {
+    Restage,
+    Aspect,
+    PrepareAt,
+    Overflow,
 }
 
-pub(super) fn note_prep_aspect(elapsed: Duration) {
-    with_frame_perf_stats_mut(|stats| stats.prep_aspect_ms += duration_ms(elapsed));
-}
-
-pub(super) fn note_prep_prepare_at(elapsed: Duration) {
-    with_frame_perf_stats_mut(|stats| {
-        stats.prep_prepare_at_ms += duration_ms(elapsed);
-        stats.prep_prepare_at_calls += 1;
+pub(super) fn record_prep_phase(phase: PrepPhase, elapsed: Duration) {
+    let elapsed_ms = duration_ms(elapsed);
+    with_frame_perf_stats_mut(|stats| match phase {
+        PrepPhase::Restage => stats.prep_restage_ms += elapsed_ms,
+        PrepPhase::Aspect => stats.prep_aspect_ms += elapsed_ms,
+        PrepPhase::PrepareAt => {
+            stats.prep_prepare_at_ms += elapsed_ms;
+            stats.prep_prepare_at_calls += 1;
+        }
+        PrepPhase::Overflow => stats.prep_overflow_ms += elapsed_ms,
     });
-}
-
-pub(super) fn note_prep_overflow(elapsed: Duration) {
-    with_frame_perf_stats_mut(|stats| stats.prep_overflow_ms += duration_ms(elapsed));
 }
 
 pub(super) fn note_full_prep_cache_hit(
@@ -1000,100 +940,6 @@ fn clock_ticks_per_second() -> Option<f64> {
 #[cfg(not(unix))]
 fn clock_ticks_per_second() -> Option<f64> {
     None
-}
-
-fn maybe_record_flicker_event(history: &mut FlickerFrameHistory, current: &FlickerFrameSample) {
-    let Some(previous) = history.samples.back().cloned() else {
-        return;
-    };
-
-    let len = history.samples.len();
-    if len >= 2 {
-        let earlier = history.samples.get(len - 2).cloned();
-        if let Some(earlier) = earlier
-            && same_flicker_state_key(&earlier, current)
-            && same_flicker_state_key(&earlier, &previous)
-            && earlier.visible_hash == current.visible_hash
-            && earlier.chat_scrollbar_visible == current.chat_scrollbar_visible
-            && earlier.content_width == current.content_width
-            && (earlier.chat_scrollbar_visible != previous.chat_scrollbar_visible
-                || earlier.content_width != previous.content_width)
-        {
-            push_flicker_event(
-                history,
-                FlickerEvent {
-                    timestamp_ms: current.timestamp_ms,
-                    kind: "layout_oscillation".to_string(),
-                    session_id: current.session_id.clone(),
-                    session_name: current.session_name.clone(),
-                    previous,
-                    current: current.clone(),
-                },
-            );
-            return;
-        }
-    }
-
-    if len >= 2 {
-        let earlier = history.samples.get(len - 2).cloned();
-        if let Some(earlier) = earlier
-            && same_flicker_context_key(&earlier, current)
-            && same_flicker_context_key(&earlier, &previous)
-            && !current.auto_scroll_paused
-            && earlier.visible_hash == current.visible_hash
-            && earlier.content_width == current.content_width
-            && earlier.chat_scrollbar_visible == current.chat_scrollbar_visible
-            && (previous.visible_hash != current.visible_hash
-                || previous.content_width != current.content_width
-                || previous.chat_scrollbar_visible != current.chat_scrollbar_visible)
-        {
-            push_flicker_event(
-                history,
-                FlickerEvent {
-                    timestamp_ms: current.timestamp_ms,
-                    kind: "layout_feedback_oscillation".to_string(),
-                    session_id: current.session_id.clone(),
-                    session_name: current.session_name.clone(),
-                    previous,
-                    current: current.clone(),
-                },
-            );
-            return;
-        }
-    }
-
-    if same_flicker_state_key(&previous, current) {
-        if previous.chat_scrollbar_visible != current.chat_scrollbar_visible
-            || previous.content_width != current.content_width
-        {
-            push_flicker_event(
-                history,
-                FlickerEvent {
-                    timestamp_ms: current.timestamp_ms,
-                    kind: "layout_toggle_same_state".to_string(),
-                    session_id: current.session_id.clone(),
-                    session_name: current.session_name.clone(),
-                    previous: previous.clone(),
-                    current: current.clone(),
-                },
-            );
-        } else if previous.visible_hash != current.visible_hash
-            && !sample_has_visible_transient_content(&previous)
-            && !sample_has_visible_transient_content(current)
-        {
-            push_flicker_event(
-                history,
-                FlickerEvent {
-                    timestamp_ms: current.timestamp_ms,
-                    kind: "visible_hash_changed_same_state".to_string(),
-                    session_id: current.session_id.clone(),
-                    session_name: current.session_name.clone(),
-                    previous,
-                    current: current.clone(),
-                },
-            );
-        }
-    }
 }
 
 pub(crate) fn record_flicker_frame_sample(sample: FlickerFrameSample) {

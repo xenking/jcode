@@ -6,7 +6,7 @@
 
 use super::onboarding_flow::{
     ExternalCli, ImportReview, OnboardingFlow, OnboardingPendingValidation, OnboardingPhase,
-    SummaryPill,
+    ReviewKey,
 };
 use super::{App, DisplayMessage, SessionPickerMode};
 use crate::import::repo_ranking::{self, SessionLocation};
@@ -213,9 +213,9 @@ impl App {
     /// Such sessions should never auto-start the guided onboarding flow.
     pub(super) fn is_selfdev_canary_session(&self) -> bool {
         if self.is_remote {
-            self.remote_is_canary.unwrap_or(self.session.is_canary)
+            self.remote_is_canary.unwrap_or(self.session.is_canary())
         } else {
-            self.session.is_canary
+            self.session.is_canary()
         }
     }
 
@@ -274,7 +274,7 @@ impl App {
             );
         } else {
             self.set_status_notice(
-                "Log in to OpenAI? Yes/No - hl to move, Enter to choose (No skips for now)",
+                "How would you like to log in? [OpenAI] - arrows/Tab to move, Enter to choose",
             );
         }
     }
@@ -372,9 +372,9 @@ impl App {
     /// - `ModelSelect`: we tell the user to run /model; Enter is also a
     ///   shortcut that opens the model picker from the welcome screen.
     /// - `ContinuePrompt`: Y/Enter continues, N/Esc declines.
-    /// - `LoginOpenAi`: Left/h -> Yes, Right/l -> No, toggle with
-    ///   Up/Down/k/j/Tab; y/n commit directly, Enter/Space commit the
-    ///   highlighted default (Yes -> OpenAI sign-in, No -> finish onboarding).
+    /// - `LoginOpenAi`: arrows/hl/jk/Tab move between OpenAI, Claude, API key,
+    ///   and Skip; 1/2/3/4 or o/c/a/s (plus y/n) commit directly; Enter/Space
+    ///   commit the highlighted choice.
     ///
     /// Returns true if the key was consumed.
     pub(super) fn handle_onboarding_continue_prompt_key(&mut self, code: KeyCode) -> bool {
@@ -553,213 +553,137 @@ impl App {
     ///     - Space -> toggle the highlighted login between Yes and No
     ///     - Enter -> import every "Yes" login and finish
     fn handle_onboarding_import_review_key(&mut self, code: KeyCode) -> bool {
-        // `finished` means the user committed the import (so we kick it off
-        // outside the borrow).
-        let mut finished = false;
-        // Set when the user committed a telemetry level, so we persist it
-        // outside the review borrow.
-        let mut telemetry_choice = None;
-        {
-            let Some(review) = self.onboarding_import_review_mut() else {
-                return false;
-            };
-            if let Some(settings) = review.telemetry.as_mut() {
-                // Telemetry settings sub-page: Continue button on top
-                // (focused), then one checkbox per category. Up/Down move,
-                // Space/Enter toggle a row, Enter on Continue saves and
-                // returns, a/n set all on/off, Esc returns unchanged.
-                match code {
-                    KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => settings.step(false),
-                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => settings.step(true),
-                    KeyCode::Char('a') | KeyCode::Char('A') => settings.set_all(true),
-                    KeyCode::Char('n') | KeyCode::Char('N') => settings.set_all(false),
-                    // Left = Yes, Right = No on a category row, like the
-                    // "Import less" page.
-                    KeyCode::Left
-                    | KeyCode::Char('h')
-                    | KeyCode::Char('y')
-                    | KeyCode::Char('Y')
-                        if settings.cursor > 0 =>
-                    {
-                        settings.checked[settings.cursor - 1] = true
-                    }
-                    KeyCode::Right | KeyCode::Char('l') if settings.cursor > 0 => {
-                        settings.checked[settings.cursor - 1] = false
-                    }
-                    KeyCode::Esc => review.close_telemetry(),
-                    KeyCode::Enter | KeyCode::Char(' ') => {
-                        if !settings.toggle() {
-                            telemetry_choice = Some(*settings);
-                            review.close_telemetry();
-                            // Saving returns focus to Continue so the next
-                            // Enter moves onboarding forward.
-                            review.summary_pill = SummaryPill::Continue;
-                            review.continue_focused = true;
-                        }
-                    }
-                    _ => return false,
-                }
-            } else if !review.choosing {
-                // Summary: Continue, Import less, and Telemetry pills.
-                // Arrows/Tab move; Enter/Space commits the focused one.
-                match code {
-                    KeyCode::Left
-                    | KeyCode::Up
-                    | KeyCode::BackTab
-                    | KeyCode::Char('h')
-                    | KeyCode::Char('k') => review.summary_step(false),
-                    KeyCode::Right
-                    | KeyCode::Down
-                    | KeyCode::Tab
-                    | KeyCode::Char('j')
-                    | KeyCode::Char('l') => review.summary_step(true),
-                    // c is a direct shortcut into choose mode.
-                    KeyCode::Char('c') | KeyCode::Char('C') => review.enter_choose_mode(),
-                    // t jumps straight to the telemetry settings page.
-                    KeyCode::Char('t') | KeyCode::Char('T') => review.open_telemetry(),
-                    // y = "yes, import everything" regardless of pill focus, so
-                    // the timeout is never a forced wait.
-                    KeyCode::Char('y') | KeyCode::Char('Y') => finished = true,
-                    KeyCode::Enter | KeyCode::Char(' ') => match review.summary_pill {
-                        SummaryPill::Continue => finished = true,
-                        SummaryPill::ImportLess => review.enter_choose_mode(),
-                        SummaryPill::Telemetry => review.open_telemetry(),
-                    },
-                    _ => return false,
-                }
-            } else {
-                match code {
-                    KeyCode::Up | KeyCode::Char('k') => review.cursor_up(),
-                    KeyCode::Down | KeyCode::Char('j') => review.cursor_down(),
-                    // Left = Yes (import), Right = No (skip), for the highlighted row.
-                    KeyCode::Left
-                    | KeyCode::Char('h')
-                    | KeyCode::Char('y')
-                    | KeyCode::Char('Y') => review.set_current(true),
-                    KeyCode::Right
-                    | KeyCode::Char('l')
-                    | KeyCode::Char('n')
-                    | KeyCode::Char('N') => review.set_current(false),
-                    // Space toggles the highlighted row between Yes and No.
-                    KeyCode::Char(' ') => review.toggle_current(),
-                    // Enter on a login row selects/deselects that row, so
-                    // "picking an option" never commits the whole import out
-                    // from under the user. Only Enter on the Continue pill
-                    // (or `c`) commits.
-                    KeyCode::Enter if !review.continue_focused => review.toggle_current(),
-                    KeyCode::Enter | KeyCode::Char('c') | KeyCode::Char('C') => finished = true,
-                    _ => return false,
-                }
-            }
-        }
-        if let Some(level) = telemetry_choice {
-            self.onboarding_telemetry_choice_made = true;
-            if self.onboarding_sim_active() {
-                // A rehearsal must leave this machine's real settings alone.
-                self.set_status_notice(format!("{} (rehearsal, not saved)", level.status_label()));
-            } else {
-                level.persist();
-                self.set_status_notice(level.status_label());
-            }
-            return true;
-        }
-        if finished {
-            self.onboarding_finish_import_review();
-        } else {
-            self.update_onboarding_import_review_status();
+        let Some(review) = self.onboarding_import_review_mut() else {
+            return false;
+        };
+        match review.handle_key(code) {
+            ReviewKey::Ignored => return false,
+            ReviewKey::Commit => self.onboarding_finish_import_review(),
+            ReviewKey::Handled => self.update_onboarding_import_review_status(),
         }
         true
     }
 
     /// Handle a key while the "Log in to OpenAI?" prompt is up. Yes/No sit side
-    /// by side (default highlight is "Yes"):
-    ///   - Left / h  -> highlight "Yes"
-    ///   - Right / l -> highlight "No"
-    ///   - Up / Down / k / j / Tab -> toggle
-    ///   - y / Y -> log in to OpenAI;  n / N -> skip and finish onboarding
-    ///   - Enter / Space -> commit the highlighted choice
+    /// Handle keys while on the first-run login choice screen. Four options are
+    /// offered (default highlight is "OpenAI"):
+    ///   - Left / h / Up / k / BackTab -> previous option
+    ///   - Right / l / Down / j / Tab  -> next option
+    ///   - 1 / o / O / y / Y -> OpenAI
+    ///   - 2 / c / C         -> Claude
+    ///   - 3 / a / A         -> Paste any API key
+    ///   - 4 / s / S / n / N -> Skip and finish onboarding
+    ///   - Enter / Space     -> commit the highlighted choice
     fn handle_onboarding_login_openai_key(&mut self, code: KeyCode) -> bool {
+        use crate::tui::OnboardingLoginChoice;
         let Some(flow) = self.onboarding_flow.as_mut() else {
             return false;
         };
-        let OnboardingPhase::LoginOpenAi { yes_highlighted } = &mut flow.phase else {
+        let OnboardingPhase::LoginOpenAi { choice } = &mut flow.phase else {
             return false;
         };
         match code {
-            KeyCode::Left | KeyCode::Char('h') => {
-                *yes_highlighted = true;
-                self.update_onboarding_login_openai_status();
-                true
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
-                *yes_highlighted = false;
-                self.update_onboarding_login_openai_status();
-                true
-            }
-            KeyCode::Up
-            | KeyCode::Down
+            KeyCode::Left
+            | KeyCode::Char('h')
+            | KeyCode::Up
             | KeyCode::Char('k')
+            | KeyCode::BackTab => {
+                *choice = choice.prev();
+                self.update_onboarding_login_openai_status();
+                true
+            }
+            KeyCode::Right
+            | KeyCode::Char('l')
+            | KeyCode::Down
             | KeyCode::Char('j')
             | KeyCode::Tab => {
-                *yes_highlighted = !*yes_highlighted;
+                *choice = choice.next();
                 self.update_onboarding_login_openai_status();
                 true
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.onboarding_answer_login_openai(true);
+            KeyCode::Char('1')
+            | KeyCode::Char('o')
+            | KeyCode::Char('O')
+            | KeyCode::Char('y')
+            | KeyCode::Char('Y') => {
+                self.onboarding_choose_login(OnboardingLoginChoice::OpenAi);
                 true
             }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.onboarding_answer_login_openai(false);
+            KeyCode::Char('2') | KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.onboarding_choose_login(OnboardingLoginChoice::Claude);
+                true
+            }
+            KeyCode::Char('3') | KeyCode::Char('a') | KeyCode::Char('A') => {
+                self.onboarding_choose_login(OnboardingLoginChoice::ApiKey);
+                true
+            }
+            KeyCode::Char('4')
+            | KeyCode::Char('s')
+            | KeyCode::Char('S')
+            | KeyCode::Char('n')
+            | KeyCode::Char('N') => {
+                self.onboarding_choose_login(OnboardingLoginChoice::Skip);
                 true
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                let wants_openai = *yes_highlighted;
-                self.onboarding_answer_login_openai(wants_openai);
+                let selected = *choice;
+                self.onboarding_choose_login(selected);
                 true
             }
             _ => false,
         }
     }
 
-    /// Answer the "Log in to OpenAI?" prompt. Yes starts the OpenAI sign-in;
-    /// No exits onboarding and drops the user on the normal new-session screen
-    /// with a system message telling them to run `/login` when they're ready.
-    ///
-    /// We intentionally do NOT open the inline provider picker on "No": that
-    /// flow has a flaky input widget (typed characters were not echoed), and
-    /// finishing onboarding straight to the usual screen is simpler and more
-    /// robust. The user can pick any provider via `/login` at their own pace.
-    pub(super) fn onboarding_answer_login_openai(&mut self, wants_openai: bool) {
+    /// Execute the user's choice on the first-run login screen.
+    pub(super) fn onboarding_choose_login(&mut self, choice: crate::tui::OnboardingLoginChoice) {
+        use crate::tui::OnboardingLoginChoice;
         if !matches!(
             self.onboarding_phase(),
             Some(OnboardingPhase::LoginOpenAi { .. })
         ) {
             return;
         }
-        if wants_openai && Self::openai_already_connected() {
-            // Re-running onboarding with OpenAI already signed in: there is
-            // nothing to sign in to, so continue as if the sign-in just
-            // finished instead of asking the user to log in again.
-            self.onboarding_after_login();
-            self.set_status_notice("OpenAI is already connected");
-        } else if wants_openai {
-            self.onboarding_start_default_login();
-        } else {
-            self.onboarding_finish();
-            let login = Self::onboarding_login_suggestion();
-            let hint = if login == "/login" {
-                "No problem. When you're ready to log in, run /login to pick a provider \
-                 (OpenAI, Anthropic, Gemini, OpenRouter, and more)."
-                    .to_string()
-            } else {
-                format!(
-                    "No problem. When you're ready, run {login} to reuse the credentials \
-                     already on this machine, or /login to pick another provider."
-                )
-            };
-            self.push_display_message(DisplayMessage::system(hint));
-            self.set_status_notice(format!("Run {login} when you're ready"));
+        match choice {
+            OnboardingLoginChoice::OpenAi => {
+                if Self::openai_already_connected() {
+                    self.onboarding_after_login();
+                    self.set_status_notice("OpenAI is already connected");
+                } else {
+                    self.onboarding_start_default_login();
+                }
+            }
+            OnboardingLoginChoice::Claude => {
+                if Self::claude_already_connected() {
+                    self.onboarding_after_login();
+                    self.set_status_notice("Claude is already connected");
+                } else {
+                    crate::telemetry::record_setup_step_once("login_picker_opened");
+                    self.start_claude_login();
+                    self.set_status_notice(
+                        "Login: opening Claude sign-in (or type /login for others)",
+                    );
+                }
+            }
+            OnboardingLoginChoice::ApiKey => {
+                crate::telemetry::record_setup_step_once("login_picker_opened");
+                self.start_auto_api_key_login();
+            }
+            OnboardingLoginChoice::Skip => {
+                self.onboarding_finish();
+                let login = Self::onboarding_login_suggestion();
+                let hint = if login == "/login" {
+                    "No problem. When you're ready to log in, run /login to pick a provider \
+                     (OpenAI, Anthropic, Gemini, OpenRouter, and more)."
+                        .to_string()
+                } else {
+                    format!(
+                        "No problem. When you're ready, run {login} to reuse the credentials \
+                         already on this machine, or /login to pick another provider."
+                    )
+                };
+                self.push_display_message(DisplayMessage::system(hint));
+                self.set_status_notice(format!("Run {login} when you're ready"));
+            }
         }
     }
 
@@ -771,17 +695,22 @@ impl App {
         )
     }
 
-    /// Refresh the status notice for the "Log in to OpenAI?" prompt.
+    /// Whether jcode already has a working Claude/Anthropic login.
+    fn claude_already_connected() -> bool {
+        crate::external_auth::provider_connected_in_jcode(
+            &crate::auth::AuthStatus::check_fast(),
+            "anthropic",
+        )
+    }
+
+    /// Refresh the status notice for the first-run login choice screen.
     fn update_onboarding_login_openai_status(&mut self) {
-        let yes = matches!(
-            self.onboarding_phase(),
-            Some(OnboardingPhase::LoginOpenAi {
-                yes_highlighted: true
-            })
-        );
-        let choice = if yes { "Yes" } else { "No" };
+        let label = match self.onboarding_phase() {
+            Some(OnboardingPhase::LoginOpenAi { choice }) => choice.label(),
+            _ => crate::tui::OnboardingLoginChoice::OpenAi.label(),
+        };
         self.set_status_notice(format!(
-            "Log in to OpenAI? [{choice}] - hl to move, Enter to choose (No skips for now)"
+            "How would you like to log in? [{label}] - arrows/Tab to move, Enter to choose"
         ));
     }
 
@@ -803,31 +732,14 @@ impl App {
             self.onboarding_phase(),
             Some(OnboardingPhase::Login {
                 import: Some(review)
-            }) if review.telemetry.is_some()
+            }) if review.telemetry_page_open()
         )
     }
 
     /// Refresh the status notice to reflect the current import-list selection.
     fn update_onboarding_import_review_status(&mut self) {
         if let Some(review) = self.onboarding_import_review_mut() {
-            let checked = review.checked_count();
-            let total = review.total();
-            let secs = review.seconds_remaining();
-            let notice = if !review.choosing {
-                if review.telemetry.is_some() {
-                    "Telemetry settings - arrows move, Space toggles, Enter on Continue saves, Esc goes back".to_string()
-                } else {
-                    format!(
-                        "Found {total} login{} - Enter imports all (auto in {secs}s), or pick \"Import less\"",
-                        if total == 1 { "" } else { "s" },
-                    )
-                }
-            } else {
-                format!(
-                    "Import {checked} of {total} login{} - Enter/Space toggles, arrows move, Continue imports",
-                    if total == 1 { "" } else { "s" },
-                )
-            };
+            let notice = review.status_notice();
             self.set_status_notice(notice);
         }
     }
@@ -838,7 +750,7 @@ impl App {
         // Take the candidates and approved indices out of the phase, then clear
         // the import sub-state so the welcome card stops rendering the prompt.
         let (candidates, approved) = match self.onboarding_import_review_mut() {
-            Some(review) => (review.candidates.clone(), review.approved_indices()),
+            Some(review) => review.approved_candidates(),
             None => return,
         };
         if let Some(flow) = self.onboarding_flow.as_mut()
@@ -942,7 +854,7 @@ impl App {
     /// later through `/resume`, but first run stays focused on two clear paths.
     pub(super) fn onboarding_open_start_choice(&mut self) {
         let mut picker = SessionPicker::new(Vec::new());
-        picker.set_current_dir(self.session.working_dir.clone());
+        picker.set_current_dir(self.session.working_dir().map(str::to_owned));
         picker.activate_onboarding_banner(Self::onboarding_start_choice_banner_lines());
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::Onboarding;
@@ -1004,7 +916,7 @@ impl App {
         }
         let slot: Arc<Mutex<Option<Option<PathBuf>>>> = Arc::new(Mutex::new(None));
         self.onboarding_recent_project_prefetch = Some(slot.clone());
-        let session_id = self.session.id.clone();
+        let session_id = self.session.id().to_owned();
         // A plain OS thread (not `tokio::spawn`) keeps this blocking filesystem
         // scan off the async runtime and works in tests without a reactor.
         std::thread::spawn(move || {
@@ -1023,7 +935,7 @@ impl App {
         let excluded: Vec<PathBuf> = home.iter().cloned().collect();
 
         if self.is_remote
-            && let Some(working_dir) = self.session.working_dir.as_deref()
+            && let Some(working_dir) = self.session.working_dir()
         {
             let working_dir = Path::new(working_dir);
             // Remote session history is not available on the client. Trust the
@@ -1049,15 +961,14 @@ impl App {
             return Some(repository);
         }
 
-        if let Some(repository) = Self::recent_project_path_from_sessions(&self.session.id) {
+        if let Some(repository) = Self::recent_project_path_from_sessions(self.session.id()) {
             return Some(repository);
         }
 
         // A brand-new user has no history to rank yet. In that case only, use
         // the repository they launched jcode from rather than disabling review.
         self.session
-            .working_dir
-            .as_deref()
+            .working_dir()
             .and_then(|working_dir| repo_ranking::resolve_git_root(Path::new(working_dir)))
             .filter(|root| !excluded.iter().any(|excluded| excluded == root))
     }
@@ -1152,7 +1063,7 @@ impl App {
     /// onboarding new-session validation line.
     fn onboarding_default_model_label(&self) -> String {
         let model = self.onboarding_default_model_id();
-        let pretty = super::model_names::pretty_model_display_name(&model);
+        let pretty = jcode_provider_core::model_names::pretty_model_display_name(&model);
         match self.provider.reasoning_effort() {
             Some(effort) if !effort.trim().is_empty() && effort != "none" => {
                 let effort_label = super::helpers::effort_display_label(&effort);
@@ -1173,9 +1084,9 @@ impl App {
             return model;
         }
         self.session
-            .model
-            .clone()
+            .model()
             .filter(|m| !m.trim().is_empty() && !m.eq_ignore_ascii_case("unknown"))
+            .map(str::to_owned)
             .unwrap_or_else(|| self.provider.model())
     }
 
@@ -1201,7 +1112,7 @@ impl App {
         if self.recent_authenticated_provider.is_some() && self.auth_catalog_refresh_pending {
             self.onboarding_pending_model_validation =
                 Some(OnboardingPendingValidation::awaiting_catalog_refresh(
-                    self.session.id.clone(),
+                    self.session.id().to_owned(),
                     self.remote_model_catalog_generation,
                 ));
             return;
@@ -1212,8 +1123,9 @@ impl App {
         if self.onboarding_default_model_id_is_concrete() {
             self.onboarding_spawn_model_validation();
         } else {
-            self.onboarding_pending_model_validation =
-                Some(OnboardingPendingValidation::new(self.session.id.clone()));
+            self.onboarding_pending_model_validation = Some(OnboardingPendingValidation::new(
+                self.session.id().to_owned(),
+            ));
         }
     }
 
@@ -1233,7 +1145,7 @@ impl App {
         };
         let model_label = self.onboarding_default_model_label();
         let provider_key = crate::session::derive_session_provider_key(provider.name());
-        let session_id = self.session.id.clone();
+        let session_id = self.session.id().to_owned();
         // Whether to also run a definitive live Copilot auth check. Copilot is
         // unusual: a local GitHub token can exist while the account is banned or
         // not entitled, so the presence-only probe used by the readiness summary
@@ -1273,7 +1185,7 @@ impl App {
         let Some(pending) = self.onboarding_pending_model_validation.as_ref() else {
             return false;
         };
-        if pending.session_id != self.session.id {
+        if pending.session_id != self.session.id() {
             // Session changed out from under us; drop the stale request.
             self.onboarding_pending_model_validation = None;
             return false;
@@ -1541,7 +1453,7 @@ impl App {
         &mut self,
         result: crate::bus::OnboardingModelValidated,
     ) -> bool {
-        if result.session_id != self.session.id {
+        if result.session_id != self.session.id() {
             return false;
         }
 

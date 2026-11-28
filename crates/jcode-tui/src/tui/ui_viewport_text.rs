@@ -77,15 +77,6 @@ pub(crate) fn truncate_line_for_copy_badge(line: &mut Line<'static>, max_content
         .push(Span::styled("…", Style::default().fg(dim_color())));
 }
 
-pub(super) fn copy_badge_alt_label_from_config(configured: &str) -> String {
-    let configured = configured.trim();
-    if configured.is_empty() {
-        COPY_BADGE_ALT_LABEL.to_string()
-    } else {
-        configured.to_string()
-    }
-}
-
 #[cfg(test)]
 mod allocation_tests {
     use super::*;

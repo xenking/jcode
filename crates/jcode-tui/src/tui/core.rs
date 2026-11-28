@@ -3,6 +3,7 @@
 //! This module contains the common display state, input handling,
 //! and helper methods used by both local and remote TUI modes.
 use super::DisplayMessage;
+use std::time::Instant;
 
 /// Find the byte offset of the previous character boundary before `pos`.
 /// Returns 0 if `pos` is 0 or at the start.
@@ -158,4 +159,39 @@ mod tests {
         assert_eq!(next_char_boundary(s, 6), 7);
         assert_eq!(next_char_boundary(s, 9), 10);
     }
+}
+
+/// Current processing status
+#[derive(Clone, Default, Debug)]
+pub enum ProcessingStatus {
+    #[default]
+    Idle,
+    /// Sending request to API (with optional connection phase detail)
+    Sending,
+    /// Connection phase update from transport layer
+    Connecting(crate::message::ConnectionPhase),
+    /// Model is reasoning/thinking (real-time duration tracking)
+    Thinking(Instant),
+    /// Receiving streaming response
+    Streaming,
+    /// Waiting for network connectivity before retrying an interrupted request
+    WaitingForNetwork { listener: String },
+    /// Executing a tool
+    RunningTool(String),
+}
+
+/// Statuses whose full status line starts with the primary green circular spinner.
+///
+/// Keep this in sync with `ui_input::draw_status`: these statuses can be safely
+/// refreshed by the one-cell spinner fast path when the status line is left aligned.
+/// Network waits use a static amber retry marker, so they do not belong here.
+pub(crate) fn status_uses_primary_spinner(status: &ProcessingStatus) -> bool {
+    matches!(
+        status,
+        ProcessingStatus::Sending
+            | ProcessingStatus::Connecting(_)
+            | ProcessingStatus::Thinking(_)
+            | ProcessingStatus::Streaming
+            | ProcessingStatus::RunningTool(_)
+    )
 }

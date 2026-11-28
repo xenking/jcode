@@ -9,8 +9,8 @@
 /// Build a transcript of `TOKENnnn` messages, each long enough to rewrap.
 fn anchored_scroll_test_app() -> crate::tui::app::App {
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.display_messages = (0..40)
         .map(|i| DisplayMessage::assistant(format!("TOKEN{i:03} - {}", "filler ".repeat(8))))
         .collect();
@@ -262,8 +262,8 @@ fn resize_during_a_pending_prepend_keeps_the_same_message() {
     let _lock = scroll_render_test_lock();
     crate::perf::pin_full_profile_for_tests();
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
     app.display_messages = (0..30)
@@ -309,8 +309,8 @@ fn resize_then_prepend_of_a_duplicate_does_not_teleport_the_reader() {
     crate::perf::pin_full_profile_for_tests();
 
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
 
@@ -391,15 +391,15 @@ fn resize_keeps_a_reader_parked_in_live_output_on_the_same_text() {
     let _lock = scroll_render_test_lock();
     crate::perf::pin_full_profile_for_tests();
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.status = ProcessingStatus::Streaming;
     app.is_processing = true;
     app.session.short_name = Some("test".to_string());
-    app.streaming.streaming_text = (0..120)
+    app.streaming.streaming_text = ((0..120)
         .map(|i| format!("STREAM{i:03} - {}", "filler ".repeat(12)))
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")).into();
 
     let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
     render_and_snap(&app, &mut wide);

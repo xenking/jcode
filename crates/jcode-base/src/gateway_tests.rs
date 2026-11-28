@@ -168,3 +168,11 @@ fn test_authorize_ws_device_rejects_unknown_and_revoked_with_401() {
         auth::authorize_ws_device(&registry, &token).expect_err("revoked token must be rejected");
     assert_eq!(err.status(), 401);
 }
+
+#[test]
+fn the_harness_connection_limit_defaults_and_is_bounded() {
+    assert_eq!(harness_connection_limit(16), 16);
+    assert_eq!(harness_connection_limit(0), 16);
+    assert_eq!(harness_connection_limit(40), 40);
+    assert_eq!(harness_connection_limit(1_000_000), 256);
+}

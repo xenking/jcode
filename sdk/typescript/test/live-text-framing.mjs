@@ -17,6 +17,7 @@ const client = await JcodeClient.launch({
   binary,
   workingDir,
   startupTimeoutMs: 60_000,
+  inheritLogins: true, // needs a real model
   inheritStderr: true,
   wakeMode: "external",
   env: {

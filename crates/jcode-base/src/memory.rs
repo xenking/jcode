@@ -43,7 +43,6 @@ pub use activity::{
     get_activity, pipeline_start, pipeline_update, record_injected_prompt, set_state,
 };
 use cache::{cache_graph, cached_graph};
-pub(crate) use pending::set_pending_memory_for_project_with_selection;
 pub use pending::{
     PendingMemory, clear_all_injected_memories, clear_all_pending_memory, clear_injected_memories,
     clear_pending_memory, has_any_pending_memory, has_pending_memory, is_memory_injected,
@@ -55,6 +54,7 @@ pub use pending::{
 #[cfg(test)]
 use pending::{backdate_injected_memory_for_test, insert_pending_memory_for_test};
 use pending::{begin_memory_check, finish_memory_check};
+pub(crate) use pending::{discard_pending_memory, set_pending_memory_for_project_with_selection};
 pub(crate) use prompt_support::format_context_for_extraction;
 pub use prompt_support::{
     focus_query_text, format_context_for_relevance, format_focused_query_for_relevance,
@@ -971,10 +971,43 @@ impl MemoryManager {
 
         let sidecar = crate::session::Session::load_startup_stub(session_id)
             .map(|session| Sidecar::for_session(&session))
-            .unwrap_or_else(|_| Sidecar::new());
+            .unwrap_or_else(|error| {
+                crate::logging::warn(&format!(
+                    "Memory extraction session metadata unavailable: {error:#}"
+                ));
+                Sidecar::new()
+            });
         let extracted = sidecar.extract_memories(transcript).await?;
 
+        let client = if crate::config::config().agents.memory_auto_recall {
+            crate::jev::JevClient::new()
+                .inspect_err(|error| {
+                    crate::logging::warn(&format!(
+                        "Memory decision client unavailable, using local deduplication: {error:#}"
+                    ));
+                })
+                .ok()
+        } else {
+            None
+        };
+        self.store_extracted_memories(
+            &extracted,
+            session_id,
+            client
+                .as_ref()
+                .map(|c| c as &dyn crate::memory_jev::RelevanceTransport),
+        )
+        .await
+    }
+
+    async fn store_extracted_memories(
+        &self,
+        extracted: &[crate::sidecar::ExtractedMemory],
+        session_id: &str,
+        client: Option<&dyn crate::memory_jev::RelevanceTransport>,
+    ) -> Result<Vec<String>> {
         let mut ids = Vec::new();
+        let mut decisions_available = true;
         for memory in extracted {
             let category: MemoryCategory = memory.category.parse().unwrap_or(MemoryCategory::Fact);
             let trust = match memory.trust.as_str() {
@@ -983,10 +1016,53 @@ impl MemoryManager {
                 _ => TrustLevel::Low,
             };
 
-            let entry = MemoryEntry::new(category, memory.content)
+            let entry = MemoryEntry::new(category, memory.content.clone())
                 .with_source(session_id)
                 .with_trust(trust);
 
+            if let Some(client) = client.filter(|_| decisions_available) {
+                let candidates = prefilter_for_jev(
+                    self.load_project_graph()?
+                        .active_memories()
+                        .cloned()
+                        .collect(),
+                    &entry.content,
+                );
+                let decision = tokio::time::timeout(
+                    std::time::Duration::from_secs(20),
+                    crate::memory_jev::decide_write_with_transport(
+                        client,
+                        &entry.content,
+                        &candidates,
+                    ),
+                )
+                .await;
+                match decision {
+                    Ok(Ok(crate::memory_jev::WriteDecision::Skip)) => continue,
+                    Ok(Ok(crate::memory_jev::WriteDecision::Duplicate(index))) => {
+                        // Re-read before reinforcing, so a removed or edited entry
+                        // is not resurrected from the snapshot sent to Decisions.
+                        let mut graph = self.load_project_graph()?;
+                        let existing = &candidates[index];
+                        if let Some(current) = graph.get_memory_mut(&existing.id)
+                            && current.active
+                            && current.content == existing.content
+                        {
+                            current.reinforce(session_id, 0);
+                            self.save_project_graph(&graph)?;
+                            ids.push(existing.id.clone());
+                            continue;
+                        }
+                    }
+                    Ok(Ok(crate::memory_jev::WriteDecision::Store)) => {}
+                    Ok(Err(_)) | Err(_) => {
+                        decisions_available = false;
+                        crate::logging::info(
+                            "Memory Decisions unavailable; using local exact deduplication",
+                        );
+                    }
+                }
+            }
             // Store in project scope by default
             let id = self.remember_project(entry)?;
             ids.push(id);
@@ -1094,12 +1170,12 @@ impl MemoryManager {
                     emit_memory_activity(event_tx.as_ref());
                 }
                 Ok(MemoryRelevanceResult { prompt: None, .. }) => {
-                    clear_pending_memory(&sid);
+                    discard_pending_memory(&sid);
                     set_state(MemoryState::Idle);
                     emit_memory_activity(event_tx.as_ref());
                 }
                 Err(e) => {
-                    clear_pending_memory(&sid);
+                    discard_pending_memory(&sid);
                     crate::logging::error(&format!("Background memory check failed: {}", e));
                     add_event(MemoryEventKind::Error {
                         message: e.to_string(),
@@ -1113,21 +1189,22 @@ impl MemoryManager {
         });
     }
 
-    /// Automatic recall is globally disabled. Explicit recall remains available.
+    /// Automatic recall remains disabled unless explicitly enabled.
     pub async fn get_relevant_parallel(
         &self,
         session_id: &str,
-        _messages: &[crate::message::Message],
-        _event_tx: Option<MemoryEventSink>,
+        messages: &[crate::message::Message],
+        event_tx: Option<MemoryEventSink>,
     ) -> Result<MemoryRelevanceResult> {
-        // Automatic recall is disabled for everyone, including existing configs.
-        // Explicit memory-tool recall still uses memory_jev::recall directly.
-        clear_pending_memory(session_id);
-        Ok(MemoryRelevanceResult::default())
+        if !crate::config::config().agents.memory_auto_recall {
+            discard_pending_memory(session_id);
+            return Ok(MemoryRelevanceResult::default());
+        }
+        self.get_relevant_parallel_enabled(session_id, messages, event_tx)
+            .await
     }
 
-    /// Retained Jev relevance pipeline for potential future opt-in recall.
-    #[allow(dead_code)]
+    /// Opt-in Jev relevance pipeline.
     pub(crate) async fn get_relevant_parallel_enabled(
         &self,
         session_id: &str,
@@ -1143,7 +1220,7 @@ impl MemoryManager {
         let entries = match crate::memory_jev::collect_scoped(self, MemoryScope::All) {
             Ok(entries) => entries,
             Err(error) => {
-                clear_pending_memory(session_id);
+                discard_pending_memory(session_id);
                 pipeline_update(|p| {
                     p.search = StepStatus::Error;
                     p.verify = StepStatus::Skipped;
@@ -1184,7 +1261,7 @@ impl MemoryManager {
         let relevant: Vec<MemoryEntry> = match result {
             Ok(results) => results.into_iter().map(|(entry, _)| entry).collect(),
             Err(error) => {
-                clear_pending_memory(session_id);
+                discard_pending_memory(session_id);
                 pipeline_update(|p| {
                     p.verify = StepStatus::Error;
                     p.inject = StepStatus::Skipped;

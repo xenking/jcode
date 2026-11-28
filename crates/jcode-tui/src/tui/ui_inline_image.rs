@@ -144,7 +144,7 @@ pub(crate) fn payload_for_copy(id: u64) -> Option<(String, String)> {
     PAYLOAD_REGISTRY
         .lock()
         .ok()
-        .and_then(|registry| registry.map.get(&id).cloned())
+        .and_then(|registry| registry.get(id))
 }
 
 const PAYLOAD_REGISTRY_MAX: usize = 512;
@@ -215,10 +215,13 @@ impl PayloadRegistry {
         }
     }
 
-    fn clear(&mut self) {
+    /// Drop every payload. Returns whether anything was staged.
+    fn clear(&mut self) -> bool {
+        let had_payloads = !self.map.is_empty();
         self.map.clear();
         self.order.clear();
         self.total_bytes = 0;
+        had_payloads
     }
 }
 
@@ -263,8 +266,7 @@ fn release_payload(id: u64) {
 pub(super) fn clear_staged_payloads() {
     let mut cleared = false;
     if let Ok(mut reg) = PAYLOAD_REGISTRY.lock() {
-        cleared |= !reg.map.is_empty();
-        reg.clear();
+        cleared |= reg.clear();
     }
     // `pin_images == false` returns before computing a replacement cache key.
     // Without invalidating this cache, re-enabling images can hit an old
@@ -941,7 +943,9 @@ pub(crate) fn image_label_line(
         );
     }
     let mut suffix = vec![Span::raw("  ")];
-    suffix.extend(super::viewport::shortcut_badge_spans('I', dim, dim, dim));
+    suffix.extend(super::shortcut_badge::shortcut_badge_spans(
+        'I', dim, dim, dim,
+    ));
     suffix.push(Span::raw(" "));
     if images_visible {
         suffix.push(Span::styled("hide", dim));

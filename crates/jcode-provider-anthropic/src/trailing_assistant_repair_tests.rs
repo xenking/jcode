@@ -1,10 +1,9 @@
-//! Regression coverage for #600.
+//! Trailing-assistant continuation coverage.
 //!
-//! Anthropic rejects a request whose final message is an assistant turn on
-//! models without prefill support (notably `claude-fable-5`). The reload
-//! auto-resume path starts a turn with empty user content and delivers its
-//! continuation as a *system reminder*, so the transcript still ends on the
-//! interrupted assistant turn. `format_messages` must repair that shape.
+//! A resumed reload turn continues inside the assistant turn, so the formatted
+//! conversation ends on the assistant's own partial message. Anthropic models
+//! with prefill continue it directly; models without prefill reject it with a
+//! 400, and the transport appends [`CONTINUATION_USER_TURN`] and retries.
 
 use super::*;
 use jcode_message_types::{ContentBlock, Message, Role};
@@ -15,7 +14,8 @@ fn text_msg(role: Role, text: &str) -> Message {
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -26,7 +26,7 @@ fn roles(messages: &[ApiMessage]) -> Vec<&str> {
 }
 
 #[test]
-fn transcript_ending_on_assistant_gets_a_continuation_user_turn() {
+fn transcript_ending_on_assistant_is_sent_as_a_prefill() {
     let formatted = format_messages(
         &[
             text_msg(Role::User, "Q1"),
@@ -35,12 +35,27 @@ fn transcript_ending_on_assistant_gets_a_continuation_user_turn() {
         false,
     );
 
+    assert_eq!(roles(&formatted), vec!["user", "assistant"]);
+    assert!(ends_with_assistant_prefill(&formatted));
+}
+
+#[test]
+fn non_prefill_repair_appends_the_continuation_user_turn() {
+    let mut formatted = format_messages(
+        &[
+            text_msg(Role::User, "Q1"),
+            text_msg(Role::Assistant, "A1 (interrupted by reload)"),
+        ],
+        false,
+    );
+    assert!(repair_trailing_assistant(&mut formatted));
     assert_eq!(roles(&formatted), vec!["user", "assistant", "user"]);
-    let last = formatted.last().expect("trailing turn");
-    match last.content.first().expect("content block") {
-        ApiContentBlock::Text { text, .. } => assert_eq!(text, CONTINUATION_USER_TURN),
+    match formatted.last().expect("trailing turn").content.first() {
+        Some(ApiContentBlock::Text { text, .. }) => assert_eq!(text, CONTINUATION_USER_TURN),
         _ => panic!("expected a text block in the continuation turn"),
     }
+    // The repair is idempotent: the conversation now ends on a user turn.
+    assert!(!repair_trailing_assistant(&mut formatted));
 }
 
 #[test]
@@ -62,9 +77,9 @@ fn transcript_already_ending_on_user_is_left_alone() {
 }
 
 #[test]
-fn dangling_tool_use_repair_already_ends_on_user_and_is_not_double_patched() {
-    // An assistant turn with an unanswered tool_use already gets a synthetic
-    // user tool_result appended, so no extra continuation turn is needed.
+fn dangling_tool_use_is_answered_with_a_tool_result() {
+    // An assistant turn with an unanswered tool_use gets a synthetic user
+    // tool_result, so the conversation already ends on a user turn.
     let messages = vec![
         text_msg(Role::User, "Q1"),
         Message {
@@ -74,7 +89,8 @@ fn dangling_tool_use_repair_already_ends_on_user_and_is_not_double_patched() {
                 name: "bash".to_string(),
                 input: json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },

@@ -4,19 +4,43 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(not(test))]
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
+mod arguments;
+mod builtin;
 mod invocation;
 pub use invocation::SkillInvocation;
+
+pub const MODE_OFF_REMINDER: &str = "# Active Skill\n\nSession mode is off. Previously activated skill instructions are no longer session-wide instructions. Follow them only when explicitly requested again.";
+
+pub fn unknown_skill_message(name: &str) -> String {
+    endorsed_skills()
+        .iter()
+        .find(|skill| skill.name == name)
+        .map(|skill| match skill.install {
+            Some(install) => format!(
+                "Skill /{name} is endorsed but not installed. Install it with `{install}`, then run /skills or skill_manage reload_all."
+            ),
+            None => format!(
+                "Skill /{name} is endorsed but not installed (source: {}). Install it into ~/.jcode/skills/{name}/SKILL.md.",
+                skill.source
+            ),
+        })
+        .unwrap_or_else(|| format!("Unknown skill: /{name}"))
+}
 
 /// A skill definition from SKILL.md
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
     pub description: String,
+    pub icon: Option<String>,
+    pub mode: Option<bool>,
     pub allowed_tools: Option<Vec<String>>,
+    disable_model_invocation: bool,
+    command: Option<String>,
+    arguments: Vec<String>,
     pub content: String,
     pub path: PathBuf,
     /// Normalized search text, built on first use. Normalizing every skill
@@ -29,8 +53,14 @@ pub struct Skill {
 struct SkillFrontmatter {
     name: String,
     description: String,
+    icon: Option<String>,
+    mode: Option<bool>,
     #[serde(rename = "allowed-tools")]
     allowed_tools: Option<AllowedTools>,
+    #[serde(rename = "disable-model-invocation")]
+    disable_model_invocation: Option<serde_yaml::Value>,
+    command: Option<String>,
+    arguments: Option<AllowedTools>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,7 +73,18 @@ enum AllowedTools {
 /// Registry of available skills
 #[derive(Debug, Default, Clone)]
 pub struct SkillRegistry {
-    skills: HashMap<String, Skill>,
+    // Snapshots keep independent maps but share immutable skill definitions.
+    skills: HashMap<String, Arc<Skill>>,
+    // SKILL.md files that were found but could not be loaded, so reloads and
+    // listings can say why a skill is missing instead of omitting it silently.
+    load_errors: Vec<SkillLoadError>,
+}
+
+/// A `SKILL.md` that was discovered but rejected while loading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillLoadError {
+    pub path: PathBuf,
+    pub error: String,
 }
 
 /// Maximum directory depth scanned under a Claude Code plugin root when
@@ -59,6 +100,21 @@ struct SkillCopyStats {
     copied: usize,
     skipped: usize,
     failed: usize,
+}
+
+/// True only the first time this process sees `winner` shadow `shadowed`: the
+/// registry reloads on every skill refresh and would otherwise repeat the warning.
+fn shadow_warning_is_new(name: &str, winner: &Path, shadowed: &Path) -> bool {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<(String, PathBuf, PathBuf)>>> =
+        OnceLock::new();
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert((
+            name.to_string(),
+            winner.to_path_buf(),
+            shadowed.to_path_buf(),
+        ))
 }
 
 impl SkillRegistry {
@@ -262,6 +318,7 @@ impl SkillRegistry {
         Self::import_from_external();
 
         let mut registry = Self::default();
+        registry.insert_builtin_skills();
 
         // Load skills provided by Claude Code plugins/marketplace installs
         // first, so explicit jcode/agents skills with the same name win below.
@@ -305,7 +362,12 @@ impl SkillRegistry {
     /// (project dirs loaded last).
     pub fn merge_overlay(&mut self, overlay: Self) {
         for skill in overlay.skills.into_values() {
-            self.insert_loaded_skill(skill);
+            self.insert_shared_skill(skill);
+        }
+        for failed in overlay.load_errors {
+            if !self.load_errors.contains(&failed) {
+                self.load_errors.push(failed);
+            }
         }
     }
 
@@ -484,15 +546,41 @@ impl SkillRegistry {
 
             if path.is_dir() {
                 let skill_file = path.join("SKILL.md");
-                if skill_file.exists()
-                    && let Ok(skill) = Self::parse_skill(&skill_file)
-                {
-                    self.insert_loaded_skill(skill);
+                if skill_file.exists() {
+                    self.load_skill_file(&skill_file);
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Parse one discovered `SKILL.md` and register it, or record why it was
+    /// rejected. Returns whether the skill loaded.
+    fn load_skill_file(&mut self, skill_file: &Path) -> bool {
+        match Self::parse_skill(skill_file) {
+            Ok(skill) => {
+                self.load_errors.retain(|failed| failed.path != skill_file);
+                self.insert_loaded_skill(skill);
+                true
+            }
+            Err(error) => {
+                self.load_errors.retain(|failed| failed.path != skill_file);
+                self.load_errors.push(SkillLoadError {
+                    path: skill_file.to_path_buf(),
+                    error: format!("{error:#}"),
+                });
+                false
+            }
+        }
+    }
+
+    /// `SKILL.md` files that were found but could not be loaded, sorted by
+    /// path for stable output.
+    pub fn load_errors(&self) -> Vec<&SkillLoadError> {
+        let mut errors: Vec<&SkillLoadError> = self.load_errors.iter().collect();
+        errors.sort_by(|a, b| a.path.cmp(&b.path));
+        errors
     }
 
     /// Parse a SKILL.md file
@@ -508,15 +596,22 @@ impl SkillRegistry {
     }
 
     fn parse_skill_inner(path: &Path) -> Result<Skill> {
-        let content = std::fs::read_to_string(path)?;
+        Self::parse_skill_content(&std::fs::read_to_string(path)?, path.to_path_buf())
+    }
 
+    fn parse_skill_content(content: &str, path: PathBuf) -> Result<Skill> {
         // Parse YAML frontmatter
-        let (frontmatter, body) = Self::parse_frontmatter(&content)?;
+        let (frontmatter, body) = Self::parse_frontmatter(content)?;
 
         let SkillFrontmatter {
             name,
             description,
+            icon,
+            mode,
             allowed_tools,
+            disable_model_invocation,
+            command,
+            arguments,
         } = frontmatter;
 
         let allowed_tools = allowed_tools.map(|tools| match tools {
@@ -529,9 +624,17 @@ impl SkillRegistry {
         Ok(Skill {
             name,
             description,
+            icon,
+            mode,
             allowed_tools,
+            disable_model_invocation: disable_model_invocation
+                == Some(serde_yaml::Value::Bool(true)),
+            command: command
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            arguments: arguments::names(arguments),
             content: body,
-            path: path.to_path_buf(),
+            path,
             search_text: std::sync::OnceLock::new(),
         })
     }
@@ -552,14 +655,130 @@ impl SkillRegistry {
         let yaml = &rest[..end];
         let body = rest[end + 3..].trim().to_string();
 
-        let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml)?;
+        let frontmatter: SkillFrontmatter = match serde_yaml::from_str(yaml) {
+            Ok(frontmatter) => frontmatter,
+            // Skills written for other agents often carry a long unquoted
+            // `description:` containing `: ` (for example "deltas: b.args"),
+            // which strict YAML rejects as a nested mapping. Those tools read
+            // the field as plain text, so do the same rather than dropping
+            // the whole skill.
+            // Only for syntax errors: well-formed YAML with a wrong field type
+            // is a real mistake and stays an error.
+            Err(strict_error) if serde_yaml::from_str::<serde_yaml::Value>(yaml).is_ok() => {
+                anyhow::bail!("invalid skill frontmatter: {strict_error}")
+            }
+            Err(strict_error) => Self::parse_frontmatter_lenient(yaml).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid YAML frontmatter: {strict_error}. Quote values that contain ': ' \
+                     or use a block scalar (description: >-)"
+                )
+            })?,
+        };
 
         Ok((frontmatter, body))
     }
 
+    /// Fallback for frontmatter that is not valid YAML: read the top-level
+    /// recognized fields from individual entries. Returns `None` unless both
+    /// required keys are present.
+    fn parse_frontmatter_lenient(yaml: &str) -> Option<SkillFrontmatter> {
+        fn top_level_key(line: &str) -> Option<(&str, &str)> {
+            if line.starts_with([' ', '\t', '#', '-']) {
+                return None;
+            }
+            let (key, rest) = line.split_once(':')?;
+            let valid = !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            (valid && (rest.is_empty() || rest.starts_with([' ', '\t']))).then_some((key, rest))
+        }
+        fn unquote(value: &str) -> String {
+            let value = value.trim();
+            for quote in ['"', '\''] {
+                if value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote) {
+                    return value[1..value.len() - 1].to_string();
+                }
+            }
+            value.to_string()
+        }
+
+        let mut entries: Vec<(&str, Vec<&str>)> = Vec::new();
+        for line in yaml.lines() {
+            if let Some((key, rest)) = top_level_key(line) {
+                entries.push((key, vec![rest]));
+            } else if let Some((_, lines)) = entries.last_mut() {
+                lines.push(line);
+            }
+        }
+        let scalar = |key: &str| -> Option<String> {
+            let (_, lines) = entries.iter().find(|(entry, _)| *entry == key)?;
+            let first = lines[0].trim();
+            // Block scalar indicators (`>-`, `|`) carry no text of their own.
+            let head = if first.starts_with(['>', '|']) {
+                ""
+            } else {
+                first
+            };
+            let joined = std::iter::once(head)
+                .chain(lines[1..].iter().map(|line| line.trim()))
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let value = unquote(&joined);
+            (!value.is_empty()).then_some(value)
+        };
+
+        let name = scalar("name")?;
+        let description = scalar("description")?;
+        let icon = scalar("icon");
+        let disable_model_invocation = entries
+            .iter()
+            .find(|(key, _)| *key == "disable-model-invocation")
+            .and_then(|(_, lines)| match serde_yaml::from_str(lines[0].trim()) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Ignoring invalid disable-model-invocation for skill {name}: {error}"
+                    ));
+                    None
+                }
+            });
+        let mode = scalar("mode").and_then(|value| value.parse().ok());
+        let allowed_tools = entries
+            .iter()
+            .find(|(entry, _)| *entry == "allowed-tools")
+            .and_then(|(_, lines)| {
+                let inline = lines[0]
+                    .trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']');
+                if !inline.is_empty() {
+                    return Some(AllowedTools::CommaDelimited(inline.to_string()));
+                }
+                let items: Vec<String> = lines[1..]
+                    .iter()
+                    .filter_map(|line| line.trim().strip_prefix('-'))
+                    .map(unquote)
+                    .filter(|item| !item.is_empty())
+                    .collect();
+                (!items.is_empty()).then_some(AllowedTools::Sequence(items))
+            });
+        Some(SkillFrontmatter {
+            name,
+            description,
+            icon,
+            mode,
+            allowed_tools,
+            command: scalar("command"),
+            arguments: scalar("arguments").map(AllowedTools::CommaDelimited),
+            disable_model_invocation,
+        })
+    }
+
     /// Get a skill by name
     pub fn get(&self, name: &str) -> Option<&Skill> {
-        self.skills.get(name)
+        self.skills.get(name).map(Arc::as_ref)
     }
 
     /// List all available skills.
@@ -572,7 +791,7 @@ impl SkillRegistry {
     /// system prompt with identical length but different bytes, silently busting
     /// the Anthropic strict-prefix KV cache mid-conversation.
     pub fn list(&self) -> Vec<&Skill> {
-        let mut skills: Vec<&Skill> = self.skills.values().collect();
+        let mut skills: Vec<&Skill> = self.skills.values().map(Arc::as_ref).collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         skills
     }
@@ -583,9 +802,12 @@ impl SkillRegistry {
         let path = self.skills.get(name).map(|s| s.path.clone());
 
         if let Some(path) = path {
-            if path.exists() {
+            if builtin::is_builtin_path(&path) {
+                // Embedded in the binary: nothing on disk to re-read or lose.
+                Ok(true)
+            } else if path.exists() {
                 let skill = Self::parse_skill(&path)?;
-                self.skills.insert(skill.name.clone(), skill);
+                self.skills.insert(skill.name.clone(), Arc::new(skill));
                 Ok(true)
             } else {
                 // Skill file was deleted
@@ -619,6 +841,8 @@ impl SkillRegistry {
             "reloaded all skills; the skills list in the system prompt may have changed",
         );
         self.skills.clear();
+        self.load_errors.clear();
+        self.insert_builtin_skills();
 
         let mut count = 0;
 
@@ -659,10 +883,7 @@ impl SkillRegistry {
 
             if path.is_dir() {
                 let skill_file = path.join("SKILL.md");
-                if skill_file.exists()
-                    && let Ok(skill) = Self::parse_skill(&skill_file)
-                {
-                    self.insert_loaded_skill(skill);
+                if skill_file.exists() && self.load_skill_file(&skill_file) {
                     count += 1;
                 }
             }
@@ -672,8 +893,14 @@ impl SkillRegistry {
     }
 
     fn insert_loaded_skill(&mut self, skill: Skill) {
+        self.insert_shared_skill(Arc::new(skill));
+    }
+
+    fn insert_shared_skill(&mut self, skill: Arc<Skill>) {
         if let Some(shadowed) = self.skills.get(&skill.name)
             && shadowed.path != skill.path
+            && !builtin::is_builtin_path(&shadowed.path)
+            && shadow_warning_is_new(&skill.name, &skill.path, &shadowed.path)
         {
             crate::logging::warn(&format!(
                 "Skill '{}' from '{}' shadows '{}'",
@@ -925,13 +1152,19 @@ pub fn endorsed_skills() -> &'static [EndorsedSkill] {
     ENDORSED_SKILLS
 }
 
+/// Whether a skill with this name and no explicit `mode:` frontmatter is a
+/// session mode. Every client (TUI picker, Desktop picker, runtime snapshot)
+/// classifies through this one rule, so a skill never shows as a mode in one
+/// place and as a plain skill in another.
+pub fn name_implies_mode(name: &str) -> bool {
+    matches!(name, "selfdev" | "swarm") || name.ends_with("-mode")
+}
+
 impl Skill {
-    /// Get the full prompt content for this skill
-    pub fn get_prompt(&self) -> String {
-        format!(
-            "# Skill: {}\n\n{}\n\n{}",
-            self.name, self.description, self.content
-        )
+    /// Whether this skill acts as a session mode: an explicit `mode:`
+    /// frontmatter value wins, otherwise the name decides.
+    pub fn is_mode(&self) -> bool {
+        self.mode.unwrap_or_else(|| name_implies_mode(&self.name))
     }
 
     /// Load additional files from the skill directory

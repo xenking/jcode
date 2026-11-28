@@ -11,6 +11,10 @@
 //!   changed" from "only the decorative animation advanced", so the latter is
 //!   served by an animation-only partial repaint instead of a full frame.
 
+use super::idle_donut::{deep_idle_dormant, idle_donut_active_with_policy};
+use super::redraw_reason::record_full_frame_redraw_reason;
+#[cfg(test)]
+use super::redraw_reason::{FULL_FRAME_REDRAW_REASONS, last_full_frame_redraw_reason};
 use super::*;
 
 pub(crate) const REDRAW_IDLE: Duration = Duration::from_millis(250);
@@ -19,7 +23,6 @@ pub(crate) const REDRAW_REMOTE_STARTUP: Duration = Duration::from_millis(1000);
 pub(crate) const REDRAW_PASSIVE_LIVENESS: Duration = Duration::from_millis(1000);
 /// Tick cadence while a drag-held edge autoscroll runs (one line per tick).
 pub(crate) const REDRAW_COPY_AUTOSCROLL: Duration = Duration::from_millis(30);
-pub(crate) const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 /// Tick cadence while a turn is live but its streamed text is fully revealed.
 /// Matches the status spinner glyph cadence so the spinner stays smooth.
 pub(crate) const REDRAW_STATIC_STREAM: Duration = Duration::from_millis(80);
@@ -46,85 +49,6 @@ pub(crate) fn unfocused_event_hold(focused: bool) -> Duration {
     } else {
         REDRAW_UNFOCUSED_STREAM
     }
-}
-
-/// Whether this session has been left alone long enough to be treated as
-/// dormant (deep idle): no stream activity *and* no user interaction for
-/// [`REDRAW_DEEP_IDLE_AFTER`].
-///
-/// `time_since_activity()` alone is not a dormancy signal. It reports
-/// "already past the deep-idle threshold" for any non-empty transcript that
-/// has never streamed in this process (see `TuiState::time_since_activity`),
-/// which is correct for a restored historical session but also matches a
-/// brand-new session the moment onboarding leaves its "here are a few things
-/// to try" notice. The user is sitting right there, actively pressing keys,
-/// while every deep-idle consumer (donut gate, tick cadence, periodic-redraw
-/// short-circuit) treats the session as abandoned. That is how the decorative
-/// animation ended up never running on the screen it was built for.
-///
-/// A recent keystroke/mouse/paste is direct evidence the session is not
-/// dormant, so it must hold deep idle off for the same window.
-fn deep_idle_dormant(state: &dyn TuiState) -> bool {
-    let stream_dormant = state
-        .time_since_activity()
-        .map(|d| d >= REDRAW_DEEP_IDLE_AFTER)
-        .unwrap_or(false);
-    let user_dormant = state
-        .time_since_user_interaction()
-        .map(|d| d >= REDRAW_DEEP_IDLE_AFTER)
-        // No interaction recorded yet: a fresh client that has never been
-        // touched. Fall back to the stream/app clock alone, as before.
-        .unwrap_or(true);
-    stream_dormant && user_dormant
-}
-
-fn idle_donut_active_with_policy(
-    state: &dyn TuiState,
-    policy: &crate::perf::TuiPerfPolicy,
-) -> bool {
-    if state.remote_startup_phase_active() {
-        return false;
-    }
-
-    // Decorative animations are purely visual; never spin them while the terminal
-    // window/tab is backgrounded. A swarm of unfocused sessions would otherwise
-    // each render a full-screen 3D scene at animation FPS, saturating every core.
-    if !state.client_focused() {
-        return false;
-    }
-
-    // The onboarding welcome screen is static (no decorative animation), so it
-    // does not need to keep the animation loop running.
-    if state.onboarding_welcome_active() {
-        return false;
-    }
-
-    // The idle donut is decorative.  Leaving many dormant tabs/sessions open
-    // should not keep every TUI repainting forever, especially when those tabs
-    // are hidden behind a terminal multiplexer or kitty single-instance window.
-    if deep_idle_dormant(state) {
-        return false;
-    }
-
-    policy.enable_decorative_animations
-        && crate::config::config().display.idle_animation
-        && policy.tier.idle_animation_enabled()
-        && !has_started_conversation(state)
-        && !state.is_processing()
-        && state.streaming_text().is_empty()
-        && state.queued_messages().is_empty()
-}
-
-/// Whether the transcript contains any real conversation yet (a user prompt or
-/// an assistant/tool/reasoning reply). A fresh screen that only holds
-/// non-conversational notices (e.g. the "run /login when you're ready" system
-/// message left after onboarding is declined) is still "idle", so the decorative
-/// donut should keep spinning until the user actually starts chatting.
-fn has_started_conversation(state: &dyn TuiState) -> bool {
-    state
-        .display_messages()
-        .iter()
-        .any(|m| matches!(m.role.as_str(), "user" | "assistant" | "tool" | "reasoning"))
 }
 
 /// Whether the decorative animation is actually *on screen*, which is what the
@@ -176,43 +100,6 @@ fn animation_on_screen_now() -> bool {
     ui::last_idle_animation_area().is_some()
 }
 
-/// Last reason a periodic tick demanded a full frame instead of the cheap
-/// animation-only repaint, surfaced through `draw-stats`.
-///
-/// Stored as an index into [`FULL_FRAME_REDRAW_REASONS`] in an atomic, so the
-/// redraw hot path records it without locking (and without an error to ignore).
-static LAST_FULL_FRAME_REDRAW_REASON: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(usize::MAX);
-
-const FULL_FRAME_REDRAW_REASONS: &[&str] = &[
-    "processing",
-    "streaming",
-    "tail_catchup",
-    "status_notice",
-    "learn_hint",
-    "mouse_scroll_animation",
-    "copy_autoscroll",
-    "notification",
-    "rate_limit_countdown",
-    "remote_startup",
-    "status_animation",
-    "swarm_spinner",
-    "session_picker_spinner",
-    "session_picker_preview",
-];
-
-fn record_full_frame_redraw_reason(reason: &'static str) {
-    if let Some(idx) = FULL_FRAME_REDRAW_REASONS.iter().position(|r| *r == reason) {
-        LAST_FULL_FRAME_REDRAW_REASON.store(idx, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-pub(crate) fn last_full_frame_redraw_reason() -> Option<&'static str> {
-    FULL_FRAME_REDRAW_REASONS
-        .get(LAST_FULL_FRAME_REDRAW_REASON.load(std::sync::atomic::Ordering::Relaxed))
-        .copied()
-}
-
 /// The reason a full frame is required *right now*, or `None` when nothing is
 /// live.
 ///
@@ -235,11 +122,6 @@ pub(crate) fn current_full_frame_redraw_reason(state: &dyn TuiState) -> Option<&
         return Some("session_picker_spinner");
     }
     live_activity_redraw_reason(state)
-}
-
-pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {
-    let policy = crate::perf::tui_policy();
-    idle_donut_active_with_policy(state, &policy)
 }
 
 fn rate_limit_countdown_redraw_active(state: &dyn TuiState) -> bool {
@@ -290,7 +172,7 @@ fn primary_status_spinner_fast_path_available_with_policy(
     // conditions in sync with `app::run_shell::status_spinner_only_symbol`, which
     // is what actually gates the spinner-only tick in the run loop.
     state.is_processing()
-        && app::run_shell::status_uses_primary_spinner(&state.status())
+        && super::core::status_uses_primary_spinner(&state.status())
         && state.streaming_text().is_empty()
         && !state.centered_mode()
         && !state.has_pending_mouse_scroll_animation()
@@ -306,7 +188,7 @@ fn primary_status_spinner_needs_full_redraw_with_policy(
     // the fast path is available we keep full redraws at the slow passive-liveness
     // rate and let the one-cell renderer animate the spinner.
     state.is_processing()
-        && app::run_shell::status_uses_primary_spinner(&state.status())
+        && super::core::status_uses_primary_spinner(&state.status())
         && state.streaming_text().is_empty()
         && !primary_status_spinner_fast_path_available_with_policy(state, policy)
 }

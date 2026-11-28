@@ -15,6 +15,7 @@ use crate::launch::{LaunchOptions, LaunchedInstance, ensure_runtime, launch_inst
 use crate::ssh::{SshConnectOptions, SshProcess, SshTransport};
 use jcode_harness_api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, HistoryMessage, ModelRouteInfo,
+    ModelSwitchState,
     PermissionDecision, ServerFrame, SessionInfo, SessionToolDefinition, TextMatch,
     ToolConfiguration, api_socket_path, read_frame, write_frame,
 };
@@ -42,6 +43,8 @@ pub struct ConnectOptions {
     pub ensure_runtime: bool,
     /// Desktop inline Markdown response renderer. Other clients leave false.
     pub supports_user_response: bool,
+    /// Whether this client renders applets.
+    pub supports_applets: bool,
 }
 
 impl Default for ConnectOptions {
@@ -52,6 +55,7 @@ impl Default for ConnectOptions {
             request_timeout: Some(Duration::from_secs(30)),
             ensure_runtime: true,
             supports_user_response: false,
+            supports_applets: false,
         }
     }
 }
@@ -359,6 +363,8 @@ pub struct JcodeClient {
     pub instance_home: Option<std::path::PathBuf>,
     /// Server identity from the handshake, e.g. "jcode-harness-api-bridge/0.1.0".
     pub server: String,
+    /// Self-reported executing bridge image, absent on older bridges.
+    pub runtime_identity: Option<crate::api::ServingIdentity>,
     /// Capability strings advertised by the server.
     pub capabilities: Vec<String>,
 }
@@ -372,6 +378,7 @@ impl Clone for JcodeClient {
             instance: self.instance.clone(),
             instance_home: self.instance_home.clone(),
             server: self.server.clone(),
+            runtime_identity: self.runtime_identity.clone(),
             capabilities: self.capabilities.clone(),
         }
     }
@@ -388,6 +395,23 @@ impl Drop for JcodeClient {
 }
 
 impl JcodeClient {
+    /// OpenRig identity reported by the connected daemon, absent for older peers.
+    pub fn openrig_self_host_id(&self) -> Option<&str> {
+        let mut ids = self
+            .capabilities
+            .iter()
+            .filter_map(|cap| cap.strip_prefix("openrig_self_host_id="));
+        let id = ids.next()?;
+        if ids.next().is_some()
+            || id.is_empty()
+            || id.trim() != id
+            || id.chars().any(char::is_control)
+        {
+            return None;
+        }
+        Some(id)
+    }
+
     /// Retain this client's shared SSH master for reconnecting independent API
     /// channels. Returns None for isolated or already closed SSH channels.
     #[cfg(unix)]
@@ -416,6 +440,7 @@ impl JcodeClient {
             socket_path: None,
             client_name: options.client_name.clone(),
             supports_user_response: options.supports_user_response,
+            supports_applets: options.supports_applets,
             request_timeout: options.request_timeout,
             ensure_runtime: false,
         };
@@ -465,6 +490,7 @@ impl JcodeClient {
         let connect = ConnectOptions {
             socket_path: Some(instance.socket_path.clone()),
             supports_user_response: false,
+            supports_applets: false,
             client_name: options.client_name.clone(),
             request_timeout: options.request_timeout,
             ensure_runtime: false,
@@ -540,6 +566,7 @@ impl JcodeClient {
             instance: None,
             instance_home: None,
             server: String::new(),
+            runtime_identity: None,
             capabilities: Vec::new(),
         };
         let frame = client.request_with_timeout(
@@ -548,6 +575,7 @@ impl JcodeClient {
                 max_version: API_VERSION_MAJOR,
                 client: options.client_name.clone(),
                 supports_user_response: options.supports_user_response,
+                supports_applets: Some(options.supports_applets),
             },
             hello_timeout,
         )?;
@@ -555,9 +583,11 @@ impl JcodeClient {
             ApiEvent::HelloOk {
                 server,
                 capabilities,
+                runtime_identity,
                 ..
             } => {
                 client.server = server;
+                client.runtime_identity = runtime_identity;
                 client.capabilities = capabilities;
                 Ok(client)
             }
@@ -594,6 +624,36 @@ impl JcodeClient {
         request: ApiRequest,
         timeout: Option<Duration>,
     ) -> Result<ServerFrame> {
+        if let ApiRequest::AskResponse { response, .. } = &request
+            && response.answers.as_ref().is_some_and(|answers| {
+                answers.iter().any(|answer| {
+                    !answer.other_images.is_empty()
+                        || answer
+                            .comment_images
+                            .values()
+                            .any(|images| !images.is_empty())
+                })
+            })
+            && !self.supports("ask_response_images")
+        {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "This server cannot receive images in ask answers. Update the jcode runtime and API bridge before sending; your answer has not been sent.",
+            ));
+        }
+        if matches!(
+            &request,
+            ApiRequest::QueuePrompt {
+                active_skill: Some(_),
+                ..
+            }
+        ) && !self.supports("queued_prompt_active_skill")
+        {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "This server cannot preserve queued skills. Update the jcode runtime and API bridge before sending; your prompt has not been sent.",
+            ));
+        }
         let (tx, rx) = channel();
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         self.inner.pending.lock().map_err(poisoned)?.insert(id, tx);
@@ -747,8 +807,41 @@ impl JcodeClient {
             })?
             .event
         {
-            ApiEvent::Sessions { sessions } => Ok(sessions),
+            ApiEvent::Sessions { sessions, .. } => Ok(sessions),
             other => Err(unexpected("sessions", &other)),
+        }
+    }
+
+    /// Search every stored session's titles and transcripts.
+    ///
+    /// The reply is a distinct event rather than a list so a client can apply
+    /// its own debounce without the transport second-guessing it.
+    pub fn search_sessions(
+        &self,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<jcode_harness_api::SessionSearchResults> {
+        match self
+            .request_ok(ApiRequest::SearchSessions {
+                query: query.to_string(),
+                limit,
+            })?
+            .event
+        {
+            ApiEvent::SessionSearch {
+                query,
+                titles,
+                messages,
+                indexed_sessions,
+                truncated,
+            } => Ok(jcode_harness_api::SessionSearchResults {
+                query,
+                titles,
+                messages,
+                indexed_sessions,
+                truncated,
+            }),
+            other => Err(unexpected("session_search", &other)),
         }
     }
 
@@ -761,7 +854,7 @@ impl JcodeClient {
             })?
             .event
         {
-            ApiEvent::Sessions { sessions } => Ok(sessions),
+            ApiEvent::Sessions { sessions, .. } => Ok(sessions),
             other => Err(unexpected("sessions", &other)),
         }
     }
@@ -811,45 +904,33 @@ impl JcodeClient {
             })?
             .event
         {
-            ApiEvent::Attached { session } => Ok(session),
+            ApiEvent::Attached { session, .. } => Ok(session),
             other => Err(unexpected("attached", &other)),
         }
     }
 
     pub fn attach_session(&self, session_id: &str) -> Result<SessionInfo> {
+        self.attach_session_with_pending_asks(session_id)
+            .map(|(session, _)| session)
+    }
+
+    /// Attach and read the authoritative IDs of questions answerable on this connection.
+    /// `None` means the runtime cannot provide the snapshot, not that no questions are pending.
+    pub fn attach_session_with_pending_asks(
+        &self,
+        session_id: &str,
+    ) -> Result<(SessionInfo, Option<Vec<String>>)> {
         match self
             .request_ok(ApiRequest::AttachSession {
                 session_id: session_id.to_string(),
             })?
             .event
         {
-            ApiEvent::Attached { session } => Ok(session),
+            ApiEvent::Attached {
+                session,
+                pending_ask_ids,
+            } => Ok((session, pending_ask_ids)),
             other => Err(unexpected("attached", &other)),
-        }
-    }
-
-    /// Clone a session's complete persisted context into a new idle session.
-    pub fn transfer_session(&self, session_id: &str) -> Result<SessionInfo> {
-        match self
-            .request_ok(ApiRequest::TransferSession {
-                session_id: session_id.into(),
-            })?
-            .event
-        {
-            ApiEvent::SessionForked { session } => Ok(session),
-            other => Err(unexpected("session_forked", &other)),
-        }
-    }
-
-    pub fn fork_session(&self, session_id: &str) -> Result<SessionInfo> {
-        match self
-            .request_ok(ApiRequest::ForkSession {
-                session_id: session_id.to_string(),
-            })?
-            .event
-        {
-            ApiEvent::SessionForked { session } => Ok(session),
-            other => Err(unexpected("session_forked", &other)),
         }
     }
 
@@ -868,6 +949,7 @@ impl JcodeClient {
             content: String::new(),
             system_reminder: Some(reminder.to_string()),
             images: Vec::new(),
+            attachments: Vec::new(),
             no_reply: false,
         })
     }
@@ -889,6 +971,25 @@ impl JcodeClient {
         self.send_message_with_reminder(session_id, content, images, None, wait_for_accept)
     }
 
+    /// Send a prompt with a skill resolved and activated by the daemon, not the client.
+    pub fn send_skill_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        active_skill: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<&str>,
+    ) -> Result<()> {
+        self.notify(ApiRequest::SendSkillMessage {
+            session_id: session_id.to_string(),
+            content: content.to_string(),
+            active_skill: active_skill.to_string(),
+            system_reminder: system_reminder.map(str::to_owned),
+            images,
+            attachments: Vec::new(),
+        })
+    }
+
     /// [`send_message`](Self::send_message) with a hidden system reminder
     /// for this turn only, such as a collection's instructions. The reminder
     /// guides the model without appearing in the visible transcript.
@@ -897,6 +998,43 @@ impl JcodeClient {
         session_id: &str,
         content: &str,
         images: Vec<(String, String)>,
+        system_reminder: Option<&str>,
+        wait_for_accept: Option<Duration>,
+    ) -> Result<()> {
+        self.send_message_with_attachments_and_reminder(
+            session_id,
+            content,
+            images,
+            Vec::new(),
+            system_reminder,
+            wait_for_accept,
+        )
+    }
+
+    pub fn send_message_with_attachments(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        attachments: Vec<jcode_harness_api::Attachment>,
+        wait_for_accept: Option<Duration>,
+    ) -> Result<()> {
+        self.send_message_with_attachments_and_reminder(
+            session_id,
+            content,
+            images,
+            attachments,
+            None,
+            wait_for_accept,
+        )
+    }
+
+    fn send_message_with_attachments_and_reminder(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        attachments: Vec<jcode_harness_api::Attachment>,
         system_reminder: Option<&str>,
         wait_for_accept: Option<Duration>,
     ) -> Result<()> {
@@ -911,6 +1049,7 @@ impl JcodeClient {
                 .filter(|reminder| !reminder.is_empty())
                 .map(str::to_owned),
             images,
+            attachments,
             no_reply: false,
         })?;
         if let (Some(stream), Some(timeout)) = (stream, wait_for_accept) {
@@ -931,6 +1070,13 @@ impl JcodeClient {
 
     pub fn cancel(&self, session_id: &str) -> Result<()> {
         self.request_ok(ApiRequest::Cancel {
+            session_id: session_id.to_string(),
+        })
+        .map(drop)
+    }
+
+    pub fn force_stop_turn(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::ForceStopTurn {
             session_id: session_id.to_string(),
         })
         .map(drop)
@@ -975,9 +1121,213 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Queue a prompt on the daemon, preserving its mode and caller ID.
+    pub fn queue_prompt(
+        &self,
+        session_id: &str,
+        prompt: jcode_harness_api::QueuedPrompt,
+    ) -> Result<()> {
+        self.queue_prompt_with_reminder(session_id, prompt, None)
+    }
+
+    /// Queue a prompt with a hidden instruction for the next standalone turn.
+    pub fn queue_prompt_with_reminder(
+        &self,
+        session_id: &str,
+        prompt: jcode_harness_api::QueuedPrompt,
+        system_reminder: Option<&str>,
+    ) -> Result<()> {
+        self.queue_prompt_with_options(session_id, prompt, system_reminder)
+    }
+
+    /// Queue a prompt with a skill resolved and validated by the daemon.
+    pub fn queue_prompt_with_skill(
+        &self,
+        session_id: &str,
+        mut prompt: jcode_harness_api::QueuedPrompt,
+        active_skill: Option<&str>,
+    ) -> Result<()> {
+        prompt.active_skill = active_skill.map(str::to_owned);
+        self.queue_prompt_with_options(session_id, prompt, None)
+    }
+
+    fn queue_prompt_with_options(
+        &self,
+        session_id: &str,
+        prompt: jcode_harness_api::QueuedPrompt,
+        system_reminder: Option<&str>,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::QueuePrompt {
+            session_id: session_id.into(),
+            client_id: prompt.client_id,
+            content: prompt.content,
+            images: prompt.images,
+            attachments: prompt.attachments,
+            mode: prompt.mode,
+            system_reminder: system_reminder.map(str::to_owned),
+            active_skill: prompt.active_skill,
+        })
+        .map(drop)
+    }
+
+    pub fn set_queued_prompt_mode(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        mode: jcode_harness_api::QueuedPromptMode,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::SetQueuedPromptMode {
+            session_id: session_id.into(),
+            client_id: client_id.into(),
+            mode,
+        })
+        .map(drop)
+    }
+
+    pub fn interrupt_queued_prompt(&self, session_id: &str, client_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::InterruptQueuedPrompt {
+            session_id: session_id.into(),
+            client_id: client_id.into(),
+        })
+        .map(drop)
+    }
+
+    pub fn interrupt_queued_prompts(&self, session_id: &str, ids: Vec<String>) -> Result<()> {
+        self.request_ok(ApiRequest::InterruptQueuedPrompts {
+            session_id: session_id.into(),
+            ids,
+        })
+        .map(drop)
+    }
+
+    pub fn get_queued_prompts(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<jcode_harness_api::QueuedPrompt>> {
+        match self
+            .request_ok(ApiRequest::GetQueuedPrompts {
+                session_id: session_id.into(),
+            })?
+            .event
+        {
+            ApiEvent::QueuedPrompts { prompts, .. } => Ok(prompts),
+            other => Err(unexpected("queued_prompts", &other)),
+        }
+    }
+
+    pub fn remove_queued_prompt(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        prompt_id: &str,
+    ) -> Result<jcode_harness_api::QueuedPromptRemovalOutcome> {
+        match self
+            .request_ok(ApiRequest::RemoveQueuedPrompt {
+                session_id: session_id.into(),
+                client_id: client_id.into(),
+                prompt_id: prompt_id.into(),
+            })?
+            .event
+        {
+            ApiEvent::QueuedPromptRemoved { outcome, .. } => Ok(outcome),
+            other => Err(unexpected("queued_prompt_removed", &other)),
+        }
+    }
+
+    pub fn reorder_queued_prompts(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        order: Vec<String>,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::ReorderQueuedPrompts {
+            session_id: session_id.into(),
+            client_id: client_id.into(),
+            order,
+        })
+        .map(drop)
+    }
+
+    /// Hold a queued prompt open for editing (or release the hold) so the
+    /// daemon cannot deliver it while the user edits it.
+    pub fn set_queued_prompt_editing(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        prompt_id: &str,
+        editing: bool,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::SetQueuedPromptEditing {
+            session_id: session_id.into(),
+            client_id: client_id.into(),
+            prompt_id: prompt_id.into(),
+            editing,
+        })
+        .map(drop)
+    }
+
+    /// Replace a still-queued prompt in place, preserving its position, mode,
+    /// and active skill.
+    pub fn edit_queued_prompt(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        prompt_id: &str,
+        content: String,
+        images: Vec<(String, String)>,
+    ) -> Result<jcode_harness_api::QueuedPromptEditOutcome> {
+        self.edit_queued_prompt_with_attachments(
+            session_id,
+            client_id,
+            prompt_id,
+            content,
+            images,
+            Vec::new(),
+        )
+    }
+
+    pub fn edit_queued_prompt_with_attachments(
+        &self,
+        session_id: &str,
+        client_id: &str,
+        prompt_id: &str,
+        content: String,
+        images: Vec<(String, String)>,
+        attachments: Vec<jcode_harness_api::Attachment>,
+    ) -> Result<jcode_harness_api::QueuedPromptEditOutcome> {
+        match self
+            .request_ok(ApiRequest::EditQueuedPrompt {
+                session_id: session_id.into(),
+                client_id: client_id.into(),
+                prompt_id: prompt_id.into(),
+                content,
+                images,
+                attachments,
+            })?
+            .event
+        {
+            ApiEvent::QueuedPromptEdited { outcome, .. } => Ok(outcome),
+            other => Err(unexpected("queued_prompt_edited", &other)),
+        }
+    }
+
     pub fn get_history(&self, session_id: &str) -> Result<Vec<HistoryMessage>> {
         self.get_history_with_images(session_id)
             .map(|(messages, _)| messages)
+    }
+
+    /// Fetch one bounded page, rebuilding records split over multiple frames.
+    pub fn get_history_page(
+        &self,
+        session_id: &str,
+        before: Option<String>,
+    ) -> Result<crate::HistoryPage> {
+        crate::bounded_history::page(self, session_id, before)
+    }
+
+    /// Fetch a lazy history image in bounded chunks.
+    pub fn get_history_image(&self, session_id: &str, key: &str) -> Result<String> {
+        crate::bounded_history::image(self, session_id, key)
     }
 
     pub fn get_history_with_images(
@@ -994,6 +1344,25 @@ impl JcodeClient {
                 messages, images, ..
             } => Ok((messages, images)),
             other => Err(unexpected("history", &other)),
+        }
+    }
+
+    /// Fetch an expanded compacted-history window from the attached session.
+    pub fn get_compacted_history(
+        &self,
+        session_id: &str,
+        visible_messages: usize,
+    ) -> Result<ApiEvent> {
+        let event = self
+            .request_ok(ApiRequest::GetCompactedHistory {
+                session_id: session_id.to_string(),
+                visible_messages,
+            })?
+            .event;
+        if matches!(event, ApiEvent::CompactedHistory { .. }) {
+            Ok(event)
+        } else {
+            Err(unexpected("compacted_history", &event))
         }
     }
 
@@ -1029,6 +1398,18 @@ impl JcodeClient {
         .map(drop)
     }
 
+    pub fn rewind_transcript(
+        &self,
+        session_id: &str,
+        target: crate::api::RewindAnchor,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::RewindTranscript {
+            session_id: session_id.to_string(),
+            target,
+        })
+        .map(drop)
+    }
+
     /// Answer an `AskRequest`. `AskResponse::default()` declines.
     pub fn respond_to_ask(
         &self,
@@ -1042,6 +1423,7 @@ impl JcodeClient {
             response,
         })
         .map(drop)
+        .map_err(crate::errors::classify_ask_response_error)
     }
 
     pub fn respond_to_permission(
@@ -1056,6 +1438,62 @@ impl JcodeClient {
             decision,
         })
         .map(drop)
+    }
+
+    /// Routes and default model for a new local conversation. Does not create one.
+    pub fn list_draft_models(
+        &self,
+    ) -> Result<(Option<String>, Vec<jcode_harness_api::ModelRouteInfo>)> {
+        if !self.supports("draft_model_catalog") {
+            return Ok((None, Vec::new()));
+        }
+        match self.request_ok(ApiRequest::ListDraftModels)?.event {
+            ApiEvent::DraftModels { current, routes } => Ok((current, routes)),
+            other => Err(unexpected("draft_models", &other)),
+        }
+    }
+
+    /// Transcribe one recording with the daemon's configured dictation backend
+    /// and return the text (empty when no speech was recognised). `wav` is a
+    /// mono PCM16 WAV of at most five minutes and 10 MiB; the streaming
+    /// providers need 16 kHz. `language` is an optional lowercase ISO 639-1 hint.
+    ///
+    /// Fails with `UnsupportedCapability` before sending anything when the
+    /// daemon lacks `transcribe_v1`, so a caller can fall back to plain text.
+    /// Daemon-side failures arrive as `Harness(code)`:
+    /// `TranscriptionNotConfigured`, `TranscriptionUnavailable`,
+    /// `TranscriptionTimeout`, `AudioTooLarge` or `InvalidRequest` (bad audio).
+    /// The reply wait is at least ten minutes, longer than the default request
+    /// timeout, because the daemon may wait that long on its backend.
+    pub fn transcribe_audio(&self, wav: Vec<u8>, language: Option<&str>) -> Result<String> {
+        use jcode_harness_api::{MAX_TRANSCRIBE_WAV_BYTES, TRANSCRIBE_CAPABILITY};
+        if !self.supports(TRANSCRIBE_CAPABILITY) {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "This machine's Jcode cannot transcribe voice. Update Jcode on that machine; your recording has not been sent.",
+            ));
+        }
+        if wav.len() > MAX_TRANSCRIBE_WAV_BYTES {
+            return Err(Error::new(
+                ErrorKind::Harness(jcode_harness_api::ErrorCode::AudioTooLarge),
+                "The recording is larger than 10 MiB. Record a shorter clip.",
+            ));
+        }
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let request = ApiRequest::TranscribeAudio {
+            wav: STANDARD.encode(wav),
+            language: language.map(str::to_owned),
+        };
+        let timeout = self
+            .inner
+            .request_timeout
+            .map(|timeout| timeout.max(TRANSCRIBE_REPLY_TIMEOUT));
+        let frame = self.request_with_timeout(request, timeout)?;
+        match frame.event {
+            ApiEvent::AudioTranscript { text } => Ok(text),
+            ApiEvent::Error { code, message } => Err(Error::new(ErrorKind::Harness(code), message)),
+            other => Err(unexpected("audio_transcript", &other)),
+        }
     }
 
     /// Models this session can switch to, and which one is serving it.
@@ -1124,6 +1562,8 @@ impl JcodeClient {
                 auth_method,
                 account_label,
                 routes,
+                speed_mode,
+                speed_options,
             } => {
                 let mut providers = Vec::new();
                 if let Some(provider) = provider.as_ref() {
@@ -1147,9 +1587,25 @@ impl JcodeClient {
                     account_label,
                     providers,
                     routes,
+                    speed_mode,
+                    speed_options,
                 })
             }
             other => Err(unexpected("runtime_info", &other)),
+        }
+    }
+
+    /// Return the speed acknowledged by the attached session after persistence.
+    pub fn set_speed_mode(
+        &self,
+        speed_mode: jcode_harness_api::SpeedMode,
+    ) -> Result<jcode_harness_api::SpeedMode> {
+        match self
+            .request_ok(ApiRequest::SetSpeedMode { speed_mode })?
+            .event
+        {
+            ApiEvent::SpeedModeChanged { speed_mode, .. } => Ok(speed_mode),
+            other => Err(unexpected("speed_mode_changed", &other)),
         }
     }
 
@@ -1398,11 +1854,33 @@ impl JcodeClient {
     }
 
     /// Switch the session to a different model. `model` is an id from
-    /// `list_models`.
+    /// `list_models`. While a turn is running the switch cannot apply yet:
+    /// the call returns at once, [`ApiEvent::ModelSwitch`] reports it as
+    /// queued, and the session keeps its model until the turn ends.
     pub fn set_model(&self, session_id: &str, model: &str) -> Result<()> {
-        self.request_ok(ApiRequest::SetModel {
+        self.set_model_switch(session_id, model).map(drop)
+    }
+
+    /// Like [`Self::set_model`], and says whether the switch took effect
+    /// ([`ModelSwitchState::Applied`]) or is queued behind the running turn
+    /// ([`ModelSwitchState::Queued`]). Anything meant for the new model, such
+    /// as an effort level, must wait until the switch has applied.
+    pub fn set_model_switch(&self, session_id: &str, model: &str) -> Result<ModelSwitchState> {
+        let frame = self.request_ok(ApiRequest::SetModel {
             session_id: session_id.to_string(),
             model: model.to_string(),
+        })?;
+        Ok(match frame.event {
+            ApiEvent::ModelSwitch { state, .. } => state,
+            _ => ModelSwitchState::Applied,
+        })
+    }
+
+    /// Withdraw a model switch that [`Self::set_model`] queued behind a
+    /// running turn. The switch is reported through [`ApiEvent::ModelSwitch`].
+    pub fn cancel_pending_model(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::CancelPendingModel {
+            session_id: session_id.to_string(),
         })
         .map(drop)
     }
@@ -1439,8 +1917,9 @@ impl JcodeClient {
         .map(drop)
     }
 
-    /// Schedule compaction of the transcript so far, freeing context. Not
-    /// synchronous: returning means the request was accepted.
+    /// Queue compaction without waiting for an active turn to finish. The
+    /// reply acknowledges the request. Progress and outcome arrive separately
+    /// as compaction divider or background progress events.
     pub fn compact(&self, session_id: &str) -> Result<String> {
         match self
             .request_ok(ApiRequest::Compact {
@@ -1736,73 +2215,13 @@ impl TextCollector {
 
 #[path = "client/global_session_workers.rs"]
 mod global_session_workers;
+mod routing;
+mod side_questions;
 use global_session_workers::discover_global_sessions;
 
-/// The reader thread: correlates replies, fans stream events out.
-fn spawn_reader(inner: Arc<Inner>, mut reader: Box<dyn BufRead + Send>) {
-    std::thread::spawn(move || {
-        loop {
-            let frame = match read_frame::<_, ServerFrame>(&mut reader) {
-                Ok(frame) => frame,
-                Err(error) => {
-                    // Publish before closing pending requests/subscriptions, so
-                    // awakened callers observe the actual cause, not generic EOF.
-                    if let Ok(mut reason) = inner.disconnect_reason.lock() {
-                        *reason = Some(error.into());
-                    }
-                    break;
-                }
-            };
-            // Unknown kinds are skipped silently, per the protocol's
-            // forward-compatibility rule.
-            if matches!(frame.event, ApiEvent::Unknown) {
-                continue;
-            }
-            if let Some(reply_to) = frame.reply_to {
-                let waiter = inner
-                    .pending
-                    .lock()
-                    .ok()
-                    .and_then(|mut pending| pending.remove(&reply_to));
-                if let Some(waiter) = waiter {
-                    let _ = waiter.send(frame);
-                    continue;
-                }
-            }
-            // Not a reply anyone is waiting on: a stream event. Dead
-            // subscriptions are dropped here as well as in `EventStream::drop`,
-            // so a leaked stream cannot grow the fan-out list forever.
-            if let Ok(mut subs) = inner.subscribers.lock() {
-                let session = event_session(&frame.event);
-                subs.retain(|(_, filter, sink)| {
-                    match (filter, session) {
-                        // A filtered subscription only wants its own session's
-                        // events. Events that name *no* session still go to it:
-                        // `error` is the one that matters, since the harness
-                        // sends it instead of `turn_done`, and dropping it
-                        // leaves a turn waiting forever for an end that will
-                        // never come.
-                        (Some(want), Some(got)) if want != got => true,
-                        _ => sink.send(frame.event.clone()).is_ok(),
-                    }
-                });
-            }
-        }
-        if let Some(shutdown) = &inner.shutdown {
-            shutdown();
-        }
-        inner.closed.store(true, Ordering::Relaxed);
-        // Fail everything in flight rather than leaving callers blocked on a
-        // reply that can never arrive.
-        if let Ok(mut pending) = inner.pending.lock() {
-            pending.clear();
-        }
-        if let Ok(mut subs) = inner.subscribers.lock() {
-            subs.clear();
-        }
-    });
-}
-
+#[path = "client_reader.rs"]
+mod reader;
+use reader::*;
 /// The session an event belongs to, when it names one.
 fn event_session(event: &ApiEvent) -> Option<&str> {
     use ApiEvent::*;
@@ -1820,25 +2239,39 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | Tools { session_id, .. }
         | SidePanelState { session_id, .. }
         | TokenUsage { session_id, .. }
+        | RequestUsage { session_id, .. }
         | ContextCapChanged { session_id, .. }
+        | ContextOccupancy { session_id, .. }
+        | CacheKeepalive { session_id, .. }
         | KvCacheMiss { session_id, .. }
+        | MemoryInjected { session_id, .. }
+        | MemoryActivity { session_id, .. }
         | TurnDone { session_id, .. }
         | SoftInterruptInjected { session_id, .. }
         | TurnStopped { session_id, .. }
         | BackgroundProgress { session_id, .. }
+        | BackgroundTasks { session_id, .. }
+        | PeerUserMessage { session_id, .. }
+        | AgentMessage { session_id, .. }
+        | SwarmWorkerNotice { session_id, .. }
         | MessageAccepted { session_id, .. }
         | AskRequest { session_id, .. }
         | PermissionRequest { session_id, .. }
         | SessionStatus { session_id, .. }
+        | SwarmStatus { session_id, .. }
         | SessionRecovery { session_id, .. }
         | ModelInfo { session_id, .. }
+        | ModelSwitch { session_id, .. }
         | RuntimeInfo { session_id, .. }
+        | SpeedModeChanged { session_id, .. }
+        | SpeedModeReported { session_id, .. }
+        | ProviderStatusDetail { session_id, .. }
         | ConnectionPhase { session_id, .. }
         | Models { session_id, .. }
         | Compacted { session_id, .. }
         | SessionRenamed { session_id, .. }
         | History { session_id, .. } => Some(session_id.as_str()),
-        Attached { session } => Some(session.session_id.as_str()),
+        Attached { session, .. } => Some(session.session_id.as_str()),
         _ => None,
     }
 }
@@ -1850,6 +2283,9 @@ fn closed_error() -> Error {
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Error {
     Error::new(ErrorKind::Transport, "harness client state was poisoned")
 }
+
+/// Longest the daemon waits on a transcription backend (600 s), plus slack.
+const TRANSCRIBE_REPLY_TIMEOUT: Duration = Duration::from_secs(615);
 
 fn unexpected(want: &str, got: &ApiEvent) -> Error {
     Error::new(
@@ -1868,4 +2304,33 @@ fn request_name(request: &ApiRequest) -> String {
                 .and_then(|r| r.as_str().map(str::to_string))
         })
         .unwrap_or_else(|| "request".to_string())
+}
+
+#[cfg(test)]
+mod event_session_tests {
+    use super::*;
+
+    #[test]
+    fn peer_message_is_scoped_to_its_session() {
+        let event = ApiEvent::PeerUserMessage {
+            session_id: "session-a".into(),
+            content: "hello".into(),
+        };
+        assert_eq!(event_session(&event), Some("session-a"));
+    }
+
+    #[test]
+    fn request_usage_is_scoped_to_its_session() {
+        let event = ApiEvent::RequestUsage {
+            session_id: "session-b".into(),
+            request_id: "request-1".into(),
+            provider: "anthropic".into(),
+            model: "model".into(),
+            input: Some(1),
+            output: Some(2),
+            cache_read_input: Some(0),
+            cache_creation_input: None,
+        };
+        assert_eq!(event_session(&event), Some("session-b"));
+    }
 }

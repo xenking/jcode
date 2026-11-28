@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn openrouter_rejected_key_is_reported_but_rate_limits_are_not_credentials() {
+    use reqwest::StatusCode;
+    let rejected =
+        super::provider_fetch::openrouter_rejected_key([StatusCode::OK, StatusCode::UNAUTHORIZED])
+            .expect("a 401 names the rejected key");
+    assert!(rejected.contains("rejected"), "{rejected}");
+    assert!(
+        super::provider_fetch::openrouter_rejected_key([StatusCode::FORBIDDEN, StatusCode::OK])
+            .is_some()
+    );
+    for status in [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS] {
+        assert!(
+            super::provider_fetch::openrouter_rejected_key([status]).is_none(),
+            "{status}"
+        );
+    }
+}
+
+#[test]
 fn codex_response_headers_parse_both_windows_without_fabricating_missing_values() {
     let mut headers = reqwest::header::HeaderMap::new();
     for (key, value) in [
@@ -35,6 +54,7 @@ fn codex_cache_key_never_contains_token_prefix() {
 
 #[test]
 fn codex_response_headers_reach_account_cache() {
+    let _shared = super::cache::lock_usage_cache_tests();
     let label = "fixture-codex-response-cache";
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("x-codex-primary-used-percent", "42".parse().unwrap());
@@ -246,18 +266,36 @@ fn test_mask_email_censors_local_part() {
 }
 
 #[test]
-fn test_format_usage_bar() {
-    let bar = format_usage_bar(50.0, 10);
-    assert!(bar.contains("█████░░░░░"));
-    assert!(bar.contains("50%"));
+fn usage_bars_fill_with_what_is_used_and_say_which_way_the_number_reads() {
+    // Info-widget convention: the bar always fills with usage; the word follows
+    // `display.usage_display`, `left` by default.
+    let bar = format_usage_bar(10.0, 10, false);
+    assert!(bar.starts_with("█░░░░░░░░░ "), "{bar}");
+    assert!(bar.ends_with("90% left"), "{bar}");
+    let bar = format_usage_bar(10.0, 10, true);
+    assert!(bar.starts_with("█░░░░░░░░░ "), "{bar}");
+    assert!(bar.ends_with("10% used"), "{bar}");
+    assert_eq!(usage_reading(100.0, false), "0% left");
+    assert_eq!(usage_reading(89.6, false), "10% left", "rounded on the used side");
+    assert_eq!(usage_reading(150.0, true), "100% used");
+}
 
-    let bar = format_usage_bar(0.0, 10);
-    assert!(bar.contains("░░░░░░░░░░"));
-    assert!(bar.contains("0%"));
-
-    let bar = format_usage_bar(100.0, 10);
-    assert!(bar.contains("██████████"));
-    assert!(bar.contains("100%"));
+#[test]
+fn account_summary_words_each_window_in_the_configured_direction() {
+    let snapshot = AccountUsageSnapshot {
+        additional_windows: Vec::new(),
+        label: "primary".into(),
+        email: None,
+        exhausted: false,
+        primary_label: Some("5h".into()),
+        five_hour_ratio: Some(0.10),
+        secondary_label: None,
+        seven_day_ratio: None,
+        resets_at: None,
+        error: None,
+    };
+    assert_eq!(snapshot.summary_with(false), "5h 90% left");
+    assert_eq!(snapshot.summary_with(true), "5h 10% used");
 }
 
 #[test]
@@ -396,6 +434,25 @@ fn test_parse_openai_wham_windows_preserve_low_percent_values() {
     assert_eq!(parsed.limits[1].usage_percent, 0.25);
 }
 
+/// A Business seat paid by credits reports no rate-limit windows at all. It is
+/// not exhausted: nothing may park the login, fail it over, or hide its models
+/// because a window is missing.
+#[test]
+fn credits_only_workspace_seat_is_not_exhausted() {
+    let json: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/chatgpt_business_spend_control.json"
+    ))
+    .unwrap();
+    let parsed = openai_helpers::parse_openai_usage_payload(&json);
+    assert!(parsed.limits.is_empty(), "no windows are reported");
+    let mut usage = openai_helpers::classify_openai_limits(&parsed.limits);
+    usage.hard_limit_reached = parsed.hard_limit_reached;
+    usage.credit_overage = parsed.credit_overage;
+    assert!(usage.five_hour.is_none() && usage.seven_day.is_none());
+    assert!(!usage.hard_limit_reached);
+    assert!(!usage.exhausted());
+}
+
 #[test]
 fn test_classify_openai_limits_treats_usage_limit_values_as_percent() {
     let limits = vec![UsageLimit {
@@ -453,6 +510,17 @@ fn test_provider_usage_percent_helpers_clamp_invalid_low_values() {
 }
 
 #[test]
+fn anthropic_banked_status_is_explicitly_unknown_when_unavailable() {
+    let mut report = ProviderUsage::default();
+    provider_fetch::set_anthropic_banked_status(&mut report, None);
+    assert_eq!(
+        report.extra_info,
+        vec![("Banked resets".into(), "Unknown".into())]
+    );
+    assert!(report.anthropic_banked_resets.is_none());
+}
+
+#[test]
 fn test_active_anthropic_usage_report_prefers_marked_account() {
     let results = vec![
         ProviderUsage {
@@ -496,10 +564,13 @@ fn test_usage_data_from_provider_report_maps_limits_and_extra_usage() {
             "enabled".to_string(),
         )],
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        ..Default::default()
     };
 
     let usage = usage_data_from_provider_report(&report);
@@ -1154,6 +1225,37 @@ fn cursor_plan_usage_report_builds_named_limits() {
     assert_eq!(dt.timestamp(), 1792835722);
 }
 
+#[tokio::test]
+async fn a_cursor_login_without_usage_does_not_ask_for_an_api_key() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_key = std::env::var_os("CURSOR_API_KEY");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::remove_var("CURSOR_API_KEY");
+    let tokens = crate::auth::cursor::CursorDirectTokens {
+        access_token: "access".into(),
+        refresh_token: None,
+        source: crate::auth::cursor::login::CURSOR_LOGIN_SOURCE,
+    };
+    crate::auth::cursor::login::save_login_for_tests(None, &tokens, None).unwrap();
+
+    let report = provider_fetch::cursor_key_status_report().await;
+
+    for (name, value) in [
+        ("JCODE_HOME", previous_home),
+        ("CURSOR_API_KEY", previous_key),
+    ] {
+        match value {
+            Some(value) => crate::env::set_var(name, value),
+            None => crate::env::remove_var(name),
+        }
+    }
+    let error = report.error.expect("no usage was read");
+    assert!(error.contains("Sign in again"), "{error}");
+    assert!(!error.contains("API key"), "{error}");
+}
+
 #[test]
 fn cursor_plan_usage_report_prefers_team_spend_limit() {
     let json = serde_json::json!({
@@ -1303,6 +1405,7 @@ fn test_openai_transport_error_retries_sooner_than_api_errors() {
 
 #[test]
 fn test_openai_transport_failure_keeps_recent_last_good_only() {
+    let _shared = super::cache::lock_usage_cache_tests();
     let key = "label:transport-last-good-test".to_string();
     let window = OpenAIUsageWindow {
         name: "5-hour window".into(),
@@ -1340,5 +1443,108 @@ fn test_openai_transport_failure_keeps_recent_last_good_only() {
     assert!(recent_good_openai_usage(&key).is_none());
 }
 
+#[test]
+fn cached_anthropic_usage_for_label_returns_stale_entries_without_probing() {
+    let _shared = super::cache::lock_usage_cache_tests();
+    let label = "cached-label-accessor-test";
+    assert!(super::cached_anthropic_usage_for_label(label).is_none());
+    super::anthropic_usage_cache().lock().unwrap().insert(
+        format!("label:{label}"),
+        UsageData {
+            seven_day: 0.3,
+            seven_day_resets_at: Some("2099-01-01T00:00:00Z".into()),
+            last_error: Some("Usage API error (429)".into()),
+            ..Default::default()
+        },
+    );
+    let data = super::cached_anthropic_usage_for_label(&format!(" {label} ")).unwrap();
+    assert_eq!(
+        data.seven_day_resets_at.as_deref(),
+        Some("2099-01-01T00:00:00Z")
+    );
+    assert!(data.last_error.is_some());
+    super::anthropic_usage_cache()
+        .lock()
+        .unwrap()
+        .remove(&format!("label:{label}"));
+}
+
 #[path = "model_scoped_tests.rs"]
 mod model_scoped;
+
+#[path = "tests_additional_tests.rs"]
+mod additional_test_usage_data_default;
+
+/// A Pro account whose weekly plan window is spent keeps serving requests from
+/// its paid credit balance (the Codex CLI keeps using it). The live
+/// 2026-11-19 payload: `limit_reached` with `credits.has_credits`. Treating it as
+/// exhausted parked a working account and failed every worker on it.
+fn credit_funded_payload(credits: serde_json::Value, spend_reached: bool) -> serde_json::Value {
+    serde_json::json!({
+        "plan_type": "pro",
+        "rate_limit": {
+            "allowed": false,
+            "limit_reached": true,
+            "primary_window": {
+                "used_percent": 100,
+                "limit_window_seconds": 604_800,
+                "reset_after_seconds": 286_358,
+                "reset_at": 1_795_350_757
+            },
+            "secondary_window": null
+        },
+        "credits": credits,
+        "spend_control": { "reached": spend_reached, "individual_limit": null },
+        "rate_limit_reset_credits": { "available_count": 2, "applicable_available_count": 2 }
+    })
+}
+
+fn usage_from_payload(json: &serde_json::Value) -> OpenAIUsageData {
+    let parsed = openai_helpers::parse_openai_usage_payload(json);
+    openai_usage_data_from_provider_report(&ProviderUsage {
+        provider_name: "OpenAI (ChatGPT)".to_string(),
+        limits: parsed.limits,
+        hard_limit_reached: parsed.hard_limit_reached,
+        openai_credit_overage: parsed.credit_overage,
+        ..Default::default()
+    })
+}
+
+#[test]
+fn test_openai_credit_balance_keeps_a_spent_plan_usable() {
+    let funded = credit_funded_payload(
+        serde_json::json!({
+            "has_credits": true,
+            "unlimited": false,
+            "overage_limit_reached": false,
+            "balance": "53549.1587925000"
+        }),
+        false,
+    );
+    let usage = usage_from_payload(&funded);
+    assert!(
+        !usage.exhausted(),
+        "credits fund overage past the spent plan window"
+    );
+    // The plan verdict itself is still shown truthfully.
+    assert!(usage.hard_limit_reached);
+
+    for (credits, spend_reached) in [
+        (
+            serde_json::json!({ "has_credits": false, "unlimited": false }),
+            false,
+        ),
+        (
+            serde_json::json!({ "has_credits": true, "overage_limit_reached": true }),
+            false,
+        ),
+        (serde_json::json!({ "has_credits": true }), true),
+        (serde_json::Value::Null, false),
+    ] {
+        let usage = usage_from_payload(&credit_funded_payload(credits.clone(), spend_reached));
+        assert!(
+            usage.exhausted(),
+            "no usable credits ({credits}, spend_reached={spend_reached}) must stay exhausted"
+        );
+    }
+}

@@ -1,6 +1,6 @@
 use crate::agent::Agent;
 use crate::provider::Provider;
-use crate::session::{Session, SessionStatus};
+use crate::session::Session;
 use crate::storage;
 use crate::tool::Registry;
 use anyhow::{Context, Result};
@@ -78,19 +78,25 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
         create_coordinator_session(&options.parent_session, &options.mission)?
     };
     if let Some(working_dir) = options.working_dir.as_ref() {
-        child.working_dir = Some(working_dir.to_string_lossy().to_string());
+        child.apply_workspace(crate::session::Workspace {
+            working_dir: Some(working_dir.to_string_lossy().to_string()),
+            ..child.workspace()
+        });
     }
-    child.model = Some(options.provider.model());
-    let coordinator_session_id = child.id.clone();
+    child.apply_route(crate::session::Route {
+        model: Some(options.provider.model()),
+        ..child.route()
+    });
+    let coordinator_session_id = child.id().to_owned();
     let coordinator_session_name = child.display_name().to_string();
-    let child_is_canary = child.is_canary;
+    let child_is_canary = child.is_canary();
     if !options.use_current_session {
-        child.status = SessionStatus::Closed;
+        child.mark_closed_unregistered();
     }
     child.save()?;
 
     if !options.use_current_session
-        && let Ok(todos) = crate::todo::load_todos(&options.parent_session.id)
+        && let Ok(todos) = crate::todo::load_todos(options.parent_session.id())
     {
         let _ = crate::todo::save_todos(&coordinator_session_id, &todos);
     }
@@ -98,7 +104,7 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
     let manifest = OvernightManifest {
         version: OVERNIGHT_VERSION,
         run_id: run_id.clone(),
-        parent_session_id: options.parent_session.id.clone(),
+        parent_session_id: options.parent_session.id().to_owned(),
         coordinator_session_id: coordinator_session_id.clone(),
         coordinator_session_name,
         started_at,
@@ -110,7 +116,7 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
         cancel_requested_at: None,
         status: OvernightRunStatus::Running,
         mission: options.mission.clone(),
-        working_dir: child.working_dir.clone(),
+        working_dir: child.working_dir().map(str::to_owned),
         provider_name: options.provider.name().to_string(),
         model: options.provider.model(),
         max_agents_guidance: 2,
@@ -167,27 +173,8 @@ pub fn start_overnight_run(options: OvernightStartOptions) -> Result<OvernightLa
     })
 }
 
-fn create_coordinator_session(parent: &Session, mission: &Option<String>) -> Result<Session> {
-    let title = Some(match mission {
-        Some(mission) => format!("Overnight: {}", crate::util::truncate_str(mission, 48)),
-        None => "Overnight coordinator".to_string(),
-    });
-    let mut child = Session::create(Some(parent.id.clone()), title);
-    child.replace_messages(parent.messages.clone());
-    child.compaction = parent.compaction.clone();
-    child.provider_key = parent.provider_key.clone();
-    child.route_api_method = parent.route_api_method.clone();
-    child.reasoning_effort = parent.reasoning_effort.clone();
-    child.subagent_model = parent.subagent_model.clone();
-    child.improve_mode = parent.improve_mode;
-    child.autoreview_enabled = Some(false);
-    child.autojudge_enabled = Some(false);
-    child.is_canary = parent.is_canary;
-    child.testing_build = parent.testing_build.clone();
-    child.working_dir = parent.working_dir.clone();
-    child.provider_session_id = None;
-    Ok(child)
-}
+mod coordinator_session;
+use coordinator_session::create_coordinator_session;
 
 fn spawn_supervisor(
     manifest: OvernightManifest,

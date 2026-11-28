@@ -36,7 +36,7 @@ with open(os.environ["TEST_GH_LOG"], "a") as log:
 if args[:2] == ["repo", "view"]:
     if scenario == "repo_error":
         sys.exit(1)
-    print("owner/repo")
+    print(config["repository"])
     sys.exit(0)
 if args[0] == "release":
     if args[1] == "view" and "--json" in args:
@@ -50,6 +50,14 @@ endpoint = args[1]
 run = dict(id=100, run_number=10, run_attempt=1, head_sha=config["sha"],
            event="push", head_branch="master", path=".github/workflows/ci.yml",
            status="completed", conclusion="success")
+manual = ("event=workflow_dispatch" in endpoint or "/runs/101" in endpoint)
+if manual:
+    run.update(id=101, run_number=11, event="workflow_dispatch", head_branch="candidate",
+               path=".github/workflows/ci.yml@candidate")
+    if scenario == "manual_wrong_sha":
+        run["head_sha"] = "b" * 40
+    elif scenario == "manual_wrong_event":
+        run["event"] = "pull_request"
 if scenario == "failure":
     run["conclusion"] = "failure"
 elif scenario == "pending":
@@ -59,14 +67,21 @@ elif scenario == "other_sha":
 elif scenario == "pull_request":
     run["event"] = "pull_request"
 if "/workflows/ci.yml/runs?" in endpoint:
-    print(json.dumps([{"workflow_runs": [] if scenario == "missing" else [run]}]))
+    missing = scenario == "missing" or (manual and scenario == "manual_missing")
+    print(json.dumps([{"workflow_runs": [] if missing else [run]}]))
 elif "/jobs?" in endpoint:
-    jobs = [dict(name=name, status="completed", conclusion="success")
-            for name in config["jobs"]]
+    names = config["jobs"]
+    if config["repository"] == "xenking/jcode":
+        names = (names if manual else names[:2]) + ["TypeScript SDK"]
+    jobs = [dict(name=name, status="completed", conclusion="success") for name in names]
     if scenario == "missing_job":
         jobs.pop()
     elif scenario == "failed_job":
         jobs[-1]["conclusion"] = "failure"
+    elif manual and scenario == "manual_skipped_native":
+        jobs[2]["conclusion"] = "skipped"
+    elif manual and scenario == "manual_missing_native":
+        jobs.pop(2)
     print(json.dumps([{"jobs": jobs}]))
 else:
     marker = Path(os.environ["TEST_CONFIRMATION_MARKER"])
@@ -128,9 +143,9 @@ class QuickReleaseTests(unittest.TestCase):
         return subprocess.run(["git", *args], cwd=self.repo, check=check,
                               capture_output=True, text=True)
 
-    def release(self, scenario="success", *options, mode="--remote"):
+    def release(self, scenario="success", *options, mode="--remote", repository="owner/repo"):
         Path(self.env["TEST_CONFIRMATION_MARKER"]).unlink(missing_ok=True)
-        self.config.write_text(json.dumps(dict(scenario=scenario, sha=self.sha,
+        self.config.write_text(json.dumps(dict(scenario=scenario, sha=self.sha, repository=repository,
                                                jobs=MANDATORY_JOBS)))
         return subprocess.run(["bash", "scripts/quick-release.sh", *([mode] if mode else []), *options, TAG],
                               cwd=self.repo, env=self.env, capture_output=True,
@@ -184,6 +199,18 @@ class QuickReleaseTests(unittest.TestCase):
                 result = self.release(scenario)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assert_no_tag()
+
+    def test_fork_requires_green_push_and_exact_green_manual_native_ci(self):
+        for scenario in ("missing", "failure", "manual_missing", "manual_wrong_sha",
+                         "manual_wrong_event", "manual_skipped_native", "manual_missing_native"):
+            with self.subTest(scenario=scenario):
+                result = self.release(scenario, repository="xenking/jcode")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assert_no_tag()
+
+        result = self.release(repository="xenking/jcode")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", f"{TAG}^{{commit}}").stdout.strip(), self.sha)
 
     def test_failed_ci_does_not_push_existing_local_tag(self):
         self.git("tag", "-a", TAG, "-m", TAG)
@@ -247,6 +274,61 @@ class QuickReleaseTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("HEAD changed during CI preflight", result.stderr)
         self.assert_no_tag()
+
+    def test_explicit_source_tags_verified_ancestor_not_newer_head(self):
+        manifest = self.repo / "Cargo.toml"
+        manifest.write_text(manifest.read_text().replace("1.2.3", "9.9.9"))
+        self.git("add", "Cargo.toml")
+        self.git("commit", "-m", "Unrelated next release")
+        newer = self.git("rev-parse", "HEAD").stdout.strip()
+        result = self.release("success", "--source-commit", self.sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", f"{TAG}^{{commit}}").stdout.strip(), self.sha)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), newer)
+        self.assertIn(self.sha, self.git("ls-remote", "--tags", "origin", f"refs/tags/{TAG}^{{}}").stdout)
+
+    def test_explicit_source_remains_immutable_when_head_moves_during_ci(self):
+        result = self.release("head_changed", "--source-commit", self.sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(self.git("rev-parse", "HEAD").stdout.strip(), self.sha)
+        self.assertEqual(self.git("rev-parse", f"{TAG}^{{commit}}").stdout.strip(), self.sha)
+
+    def test_explicit_source_still_requires_exact_green_ci(self):
+        for scenario in ("failure", "pending", "other_sha", "pull_request", "failed_job", "rerun"):
+            with self.subTest(scenario=scenario):
+                result = self.release(scenario, "--source-commit", self.sha)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assert_no_tag()
+
+    def test_explicit_source_rejects_mutable_short_missing_and_non_commit_inputs(self):
+        self.git("tag", "-a", "source-fixture", "-m", "Annotated object")
+        tag_object = self.git("rev-parse", "source-fixture").stdout.strip()
+        for source in ("HEAD", self.sha[:12], "", "f" * 40, tag_object):
+            with self.subTest(source=source):
+                result = self.release("success", "--source-commit", source)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assert_no_tag()
+
+    def test_explicit_source_requires_remote_mode(self):
+        result = self.release("success", "--source-commit", self.sha, mode="--fast-local")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires --remote", result.stderr)
+        self.assert_no_tag()
+
+    def test_explicit_source_must_be_ancestor_of_current_branch(self):
+        self.git("checkout", "--orphan", "unrelated")
+        self.git("commit", "-m", "Unrelated source")
+        result = self.release("success", "--source-commit", self.sha)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be an ancestor", result.stderr)
+        self.assert_no_tag()
+
+    def test_explicit_source_rejects_conflicting_existing_tag(self):
+        self.git("tag", "-a", TAG, "HEAD^", "-m", TAG)
+        result = self.release("success", "--source-commit", self.sha)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different commit", result.stderr)
+        self.assertEqual(self.git("ls-remote", "--tags", "origin", f"refs/tags/{TAG}").stdout, "")
 
     def test_local_tag_change_during_ci_is_not_pushed(self):
         self.git("tag", "-a", TAG, "-m", TAG)

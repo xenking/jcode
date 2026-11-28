@@ -84,7 +84,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     app.expire_presumed_focus();
     crate::tui::window_visibility::poll(app.client_focused(), app.is_processing);
     app.refresh_terminal_title_metrics();
-    app.sync_herdr_agent_state();
+    app.sync_terminal_agent_state();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
     // the last phase that made progress.
     crate::logging::watchdog::beat("tui.idle_tick");
@@ -96,7 +96,6 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     let mut needs_redraw = reset_redraw
         | crate::tui::periodic_redraw_required(app)
         | crate::tui::terminal_events::theme_redraw_pending();
-    needs_redraw |= app.poll_oauth_account_telemetry();
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
@@ -110,6 +109,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.update_pinned_images_auto_hide();
     // Dissolve stale (off-screen) reasoning traces with zero visible motion.
     needs_redraw |= app.gc_offscreen_reasoning_traces();
+    needs_redraw |= app.maybe_backfill_expanded_prompt_history();
     // Adopt the resolved scroll position once a frame containing newly loaded
     // older history has rendered, so manual scrolling resumes seamlessly.
     needs_redraw |= app.reconcile_history_anchor();
@@ -279,22 +279,28 @@ pub(super) fn handle_bus_event(
             message,
             open_picker,
         }) => {
-            if session_id != app.session.id {
+            if session_id != app.session.id() {
                 return false;
             }
             app.provider_session_id = None;
-            app.session.provider_session_id = None;
+            app.session.forget_provider_session();
             app.upstream_provider = None;
             app.invalidate_model_picker_cache();
             app.update_context_limit_for_model(&model, None);
-            app.session.provider_key = provider_key.or_else(|| {
-                crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                    &model,
-                    app.provider.name(),
-                    app.session.provider_key.as_deref(),
-                )
+            app.session.apply_route(crate::session::Route {
+                provider_key: provider_key.or_else(|| {
+                    crate::provider::MultiProvider::session_provider_key_after_model_switch(
+                        &model,
+                        app.provider.name(),
+                        app.session.provider_key(),
+                    )
+                }),
+                ..app.session.route()
             });
-            app.session.model = Some(model.clone());
+            app.session.apply_route(crate::session::Route {
+                model: Some(model.clone()),
+                ..app.session.route()
+            });
             let _ = app.session.save();
             if !app.auth_catalog_refresh_pending {
                 app.push_display_message(crate::tui::DisplayMessage::system(message));
@@ -338,8 +344,15 @@ pub(super) fn handle_bus_event(
         }
         Ok(BusEvent::VoiceInputWake) => app.handle_voice_input_wake_local(),
         Ok(BusEvent::CompactionFinished) => app.poll_compaction_completion(),
+        Ok(BusEvent::CompactionStarted {
+            trigger,
+            pre_tokens,
+        }) => {
+            app.show_compaction_running(trigger, pre_tokens);
+            true
+        }
         Ok(BusEvent::SidePanelUpdated(update)) => {
-            if update.session_id == app.session.id {
+            if update.session_id == app.session.id() {
                 app.set_side_panel_snapshot(update.snapshot);
                 true
             } else {
@@ -347,7 +360,7 @@ pub(super) fn handle_bus_event(
             }
         }
         Ok(BusEvent::TodoUpdated(event)) => {
-            if event.session_id == app.session.id {
+            if event.session_id == app.session.id() {
                 app.update_terminal_title();
                 app.refresh_todos_view_now()
             } else {
@@ -399,7 +412,7 @@ pub(super) fn handle_ui_activity(app: &mut App, activity: UiActivity) -> bool {
 }
 
 fn handle_manual_tool_completed(app: &mut App, result: ManualToolCompleted) {
-    if result.session_id != app.session.id {
+    if result.session_id != app.session.id() {
         return;
     }
 
@@ -495,7 +508,7 @@ fn apply_terminal_event(
 }
 
 fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted) {
-    if task.session_id == app.session.id {
+    if task.session_id == app.session.id() {
         let label = crate::message::background_task_display_label(
             &task.tool_name,
             task.display_name.as_deref(),
@@ -507,7 +520,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
         };
         app.finish_background_task(task.task_id.clone(), label, status);
     }
-    if !task.notify || task.session_id != app.session.id {
+    if !task.notify || task.session_id != app.session.id() {
         return;
     }
 
@@ -521,7 +534,8 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
             content: vec![ContentBlock::Text {
                 text: notification,
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });
@@ -548,7 +562,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
 }
 
 fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTaskStalled) {
-    if task.session_id != app.session.id {
+    if task.session_id != app.session.id() {
         return;
     }
 
@@ -566,14 +580,21 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
         ),
         percent,
     );
-    app.set_status_notice(format!(
-        "Background task stalled · {} · no output for {}s",
-        crate::message::background_task_display_label(
-            &task.tool_name,
-            task.display_name.as_deref()
-        ),
-        task.stall_wake_seconds
-    ));
+    let label = crate::message::background_task_display_label(
+        &task.tool_name,
+        task.display_name.as_deref(),
+    );
+    app.set_status_notice(if task.elapsed_review {
+        format!(
+            "Background task review · {label} · running {:.0}s",
+            task.running_secs
+        )
+    } else {
+        format!(
+            "Background task stalled · {label} · no output for {}s",
+            task.stall_wake_seconds
+        )
+    });
 
     if !app.is_processing {
         app.push_display_message(DisplayMessage::background_task(notification.clone()));
@@ -582,7 +603,8 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
             content: vec![ContentBlock::Text {
                 text: notification.clone(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });
@@ -609,7 +631,7 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
 }
 
 fn handle_background_task_progress(app: &mut App, event: BackgroundTaskProgressEvent) {
-    if event.session_id != app.session.id {
+    if event.session_id != app.session.id() {
         return;
     }
 
@@ -647,7 +669,7 @@ fn maybe_set_background_progress_notice(app: &mut App, notice: String) {
 }
 
 fn handle_input_shell_completed(app: &mut App, shell: InputShellCompleted) {
-    if shell.session_id != app.session.id {
+    if shell.session_id != app.session.id() {
         return;
     }
 
@@ -674,9 +696,16 @@ pub(super) fn finish_turn(app: &mut App) {
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.note_runtime_memory_event_force("turn_completed", "local_turn_finished");
-    let followup_scheduled = app.schedule_turn_end_followups_after_response(
-        app.last_stream_error.is_none() && app.streaming.response_output.has_final_response(),
+    let final_response =
+        app.last_stream_error.is_none() && app.streaming.response_output.has_final_response();
+    app.record_rex_turn_outcome(
+        if app.last_stream_error.is_some() || app.turn_guardrail_stopped {
+            Some(crate::tui::rex::TurnOutcome::Error)
+        } else {
+            final_response.then_some(crate::tui::rex::TurnOutcome::Done)
+        },
     );
+    let followup_scheduled = app.schedule_turn_end_followups_after_response(final_response);
     if !followup_scheduled {
         app.clear_visible_turn_started();
         if !app.pending_queued_dispatch && app.queued_messages.is_empty() {

@@ -1,4 +1,7 @@
 use crate::message::ToolCall;
+#[path = "ui_tools_browser_summary.rs"]
+mod browser_summary;
+use browser_summary::browser_summary;
 
 use super::{dim_color, rgb, tool_color, truncate_line_preserving_suffix_to_width};
 use ratatui::prelude::*;
@@ -57,6 +60,84 @@ pub(super) fn codemode_preview(tool: &ToolCall, width: usize) -> Vec<Line<'stati
             }
             break;
         }
+    }
+    rows
+}
+
+/// One row per call the codemode script dispatched, like batch subcalls.
+/// Rows are single-line chrome: names truncate, the outcome suffix stays.
+pub(super) fn codemode_call_rows(
+    summary: Option<&jcode_session_types::CodemodeSummary>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    use jcode_session_types::{CodemodeCallStatus, CodemodeDirection};
+    let Some(summary) = summary else {
+        return Vec::new();
+    };
+    if width == 0 {
+        return Vec::new();
+    }
+    let dim = Style::default().fg(dim_color());
+    let mut rows = Vec::new();
+    for call in &summary.calls {
+        let (icon, icon_color) = match call.status {
+            CodemodeCallStatus::Success => ("✓", rgb(100, 180, 100)),
+            CodemodeCallStatus::Error => ("✗", rgb(220, 100, 100)),
+            CodemodeCallStatus::Interrupted => ("…", rgb(214, 184, 92)),
+        };
+        let mut head = vec![
+            Span::styled(format!("    {icon} "), Style::default().fg(icon_color)),
+            Span::styled(
+                resolve_display_tool_name(&call.tool).to_string(),
+                Style::default().fg(tool_color()),
+            ),
+        ];
+        if let Some(action) = call.action.as_deref().filter(|a| !a.is_empty()) {
+            head.push(Span::styled(format!(" {action}"), dim));
+        }
+        if let Some(target) = call.target.as_deref().filter(|t| !t.is_empty()) {
+            let arrow = match call.direction {
+                Some(CodemodeDirection::Outbound) => " → ",
+                None => " ",
+            };
+            head.push(Span::styled(format!("{arrow}{target}"), dim));
+        }
+        let outcome = match call.status {
+            CodemodeCallStatus::Interrupted => "interrupted".to_string(),
+            _ => crate::message::Message::format_duration(call.duration_ms),
+        };
+        let suffix = Line::from(Span::styled(format!(" · {outcome}"), dim));
+        rows.push(super::truncate_line_preserving_suffix_to_width(
+            &Line::from(head),
+            &suffix,
+            width,
+        ));
+        if let Some(reason) = call.diagnostic.as_deref().filter(|d| !d.is_empty()) {
+            rows.push(super::truncate_line_with_ellipsis_to_width(
+                &Line::from(vec![
+                    Span::raw("      "),
+                    Span::styled(format!("╰─{reason}"), dim),
+                ]),
+                width,
+            ));
+        }
+    }
+    if summary.calls_omitted > 0 {
+        let noun = if summary.calls_omitted == 1 {
+            "call"
+        } else {
+            "calls"
+        };
+        rows.push(super::truncate_line_with_ellipsis_to_width(
+            &Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    format!("… {} more {noun} not shown", summary.calls_omitted),
+                    dim,
+                ),
+            ]),
+            width,
+        ));
     }
     rows
 }
@@ -459,151 +540,6 @@ fn browser_target_summary(
         (Some(x), Some(y)) => Some(format!("@{:.0},{:.0}", x, y)),
         _ => None,
     }
-}
-
-fn browser_summary(tool: &ToolCall, max_width: Option<usize>) -> String {
-    let bounded = |preferred: usize| max_width.unwrap_or(preferred);
-    let action = tool
-        .input
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("browser");
-
-    let summary = match action {
-        "open" | "new_tab" => {
-            let label = action.replace('_', " ");
-            let url = tool.input.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            if url.is_empty() {
-                label
-            } else {
-                format!("{} {}", label, truncate_url_display(url, bounded(44)))
-            }
-        }
-        "snapshot" | "interactables" | "screenshot" => {
-            if let Some(target) = browser_target_summary(tool, max_width, true) {
-                format!("{} {}", action, target)
-            } else {
-                action.to_string()
-            }
-        }
-        "get_content" => {
-            let format_name = tool
-                .input
-                .get("format")
-                .and_then(|v| v.as_str())
-                .unwrap_or("text");
-            if let Some(target) = browser_target_summary(tool, max_width, true) {
-                format!("content {} {}", format_name, target)
-            } else {
-                format!("content {}", format_name)
-            }
-        }
-        "click" | "wait" | "hover" | "select" => {
-            if let Some(target) = browser_target_summary(tool, max_width, action != "select") {
-                format!("{} {}", action, target)
-            } else {
-                action.to_string()
-            }
-        }
-        "type" => {
-            let chars = tool
-                .input
-                .get("text")
-                .and_then(|v| v.as_str())
-                .map(|text| text.chars().count());
-            match (browser_target_summary(tool, max_width, false), chars) {
-                (Some(target), Some(chars)) => format!("type {} ({} chars)", target, chars),
-                (Some(target), None) => format!("type {}", target),
-                (None, Some(chars)) => format!("type ({} chars)", chars),
-                (None, None) => "type".to_string(),
-            }
-        }
-        "fill_form" => {
-            let count = tool
-                .input
-                .get("fields")
-                .and_then(|v| v.as_array())
-                .map(|fields| fields.len())
-                .unwrap_or(0);
-            format!("fill {} field{}", count, if count == 1 { "" } else { "s" })
-        }
-        "upload" => {
-            let path = tool
-                .input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let target = browser_target_summary(tool, max_width, false);
-            let file = if path.is_empty() {
-                None
-            } else {
-                Some(truncate_path_display(path, bounded(28)))
-            };
-            match (target, file) {
-                (Some(target), Some(file)) => format!("upload {} ← {}", target, file),
-                (Some(target), None) => format!("upload {}", target),
-                (None, Some(file)) => format!("upload {}", file),
-                (None, None) => "upload".to_string(),
-            }
-        }
-        "eval" => {
-            let script = tool
-                .input
-                .get("script")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if script.is_empty() {
-                "eval".to_string()
-            } else {
-                format!("eval {}", truncate_middle_display(script, bounded(42)))
-            }
-        }
-        "scroll" => {
-            if let Some(position) = tool.input.get("position").and_then(|v| v.as_str()) {
-                format!("scroll {}", position)
-            } else if let Some(scroll_to) = tool.input.get("scroll_to") {
-                let x = scroll_to.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let y = scroll_to.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                format!("scroll to {:.0},{:.0}", x, y)
-            } else {
-                let x = tool.input.get("x").and_then(|v| v.as_f64());
-                let y = tool.input.get("y").and_then(|v| v.as_f64());
-                match (x, y) {
-                    (Some(x), Some(y)) => format!("scroll {:.0},{:.0}", x, y),
-                    _ => "scroll".to_string(),
-                }
-            }
-        }
-        "press" => {
-            let key = tool.input.get("key").and_then(|v| v.as_str());
-            match (key, browser_target_summary(tool, max_width, false)) {
-                (Some(key), Some(target)) => format!("press {} on {}", key, target),
-                (Some(key), None) => format!("press {}", key),
-                (None, Some(target)) => format!("press {}", target),
-                (None, None) => "press".to_string(),
-            }
-        }
-        "provider_command" => tool
-            .input
-            .get("provider_action")
-            .and_then(|v| v.as_str())
-            .map(|value| format!("provider {}", truncate_middle_display(value, bounded(36))))
-            .unwrap_or_else(|| "provider".to_string()),
-        "status" | "setup" | "list_tabs" | "get_active_tab" | "list_frames" => {
-            action.replace('_', " ")
-        }
-        "select_tab" => tool
-            .input
-            .get("tab_id")
-            .and_then(|v| v.as_i64())
-            .map(|tab_id| format!("select tab {}", tab_id))
-            .unwrap_or_else(|| "select tab".to_string()),
-        _ => action.replace('_', " "),
-    };
-
-    max_width
-        .map(|width| truncate_end_display(summary.as_str(), width))
-        .unwrap_or(summary)
 }
 
 fn truncate_path_with_suffix(path: &str, suffix: &str, max_width: usize) -> String {
@@ -1258,33 +1194,6 @@ pub(super) fn get_tool_summary_with_budget(
                 _ => truncate_end_display(error, bounded(40)),
             }
         }
-        "integration_tools" => {
-            let action = tool
-                .input
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let category = tool
-                .input
-                .get("category")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if action == "suggest" {
-                let detail = tool
-                    .input
-                    .get("product_name")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| tool.input.get("suggestion_kind").and_then(|v| v.as_str()))
-                    .unwrap_or(category);
-                format!("suggest {}", truncate_end_display(detail, bounded(30)))
-            } else {
-                match tool.input.get("tool").and_then(|v| v.as_str()) {
-                    Some(name) => format!("setup {}", truncate_end_display(name, bounded(30))),
-                    None if !category.is_empty() => format!("search {}", category),
-                    None => "search".to_string(),
-                }
-            }
-        }
         "codesearch" => tool
             .input
             .get("query")
@@ -1589,7 +1498,7 @@ pub(super) fn render_batch_subcall_line(
 ) -> Line<'static> {
     let display_name = resolve_display_tool_name(&tool.name).to_string();
     let token_badge = output_content.map(|content| {
-        let tokens = crate::util::estimate_tokens(content);
+        let tokens = crate::message::estimate_text(crate::message::TokenFamily::default(), content);
         let color = match crate::util::approx_tool_output_token_severity(tokens) {
             crate::util::ApproxTokenSeverity::Normal => rgb(118, 118, 118),
             crate::util::ApproxTokenSeverity::Warning => rgb(214, 184, 92),

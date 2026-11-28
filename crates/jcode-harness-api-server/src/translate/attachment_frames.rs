@@ -1,0 +1,141 @@
+use super::*;
+
+#[test]
+fn history_tool_preserves_duration() {
+    let row = serde_json::json!({"role":"tool", "timestamp_ms": 20000,
+        "tool_duration_ms": 7000, "tool_data":{"id":"call", "name":"bash", "input":{}}});
+    let tool = BridgeState::history_tool(&row).unwrap();
+    let encoded = serde_json::to_value(tool).unwrap();
+    assert_eq!(encoded["duration_ms"], 7000);
+}
+
+impl BridgeState {
+    pub(super) fn codemode_summary(
+        event: &Value,
+    ) -> Option<Box<jcode_harness_api::CodemodeSummary>> {
+        event.get("codemode_status")?;
+        serde::Deserialize::deserialize(event).ok()
+    }
+
+    /// The typed answer of an `ask` row or event; sessions saved before records
+    /// existed carry only the result text, which is rebuilt here.
+    pub(super) fn ask_record(
+        event: &Value,
+        name: &str,
+        content: &str,
+    ) -> Option<Box<jcode_session_types::AskRecord>> {
+        if let Some(typed) = event.get("ask").filter(|typed| !typed.is_null()) {
+            return serde_json::from_value(typed.clone()).ok();
+        }
+        if !jcode_session_types::is_ask_tool(name) {
+            return None;
+        }
+        jcode_session_types::AskRecord::from_legacy(content).map(Box::new)
+    }
+
+    pub(super) fn daemon_list<T: serde::de::DeserializeOwned>(
+        event: &Value,
+        field: &str,
+    ) -> Result<Vec<T>, String> {
+        // Older daemons may omit optional image lists. Present malformed data
+        // is different: reporting an empty list would silently lose attachments.
+        if event[field].is_null() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_value(event[field].clone())
+            .map_err(|error| format!("invalid daemon {field}: {error}"))
+    }
+
+    pub(super) fn invalid_daemon_event(reply_to: Option<u64>, message: String) -> Vec<ServerFrame> {
+        let event = ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message,
+        };
+        vec![match reply_to {
+            Some(id) => ServerFrame::reply(id, event),
+            None => ServerFrame::event(event),
+        }]
+    }
+
+    /// Tool identity of a daemon `tool` history row, if it carries one.
+    pub(super) fn history_tool(message: &Value) -> Option<jcode_harness_api::HistoryTool> {
+        let data = &message["tool_data"];
+        let id = data["id"].as_str().filter(|id| !id.is_empty())?;
+        (message["role"] == "tool").then(|| jcode_harness_api::HistoryTool {
+            codemode: Self::codemode_summary(message),
+            ask: Self::ask_record(
+                message,
+                data["name"].as_str().unwrap_or(""),
+                message["content"].as_str().unwrap_or(""),
+            ),
+            duration_ms: message["tool_duration_ms"].as_u64(),
+            id: id.to_string(),
+            name: data["name"].as_str().unwrap_or("").to_string(),
+            input: data["input"].clone(),
+        })
+    }
+
+    pub(super) fn attachment_recovery(event: &Value) -> Option<ServerFrame> {
+        let directive = &event["reload_recovery"];
+        let (continuation_message, reconnect_notice) = if let Some(message) =
+            directive["continuation_message"].as_str()
+        {
+            (
+                message.to_string(),
+                directive["reconnect_notice"].as_str().map(str::to_string),
+            )
+        } else if event["activity"]["is_processing"].as_bool() != Some(true)
+            && event["was_interrupted"].as_bool() == Some(true)
+            && event["messages"]
+                .as_array()
+                .is_some_and(|messages| !messages.is_empty())
+        {
+            // Compatibility with daemons predating reload_recovery. Keep in
+            // sync with ReloadContext::interrupted_session_continuation_message.
+            ("Your session was interrupted by a server reload while a tool was running. The tool was aborted and results may be incomplete. Continue exactly where you left off and do not ask the user what to do next.".to_string(), None)
+        } else {
+            return None;
+        };
+        if continuation_message.trim().is_empty() {
+            return None;
+        }
+        Some(ServerFrame::event(ApiEvent::SessionRecovery {
+            session_id: event["session_id"].as_str()?.to_string(),
+            continuation_message,
+            reconnect_notice,
+        }))
+    }
+
+    pub(super) fn applet_frame(session_id: &str, snapshot: &Value) -> Option<ServerFrame> {
+        if session_id.is_empty() {
+            return None;
+        }
+        // Missing means empty; malformed must not clear a valid snapshot.
+        let snapshot = if snapshot.is_null() {
+            jcode_harness_api::jcode_applet_types::AgentApplets::default()
+        } else {
+            serde_json::from_value(snapshot.clone()).ok()?
+        };
+        Some(ServerFrame::event(ApiEvent::AppletState {
+            session_id: session_id.to_string(),
+            snapshot,
+        }))
+    }
+
+    pub(super) fn side_panel_frame(session_id: &str, snapshot: &Value) -> Option<ServerFrame> {
+        if session_id.is_empty() {
+            return None;
+        }
+        // Missing history state means empty: native history omits empty panels.
+        // Malformed snapshots must not clear a previously valid document.
+        let snapshot = if snapshot.is_null() {
+            jcode_harness_api::SidePanelSnapshot::default()
+        } else {
+            serde_json::from_value(snapshot.clone()).ok()?
+        };
+        Some(ServerFrame::event(ApiEvent::SidePanelState {
+            session_id: session_id.to_string(),
+            snapshot,
+        }))
+    }
+}

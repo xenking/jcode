@@ -74,10 +74,8 @@ impl App {
             return false;
         }
         let task = self.remote_login_onboarding.task.as_mut().unwrap();
-        let reply = match task.reply.try_recv() {
-            Ok(reply) => reply,
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return false,
-            Err(_) => Err("Remote status check stopped"),
+        let Some(reply) = task.try_reply("Remote status check stopped") else {
+            return false;
         };
         self.remote_login_onboarding.dismiss();
         if let Ok(Reply::Status { providers }) = reply
@@ -130,6 +128,7 @@ impl App {
                     (false, false) => "Cancel without reading or copying local credentials.",
                 }.into(),
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: PickerAction::RemoteImportDecision { accept },
             selected_option: 0,
@@ -143,7 +142,7 @@ impl App {
             created_date: None,
             effort: None,
         }).collect();
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.inline_interactive_state = Some(InlineInteractiveState {
             kind: PickerKind::Login,
             entries,

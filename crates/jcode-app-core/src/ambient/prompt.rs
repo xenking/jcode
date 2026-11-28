@@ -232,21 +232,21 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
         {
             loaded += 1;
             // Skip debug sessions
-            if session.is_debug {
+            if session.is_debug() {
                 continue;
             }
             // Only include sessions updated after cutoff
-            if session.updated_at < cutoff {
+            if session.updated_at() < cutoff {
                 continue;
             }
-            let duration = (session.updated_at - session.created_at)
+            let duration = (session.updated_at() - session.created_at())
                 .num_seconds()
                 .max(0);
-            let extraction = if session.messages.is_empty() {
+            let extraction = if session.has_no_messages() {
                 "no messages"
             } else {
                 // Heuristic: if session closed normally, assume extracted
-                match &session.status {
+                match session.status() {
                     crate::session::SessionStatus::Closed => "extracted",
                     crate::session::SessionStatus::Crashed { .. } => "missed",
                     crate::session::SessionStatus::Active => "in progress",
@@ -254,8 +254,8 @@ pub fn gather_recent_sessions(since: Option<DateTime<Utc>>) -> Vec<RecentSession
                 }
             };
             recent.push(RecentSessionInfo {
-                id: session.id.clone(),
-                status: session.status.display().to_string(),
+                id: session.id().to_owned(),
+                status: session.status().display().to_string(),
                 topic: session.display_title().map(ToOwned::to_owned),
                 duration_secs: duration,
                 extraction_status: extraction.to_string(),
@@ -507,11 +507,13 @@ pub fn build_ambient_system_prompt(
          - Session history — patterns in what the user works on\n\n\
          When done, you MUST call end_ambient_cycle with a summary of \
          everything you did, including compaction count. Always schedule \
-         your next wake time with context for what you plan to do next.\n\n\
+         your next wake time with context for what you plan to do next. If \
+         nothing needed doing, report zero counts and omit proactive_work or \
+         set it to null. Do not send a message for an empty cycle.\n\n\
          ## Messaging Check-ins\n\n\
          You have a `send_message` tool. Use it to keep the user informed \
-         about what you're doing. Send a brief message when you start a cycle \
-         and when you finish significant work. Keep messages short and useful — \
+         about significant work or issues that need the user's attention. \
+         Do not send routine start or no-work messages. Keep messages short and useful — \
          the user should be able to glance at their messages and know what's happening \
          without opening jcode. You can optionally target a specific channel \
          (e.g. telegram, discord) or omit channel to send to all.\n",
@@ -572,26 +574,4 @@ pub(crate) fn format_duration_rough(d: chrono::Duration) -> String {
     }
 }
 
-/// Format a number of minutes into a human-friendly string.
-/// E.g. 5 → "5m", 90 → "1h 30m", 370 → "6h 10m", 1500 → "1d 1h"
-pub fn format_minutes_human(mins: u32) -> String {
-    if mins < 60 {
-        format!("{}m", mins)
-    } else if mins < 1440 {
-        let h = mins / 60;
-        let m = mins % 60;
-        if m > 0 {
-            format!("{}h {}m", h, m)
-        } else {
-            format!("{}h", h)
-        }
-    } else {
-        let d = mins / 1440;
-        let h = (mins % 1440) / 60;
-        if h > 0 {
-            format!("{}d {}h", d, h)
-        } else {
-            format!("{}d", d)
-        }
-    }
-}
+pub use crate::human_duration::format_minutes_human;

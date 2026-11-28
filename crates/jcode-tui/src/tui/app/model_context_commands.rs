@@ -1,10 +1,13 @@
 use super::*;
+use crate::tui::app::model_context_messages::{
+    is_refresh_model_list_command, model_switch_failure_message,
+};
 
 pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
     if is_refresh_model_list_command(trimmed) {
         let session_id = app
             .active_client_session_id()
-            .unwrap_or(app.session.id.as_str())
+            .unwrap_or(app.session.id())
             .to_string();
         crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
             crate::bus::UiActivity::catalog(
@@ -70,6 +73,8 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
+                    ask: None,
                 });
                 app.set_status_notice(format!("Model → {}", model_name));
             }
@@ -95,15 +100,15 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
         } else {
             let current_label = current
                 .as_deref()
-                .map(effort_display_label)
-                .unwrap_or("default");
+                .map(effort_glyph_label)
+                .unwrap_or_else(|| "default".to_string());
             let list: Vec<String> = efforts
                 .iter()
                 .map(|e| {
                     if Some(e.to_string()) == current {
-                        format!("{} <- current", effort_display_label(e))
+                        format!("{} <- current", effort_menu_label(e))
                     } else {
-                        effort_display_label(e).to_string()
+                        effort_menu_label(e).to_string()
                     }
                 })
                 .collect();
@@ -120,13 +125,23 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
     if let Some(level) = trimmed.strip_prefix("/effort ") {
         app.record_keybinding_slow(crate::tui::app::shortcut_hints::LearnableAction::EffortCycle);
         let level = level.trim();
+        let prev_model = app.provider.model();
         match app.provider.set_reasoning_effort(level) {
             Ok(()) => {
+                let new_model = app.provider.model();
+                if new_model != prev_model {
+                    app.session.apply_route(crate::session::Route {
+                        model: Some(new_model),
+                        ..app.session.route()
+                    });
+                    app.invalidate_model_picker_cache();
+                    crate::tui::ui::prepare::invalidate_header_prep_cache();
+                }
                 let new_effort = app.provider.reasoning_effort();
                 let label = new_effort
                     .as_deref()
-                    .map(effort_display_label)
-                    .unwrap_or("default");
+                    .map(effort_glyph_label)
+                    .unwrap_or_else(|| "default".to_string());
                 app.push_display_message(DisplayMessage::system(format!(
                     "✓ Reasoning effort → {}",
                     label

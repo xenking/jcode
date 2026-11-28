@@ -138,16 +138,21 @@
 //! locally.
 
 mod auth;
+mod bounded_history;
+pub mod bundle_bridge;
 mod client;
 /// Jcode Cloud account sign-in and managed host connection (feature `cloud`).
 #[cfg(feature = "cloud")]
 pub mod cloud;
 pub mod collections;
+pub mod desktop_control;
+pub mod desktop_state;
 mod diagnostics;
 mod errors;
 mod launch;
 #[cfg(feature = "ssh-native")]
 mod native_ssh;
+mod paired_harness;
 mod process;
 mod ssh;
 mod structured;
@@ -162,18 +167,21 @@ pub use auth::{
     AuthClient, AuthFlow, AuthInputKind, AuthOptions, AuthPrompt, AuthResult, LoginMethod,
     LoginProvider,
 };
+pub use bounded_history::HistoryPage;
 pub use client::{
     AssistantTextMessage, ConnectOptions, CreateSessionOptions, EventStream, FileContent,
     FileStatus, GlobalEventStream, GlobalEventsOptions, JcodeClient, RunOptions, RuntimeInfo,
     SearchTextOptions, ToolCall, Transport, TurnResult, UnixTransport, Usage,
 };
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
-pub use errors::{Error, ErrorKind, Result};
+pub use errors::{Error, ErrorKind, PairedFailure, Result};
 pub use jcode_applet_types as applet;
 pub use jcode_harness_api::{
-    AskAnswer, AskOption, AskQuestion, AskResponse, SessionEditStats,
+    AskAnswer, AskOption, AskQuestion, AskResponse, PendingAwait, SessionEditStats,
     enrich_sessions_from_edit_stats, enrich_sessions_from_local_edit_stats,
     enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
+    forbid_blocking_local_io, local_worker_meta, pending_awaits_for_session, pending_awaits_in,
+    worker_ids, worker_meta, worker_meta_for,
 };
 /// Auto-poke and todo quality-gate policy, identical to the TUI's. Fetch a
 /// snapshot with [`JcodeClient::todo_state`], run
@@ -186,6 +194,7 @@ pub use launch::{
 };
 #[cfg(feature = "ssh-native")]
 pub use native_ssh::{NativeSshKey, NativeSshOptions, NativeSshTransport};
+pub use paired_harness::{PairedHarness, pair_harness};
 pub use ssh::SshConnectOptions;
 #[cfg(unix)]
 pub use ssh::{SharedSshTransport, WeakSharedSshTransport};
@@ -201,9 +210,17 @@ pub use jcode_harness_api as api;
 pub use jcode_harness_api::{
     ApiEvent, ApiRequest, HistoryMessage, HistoryTool, ModelRouteInfo, PermissionDecision,
     RenderedImage, RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo,
+    SessionSearchHighlight, SessionSearchHit, SessionSearchResults, SessionSearchRole,
     SessionToolDefinition, SidePanelPage, SidePanelPageFormat, SidePanelPageSource,
-    SidePanelSnapshot, TextMatch, ToolConfiguration, TurnStopReason, api_socket_path,
+    SidePanelSnapshot, SwarmMemberInfo, TextMatch, ToolConfiguration, TurnStopReason, WorkerMeta,
+    WorkerPhase, api_socket_path,
 };
 pub use jcode_harness_api::{
     ModelUsage, RuntimeCommand, RuntimeCommandOutput, compare_model_usage,
 };
+pub use jcode_harness_api::{
+    ROUTING_CAPABILITY, RoutingAccountView, RoutingApiKeyView, RoutingBudgetView,
+    RoutingGateChoice, RoutingGateOption, RoutingIntentAction, RoutingKeyView, RoutingView,
+    RoutingWindowView,
+};
+pub use jcode_harness_api::{SIDE_QUESTIONS_CAPABILITY, SideQuestionTopic};

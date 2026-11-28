@@ -55,7 +55,7 @@ impl App {
     /// Rechecked at the point of eviction, not just when scheduling a frame.
     fn hibernation_has_work(&self) -> bool {
         self.is_processing()
-            || self.justrust_status.row().is_some()
+            || self.justrust_status.has_row()
             || self.pending_turn
             || self.session_save_pending
             || !self.queued_messages.is_empty()
@@ -76,6 +76,9 @@ impl App {
             || self.rate_limit_reset.is_some()
             || self.interleave_message.is_some()
             || !self.pending_soft_interrupts.is_empty()
+            || !self.server_queued_prompts.is_empty()
+            || !self.pending_queue_requests.is_empty()
+            || !self.uncertain_queue_prompts.is_empty()
             || !self.pending_soft_interrupt_requests.is_empty()
             || self.pending_local_transfer.is_some()
             || self.pending_transfer_request
@@ -430,18 +433,18 @@ mod tests {
         app.scroll_offset = 17;
         app.auto_scroll_paused = true;
         app.typing_scroll_lock = true;
-        let session_id = app.session.id.clone();
+        let session_id = app.session.id().to_owned();
         let display_count = app.display_messages.len();
-        let stored_count = app.session.messages.len();
+        let stored_count = app.session.message_count();
         freeze(&mut app);
         assert_eq!(app.input, "drft");
         assert_eq!(app.cursor_pos, 2);
         assert_eq!(app.scroll_offset, 17);
         assert!(app.auto_scroll_paused);
-        assert_eq!(app.session.id, session_id);
+        assert_eq!(app.session.id(), session_id);
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.display_messages.len(), display_count);
-        assert_eq!(app.session.messages.len(), stored_count);
+        assert_eq!(app.session.message_count(), stored_count);
         assert_eq!(app.pending_images.len(), 1);
         assert_eq!(app.pasted_contents, ["expanded paste"]);
         app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
@@ -505,7 +508,12 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(screen.contains("Hibernated"));
-        assert!(screen.contains("private mem"));
+        // The memory figure appears only where the OS reports it.
+        assert_eq!(
+            screen.contains("private mem"),
+            private_memory_bytes().is_some(),
+            "{screen}"
+        );
         let snapshot = app.hibernation_frame().unwrap().clone();
         app.enter_idle_hibernation(Some(&Buffer::empty(Rect::new(0, 0, 5, 5))));
         assert_eq!(app.hibernation_frame().unwrap(), &snapshot);

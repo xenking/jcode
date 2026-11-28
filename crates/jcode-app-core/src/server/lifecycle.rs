@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use std::time::Duration;
+use tokio::sync::watch;
 
 const TEMP_SERVER_ENV: &str = "JCODE_TEMP_SERVER";
 const SERVER_SCOPE_ENV: &str = "JCODE_SERVER_SCOPE";
 const OWNER_PID_ENV: &str = "JCODE_SERVER_OWNER_PID";
+#[cfg(unix)]
+use super::socket::OWNER_FD_ENV;
 const TEMP_IDLE_SECS_ENV: &str = "JCODE_TEMP_SERVER_IDLE_SECS";
 const DEFAULT_TEMP_IDLE_SECS: u64 = 30 * 60;
 const TEMP_SERVER_EXIT_CODE: i32 = super::EXIT_IDLE_TIMEOUT;
@@ -15,7 +16,6 @@ const TEMP_SERVER_EXIT_CODE: i32 = super::EXIT_IDLE_TIMEOUT;
 /// Exiting between a checkpoint's snapshot write and journal delete used to
 /// duplicate history on the next load (#1632).
 pub(crate) async fn drain_session_saves_before_exit() {
-    crate::logging::info("Server received SIGTERM, shutting down gracefully");
     let drained = tokio::task::spawn_blocking(|| {
         crate::session::drain_saves_for_shutdown(Duration::from_secs(5))
     })
@@ -23,6 +23,19 @@ pub(crate) async fn drain_session_saves_before_exit() {
     .unwrap_or(false);
     if !drained {
         crate::logging::warn("Shutdown: a session save was still running after 5s; exiting anyway");
+    }
+    flush_deferred_persistence().await;
+}
+
+pub(super) async fn flush_deferred_persistence() {
+    let flush = tokio::task::spawn_blocking(crate::persistence_batch::finish_daemon);
+    if tokio::time::timeout(Duration::from_secs(5), flush)
+        .await
+        .is_err()
+    {
+        crate::logging::warn(
+            "Shutdown: deferred persistence did not flush after 5s; exiting anyway",
+        );
     }
 }
 
@@ -57,11 +70,32 @@ pub fn configure_temporary_server(owner_pid: Option<u32>, idle_timeout_secs: Opt
     }
 }
 
+pub fn configure_persistent_server() {
+    crate::env::remove_var(TEMP_SERVER_ENV);
+    crate::env::set_var(SERVER_SCOPE_ENV, "persistent");
+}
+
+pub(crate) fn persistent_server_enabled() -> bool {
+    std::env::var(SERVER_SCOPE_ENV).as_deref() == Ok("persistent")
+}
+
+/// An implicit private daemon keeps the usual idle budget, even with debug
+/// enabled. Preserve explicit policies inherited during a reload.
+pub fn configure_private_server(owner_pid: Option<u32>, idle_timeout_secs: Option<u64>) {
+    if !persistent_server_enabled() && !temporary_server_enabled() {
+        let timeout = idle_timeout_secs.or_else(|| {
+            std::env::var_os(TEMP_IDLE_SECS_ENV)
+                .is_none()
+                .then_some(super::IDLE_TIMEOUT_SECS)
+        });
+        configure_temporary_server(owner_pid, timeout);
+    }
+}
+
 pub(crate) fn temporary_server_policy_from_env() -> Option<TemporaryServerPolicy> {
-    if !temporary_server_env_enabled() {
+    if !temporary_server_enabled() {
         return None;
     }
-
     let owner_pid = std::env::var(OWNER_PID_ENV)
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -78,7 +112,7 @@ pub(crate) fn temporary_server_policy_from_env() -> Option<TemporaryServerPolicy
     })
 }
 
-fn temporary_server_env_enabled() -> bool {
+pub(crate) fn temporary_server_enabled() -> bool {
     env_truthy(TEMP_SERVER_ENV)
         || std::env::var(SERVER_SCOPE_ENV)
             .ok()
@@ -151,7 +185,7 @@ pub(crate) fn cleanup_temporary_metadata(socket_path: &Path) {
 }
 
 pub(crate) fn spawn_temporary_lifecycle_monitor(
-    client_count: Arc<RwLock<usize>>,
+    client_activity: watch::Receiver<bool>,
     sessions: super::SessionAgents,
     swarm_state: super::SwarmState,
     socket_path: PathBuf,
@@ -160,54 +194,93 @@ pub(crate) fn spawn_temporary_lifecycle_monitor(
     policy: TemporaryServerPolicy,
 ) {
     tokio::spawn(async move {
-        let mut idle_since: Option<Instant> = None;
-        let mut check_interval = tokio::time::interval(Duration::from_secs(10));
-
-        loop {
-            check_interval.tick().await;
-
-            if let Some(owner_pid) = policy.owner_pid
-                && owner_pid != std::process::id()
-                && !process_alive(owner_pid)
-            {
+        let idle_timeout = Duration::from_secs(policy.idle_timeout_secs);
+        tokio::select! {
+            () = wait_for_temporary_idle(client_activity, &sessions, &swarm_state, idle_timeout) => {
+                crate::logging::info("Temporary server idle timeout reached. Shutting down.");
+            }
+            owner_pid = wait_for_owner_exit(policy.owner_pid) => {
                 crate::logging::info(&format!(
                     "Temporary server owner pid {} is gone. Shutting down.",
                     owner_pid
                 ));
-                shutdown_temporary_server(&server_name, &socket_path, &debug_socket_path).await;
-            }
-
-            let count = *client_count.read().await;
-            let has_live_headless_worker =
-                super::has_live_headless_worker(&sessions, &swarm_state).await;
-            if super::idle_monitor_should_start(count, has_live_headless_worker) {
-                if idle_since.is_none() {
-                    idle_since = Some(Instant::now());
-                    crate::logging::info(&format!(
-                        "Temporary server has no clients. It will exit after {} seconds idle.",
-                        policy.idle_timeout_secs
-                    ));
-                }
-
-                if let Some(since) = idle_since
-                    && since.elapsed().as_secs() >= policy.idle_timeout_secs
-                {
-                    crate::logging::info(&format!(
-                        "Temporary server idle for {} seconds. Shutting down.",
-                        since.elapsed().as_secs()
-                    ));
-                    shutdown_temporary_server(&server_name, &socket_path, &debug_socket_path).await;
-                }
-            } else {
-                if idle_since.is_some() {
-                    crate::logging::info(
-                        "Temporary server client connected. Idle timer cancelled.",
-                    );
-                }
-                idle_since = None;
             }
         }
+        shutdown_temporary_server(&server_name, &socket_path, &debug_socket_path).await;
     });
+}
+
+async fn wait_for_temporary_idle(
+    mut client_activity: watch::Receiver<bool>,
+    sessions: &super::SessionAgents,
+    swarm_state: &super::SwarmState,
+    idle_timeout: Duration,
+) {
+    loop {
+        if *client_activity.borrow_and_update() {
+            if client_activity.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+            continue;
+        }
+
+        let workers_running = super::has_live_headless_worker(sessions, swarm_state).await;
+        let delay = if workers_running {
+            // Workers can outlive their client. They don't own a socket, so
+            // only in this case recheck liveness until the last worker exits.
+            Duration::from_secs(10)
+        } else {
+            idle_timeout
+        };
+        match tokio::time::timeout(delay, client_activity.changed()).await {
+            Ok(Ok(())) => continue,
+            Ok(Err(_)) => std::future::pending::<()>().await,
+            Err(_)
+                if !workers_running
+                    && !super::has_live_headless_worker(sessions, swarm_state).await
+                    && matches!(client_activity.has_changed(), Ok(false)) =>
+            {
+                return;
+            }
+            Err(_) => continue,
+        }
+    }
+}
+
+async fn wait_for_owner_exit(owner_pid: Option<u32>) -> u32 {
+    let Some(pid) = owner_pid.filter(|&pid| pid != std::process::id()) else {
+        return std::future::pending().await;
+    };
+    #[cfg(unix)]
+    if let Some(mut socket) = take_owner_socket() {
+        // The channel carries no data. Its peer is held open only by our
+        // launcher, so EOF is reliable even when the owner PID gets reused.
+        use tokio::io::AsyncReadExt;
+        if matches!(socket.read(&mut [0u8; 1]).await, Ok(0)) {
+            return pid;
+        }
+    }
+    while process_alive(pid) {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+    pid
+}
+
+#[cfg(unix)]
+fn take_owner_socket() -> Option<tokio::net::UnixStream> {
+    use std::os::fd::FromRawFd;
+
+    let fd = std::env::var(OWNER_FD_ENV).ok()?.parse::<i32>().ok()?;
+    crate::env::remove_var(OWNER_FD_ENV);
+    if fd < 3 || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return None;
+    }
+    // This fd is deliberately inherited by spawn_server_notify_impl. Don't
+    // pass it to tools. An exec-based reload falls back to owner_pid instead.
+    let socket = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    super::socket::mark_close_on_exec(&socket);
+    socket.set_nonblocking(true).ok()?;
+    tokio::net::UnixStream::from_std(socket).ok()
 }
 
 async fn shutdown_temporary_server(
@@ -215,9 +288,15 @@ async fn shutdown_temporary_server(
     socket_path: &Path,
     debug_socket_path: &Path,
 ) -> ! {
-    let _ = crate::registry::unregister_server(server_name).await;
+    let _admission = crate::turn_activity::global().close_admission();
     crate::transport::remove_socket(socket_path);
     crate::transport::remove_socket(debug_socket_path);
+    drain_session_saves_before_exit().await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        crate::registry::unregister_server(server_name),
+    )
+    .await;
     cleanup_temporary_metadata(socket_path);
     // `std::process::exit` skips `DaemonLockGuard::drop`, so clear the lock
     // this process holds. Per-run sockets would otherwise leave one stale lock
@@ -227,6 +306,7 @@ async fn shutdown_temporary_server(
     // Same for the build-hash sidecar the registry publisher writes next to
     // the socket: an ephemeral server must leave nothing behind.
     let _ = std::fs::remove_file(format!("{}.hash", socket_path.display()));
+    flush_deferred_persistence().await;
     std::process::exit(TEMP_SERVER_EXIT_CODE);
 }
 

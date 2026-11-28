@@ -1,36 +1,37 @@
 use super::*;
 
 impl RemoteEventState for RemoteConnection {
+    fn finish_local_tools_request(&mut self, id: u64, accepted: bool) -> bool {
+        Self::finish_local_tools_request(self, id, accepted)
+    }
     fn finish_runtime_command(&mut self, id: u64) -> bool {
         Self::finish_runtime_command(self, id)
     }
 
-    fn handle_tool_start(&mut self, id: &str, name: &str) {
-        Self::handle_tool_start(self, id, name);
+    fn request_context_meter(&mut self, session_id: &str) -> Option<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.pending_context_meters.insert(id);
+        self.send_request_detached(
+            Request::SessionContextBreakdown {
+                id,
+                session_id: Some(session_id.to_owned()),
+                model: None,
+                cwd: None,
+                summary_only: true,
+                include_snapcompact: false,
+            },
+            "context meter",
+        );
+        Some(id)
     }
 
-    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
-        Self::handle_tool_input(self, id, delta);
+    fn finish_context_meter(&mut self, id: u64) -> bool {
+        self.pending_context_meters.remove(&id)
     }
 
-    fn get_tool_input(&self, id: &str) -> serde_json::Value {
-        Self::get_tool_input(self, id)
-    }
-
-    fn handle_tool_exec(&mut self, id: &str, name: &str) {
-        Self::handle_tool_exec(self, id, name);
-    }
-
-    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
-        Self::handle_tool_done(self, id, name, output)
-    }
-
-    fn take_tool_duration(&mut self, id: &str) -> Option<f32> {
-        self.tool_diff.take_tool_duration(id)
-    }
-
-    fn clear_pending(&mut self) {
-        Self::clear_pending(self);
+    fn tool_events(&mut self) -> &mut RemoteDiffTracker {
+        &mut self.tool_diff
     }
 
     fn call_output_tokens_seen(&mut self) -> &mut u64 {
@@ -55,28 +56,8 @@ impl RemoteEventState for RemoteConnection {
 }
 
 impl RemoteEventState for ReplayRemoteState {
-    fn handle_tool_start(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_start(id, name);
-    }
-
-    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
-        self.tool_diff.handle_tool_input(id, delta);
-    }
-
-    fn get_tool_input(&self, id: &str) -> serde_json::Value {
-        self.tool_diff.tool_input_json(id)
-    }
-
-    fn handle_tool_exec(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_exec(id, name);
-    }
-
-    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
-        self.tool_diff.finish_tool(id, name, output)
-    }
-
-    fn clear_pending(&mut self) {
-        self.tool_diff.clear();
+    fn tool_events(&mut self) -> &mut RemoteDiffTracker {
+        &mut self.tool_diff
     }
 
     fn call_output_tokens_seen(&mut self) -> &mut u64 {

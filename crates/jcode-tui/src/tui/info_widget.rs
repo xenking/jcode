@@ -11,6 +11,10 @@ pub use super::cloud_status::{
     CloudStatusInfo,
 };
 use super::color_support::rgb;
+#[path = "info_widget_cloud.rs"]
+mod cloud;
+#[path = "info_widget_cloud_directories.rs"]
+mod cloud_directories;
 #[path = "info_widget_commits.rs"]
 mod commits;
 #[path = "info_widget_frame.rs"]
@@ -19,12 +23,18 @@ pub(crate) mod frame;
 mod git;
 #[path = "info_widget_graph.rs"]
 mod graph;
+#[path = "info_widget_layout.rs"]
+pub(crate) mod layout;
 #[path = "info_widget_memory_render.rs"]
 mod memory_render;
 #[path = "info_widget_memory_utils.rs"]
 mod memory_utils;
 #[path = "info_widget_model.rs"]
 pub(crate) mod model;
+#[path = "info_widget_overview.rs"]
+pub(crate) mod overview;
+#[path = "info_widget_settle.rs"]
+mod settle;
 #[path = "info_widget_swarm_background.rs"]
 mod swarm_background;
 #[path = "info_widget_swarm_gallery.rs"]
@@ -35,7 +45,6 @@ mod text;
 mod tips;
 #[path = "info_widget_usage.rs"]
 mod usage_render;
-use super::info_widget_overview::{InfoPageKind, compute_page_layout};
 use super::workspace_map::VisibleWorkspaceRow;
 use crate::ambient::AmbientStatus;
 pub use crate::memory_types::{
@@ -45,6 +54,7 @@ pub use crate::memory_types::{
 use crate::prompt::ContextInfo;
 use crate::protocol::SwarmMemberStatus;
 use memory_render::{render_memory_compact, render_memory_expanded, render_memory_widget};
+use overview::{InfoPageKind, compute_page_layout};
 use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -65,12 +75,11 @@ pub(crate) use git::{edited_paths_from_tool_call, resolve_edited_path};
 pub use graph::{GraphEdge, GraphNode, build_graph_topology, graph_node_score};
 pub(crate) use memory_utils::is_traceworthy_memory_event;
 use memory_utils::{memory_active_summary, memory_last_trace_summary, memory_state_detail};
-use model::{overview_runtime_height, render_model_info, render_model_widget, runtime_has_data};
+use model::{overview_runtime_height, render_model_info, render_model_widget};
 use swarm_background::{render_background_compact, render_background_widget, render_swarm_widget};
 use text::clip;
 pub(crate) use tips::occasional_status_tip;
 use tips::render_tips_widget;
-pub(crate) use usage_render::render_inline_limit_bar;
 pub(crate) use usage_render::render_labeled_bar as render_usage_limit_bar;
 pub(crate) use usage_render::{LimitBar, limit_color as usage_limit_color};
 use usage_render::{render_usage_compact, render_usage_widget};
@@ -273,7 +282,7 @@ pub struct WidgetPlacement {
     pub side: Side,
 }
 
-pub use super::info_widget_layout::Margins;
+pub use layout::Margins;
 
 /// Swarm/subagent status for the info widget
 #[derive(Debug, Default, Clone)]
@@ -558,6 +567,35 @@ pub struct MemoryInfo {
 }
 
 impl MemoryInfo {
+    pub(crate) fn has_activity_sample(&self) -> bool {
+        self.activity.is_some()
+    }
+
+    fn processing_memory(&self) -> bool {
+        self.activity
+            .as_ref()
+            .is_some_and(MemoryActivity::is_processing)
+    }
+
+    fn has_traceworthy_event(&self) -> bool {
+        self.activity.as_ref().is_some_and(|activity| {
+            activity
+                .recent_events
+                .iter()
+                .any(is_traceworthy_memory_event)
+        })
+    }
+
+    pub(crate) fn category_count(&self) -> usize {
+        self.by_category.len()
+    }
+
+    /// Whether the memory card has anything to say: stored memories or a
+    /// live activity.
+    pub(crate) fn has_content(&self) -> bool {
+        self.total_count > 0 || self.activity.is_some()
+    }
+
     pub(crate) fn should_render(&self) -> bool {
         !self.disabled && (self.total_count > 0 || self.activity.is_some())
     }
@@ -578,83 +616,7 @@ impl MemoryInfo {
 
 pub use jcode_tui_mermaid::DiagramInfo;
 
-/// Git repository status for the info widget
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct GitInfo {
-    pub branch: String,
-    pub modified: usize,
-    pub staged: usize,
-    pub untracked: usize,
-    pub ahead: usize,
-    pub behind: usize,
-    /// First few dirty paths with their porcelain status (capped).
-    pub dirty_files: Vec<DirtyFile>,
-    /// Total number of dirty paths, including those beyond the cap.
-    pub dirty_total: usize,
-    /// Lines added across all dirty files (text files only).
-    pub added_total: usize,
-    /// Lines removed across all dirty files (text files only).
-    pub removed_total: usize,
-    /// Absolute repository root, used to match agent-edited paths.
-    pub repo_root: Option<std::path::PathBuf>,
-    /// Most recent commits on HEAD, newest first.
-    pub recent_commits: Vec<RecentCommit>,
-}
-
-/// One commit for the Commits widget.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RecentCommit {
-    /// Abbreviated hash.
-    pub hash: String,
-    pub subject: String,
-    /// Committer time, seconds since the Unix epoch.
-    pub timestamp: i64,
-    /// Not yet on the upstream branch.
-    pub unpushed: bool,
-    pub added: Option<usize>,
-    pub removed: Option<usize>,
-}
-
-/// One dirty path from `git status --porcelain`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DirtyFile {
-    /// Single-letter status shown in the Changes widget: `M`, `A`, `D`, `R`,
-    /// `U` (conflict), or `?` (untracked).
-    pub status: char,
-    pub path: String,
-    /// Lines added, `None` for binary or unknown.
-    pub added: Option<usize>,
-    /// Lines removed, `None` for binary or unknown.
-    pub removed: Option<usize>,
-    /// Last modification time, used for newest-first ordering.
-    pub modified_at: Option<std::time::SystemTime>,
-}
-
-impl DirtyFile {
-    pub fn new(status: char, path: impl Into<String>) -> Self {
-        Self {
-            status,
-            path: path.into(),
-            ..Default::default()
-        }
-    }
-
-    pub fn with_lines(mut self, added: usize, removed: usize) -> Self {
-        self.added = Some(added);
-        self.removed = Some(removed);
-        self
-    }
-}
-
-impl GitInfo {
-    pub fn is_interesting(&self) -> bool {
-        self.modified > 0
-            || self.staged > 0
-            || self.untracked > 0
-            || self.ahead > 0
-            || self.behind > 0
-    }
-}
+pub use super::git_info::{DirtyFile, GitInfo, RecentCommit};
 
 /// Ambient mode status data for the info widget
 #[derive(Debug, Clone)]
@@ -684,6 +646,9 @@ pub struct InfoWidgetData {
     pub historical_context: bool,
     pub queue_mode: Option<bool>,
     pub context_limit: Option<usize>,
+    /// Reactive compaction trigger in tokens, after config overrides. Context
+    /// indicators show it as the denominator so the threshold is visible.
+    pub compaction_threshold_tokens: Option<usize>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
@@ -733,6 +698,11 @@ pub struct InfoWidgetData {
     /// Actual API-reported context tokens (from last streaming response)
     /// When available, this is more accurate than the char-based estimate in context_info
     pub observed_context_tokens: Option<u64>,
+    /// Last provider-reported context tokens persisted with the session, used
+    /// when no live streaming report is available. This is the same counter the
+    /// compaction trigger uses, so the displayed figure never disagrees with it
+    /// the way the char-based estimate in context_info can.
+    pub last_reported_context_tokens: Option<u64>,
     /// Session-level cache read ratio, when the active provider reports cache telemetry.
     pub cache_hit_info: Option<CacheHitInfo>,
     /// Conversation compaction status, shown as a compact rounded status card.
@@ -758,11 +728,19 @@ pub struct CompactionInfo {
     pub is_compacting: bool,
     pub compacted_messages: usize,
     pub active_messages: usize,
-    pub summary_chars: usize,
+    pub summary_tokens: usize,
     pub mode: String,
 }
 
 impl InfoWidgetData {
+    /// Tokenizer family of the displayed model, for estimates before any report.
+    pub(crate) fn token_family(&self) -> crate::message::TokenFamily {
+        self.model.as_deref().map_or_else(
+            crate::message::TokenFamily::default,
+            crate::message::TokenFamily::from_model,
+        )
+    }
+
     fn widget_disabled(kind: WidgetKind) -> bool {
         matches!(kind, WidgetKind::AmbientMode | WidgetKind::Tips)
     }
@@ -792,7 +770,7 @@ impl InfoWidgetData {
                 let mut sections = 0usize;
                 // Status-line facts (model, context %, branch) never count:
                 // the overview only joins detail sections.
-                if runtime_has_data(self) {
+                if self.has_runtime_data() {
                     sections += 1;
                 }
                 if self
@@ -806,7 +784,7 @@ impl InfoWidgetData {
                 if self.queue_mode.is_some() {
                     sections += 1;
                 }
-                if super::info_widget_overview::startup_usage_pending(self)
+                if self.usage_pending_at_startup()
                     || self
                         .usage_info
                         .as_ref()
@@ -852,7 +830,7 @@ impl InfoWidgetData {
             WidgetKind::Compaction => self.compaction_info.is_some(),
             WidgetKind::AmbientMode => false,
             WidgetKind::UsageLimits => {
-                super::info_widget_overview::startup_usage_pending(self)
+                self.usage_pending_at_startup()
                     || self
                         .usage_info
                         .as_ref()
@@ -860,7 +838,7 @@ impl InfoWidgetData {
                         .unwrap_or(false)
             }
             WidgetKind::KvCache => self.cache_hit_info.is_some(),
-            WidgetKind::ModelInfo => runtime_has_data(self),
+            WidgetKind::ModelInfo => self.has_runtime_data(),
             WidgetKind::Tips => false,
             WidgetKind::GitStatus => {
                 self.dual_git_info.is_some()
@@ -890,9 +868,7 @@ impl InfoWidgetData {
                 if self
                     .memory_info
                     .as_ref()
-                    .and_then(|info| info.activity.as_ref())
-                    .map(MemoryActivity::is_processing)
-                    .unwrap_or(false)
+                    .is_some_and(MemoryInfo::processing_memory)
                 {
                     0
                 } else {
@@ -963,406 +939,11 @@ impl InfoWidgetData {
     }
 }
 
-/// State for a single widget instance
-#[derive(Debug, Clone, Default)]
-struct SingleWidgetState {
-    /// Current page index (for widgets with multiple pages)
-    page_index: usize,
-    /// Last time the page advanced
-    last_page_switch: Option<Instant>,
-}
-
-/// Global state for all widgets
-#[derive(Debug, Clone)]
-struct WidgetsState {
-    /// Whether the user has disabled widgets
-    enabled: bool,
-    /// Per-widget state (keyed by WidgetKind)
-    widget_states: HashMap<WidgetKind, SingleWidgetState>,
-    /// Current placements (updated each frame)
-    placements: Vec<WidgetPlacement>,
-    /// Persistent widget anchors (HUD slot memory, including hidden-in-place ones)
-    anchors: Vec<super::info_widget_layout::WidgetAnchor>,
-    /// Settlement tracker: which transcript lines' negative space has stopped
-    /// changing and may therefore host a *new* resident widget.
-    settlement: super::info_widget_settle::SettlementTracker,
-    /// Content width the current anchors were computed at. A width change means
-    /// every transcript line re-wrapped, so anchors (keyed by absolute line) are
-    /// meaningless and must be flushed for one clean global re-layout.
-    anchors_area_width: u16,
-    /// When the SwarmStatus dock was last engaged (placed or anchored). Lets the
-    /// inline swarm strip keep standing down through brief dock dropouts instead
-    /// of popping back for a few frames (which resizes the bottom chrome and
-    /// bounces the transcript).
-    swarm_dock_last_engaged: Option<Instant>,
-    /// `scroll_top` of the previous placement pass and when it last changed.
-    /// A scroll moves content under resident widgets just like streaming does,
-    /// so it counts as churn for a short grace period.
-    last_scroll_top: Option<usize>,
-    last_scroll_change: Option<Instant>,
-}
-
-impl Default for WidgetsState {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            widget_states: HashMap::new(),
-            placements: Vec::new(),
-            anchors: Vec::new(),
-            settlement: super::info_widget_settle::SettlementTracker::default(),
-            anchors_area_width: 0,
-            swarm_dock_last_engaged: None,
-            last_scroll_top: None,
-            last_scroll_change: None,
-        }
-    }
-}
-
-/// Global widget state (for polling across frames)
-static WIDGETS_STATE: Mutex<Option<WidgetsState>> = Mutex::new(None);
-/// Separate widget state for secondary renders (resume preview) so their
-/// placements and animations never disturb the live session's widgets.
-static SECONDARY_WIDGETS_STATE: Mutex<Option<WidgetsState>> = Mutex::new(None);
-
-fn get_or_init_state() -> std::sync::MutexGuard<'static, Option<WidgetsState>> {
-    let state = if super::ui::secondary_render_active() {
-        &SECONDARY_WIDGETS_STATE
-    } else {
-        &WIDGETS_STATE
-    };
-    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.is_none() {
-        *guard = Some(WidgetsState::default());
-    }
-    guard
-}
-
-/// Toggle widget visibility (user preference)
-pub fn toggle_enabled() {
-    let mut guard = get_or_init_state();
-    if let Some(state) = guard.as_mut() {
-        state.enabled = !state.enabled;
-    }
-}
-
-/// Check if widget is enabled by user
-pub fn is_enabled() -> bool {
-    get_or_init_state()
-        .as_ref()
-        .map(|s| s.enabled)
-        .unwrap_or(true)
-}
-
-/// Intersect the dock-gating `reliable` margin profile with the settlement
-/// profile, so a *new* resident widget can only be placed next to transcript
-/// lines whose negative space has stopped changing (never the streaming tail or
-/// a re-rendering region). Also flushes all anchors when the content width
-/// changes: a re-wrap moves every transcript line, so line-keyed anchors are
-/// meaningless and one clean global re-layout is better than widgets drawn over
-/// reflowed text.
-pub fn apply_settlement(margins: &mut Margins, area_width: u16) {
-    let mut guard = get_or_init_state();
-    let Some(state) = guard.as_mut() else {
-        return;
-    };
-    if state.anchors_area_width != area_width {
-        state.anchors.clear();
-        state.settlement.reset();
-        state.anchors_area_width = area_width;
-    }
-    let settled = state.settlement.observe(margins, area_width);
-    // A scroll moves content under resident widgets just like streaming does,
-    // so it counts as churn for a short grace period after the last change.
-    if state.last_scroll_top != Some(margins.scroll_top) {
-        if state.last_scroll_top.is_some() {
-            state.last_scroll_change = Some(Instant::now());
-        }
-        state.last_scroll_top = Some(margins.scroll_top);
-    }
-    margins.content_churning |= state
-        .last_scroll_change
-        .is_some_and(|at| at.elapsed() < SCROLL_CHURN_GRACE);
-    // Settlement exists to keep new widgets off content that is still
-    // re-rendering. It counts frames, but an idle client draws only one frame
-    // per state change, so a layout change while idle (History adding the
-    // `mcp:` header row) never accumulated the frames to settle: the free
-    // space stayed "unsettled" and the Overview could not be re-homed until
-    // some unrelated activity redrew a few times. When nothing is churning,
-    // the current widths are already final.
-    if !margins.content_churning {
-        return;
-    }
-    intersect_widths(&mut margins.right_reliable, &settled.right);
-    if margins.centered {
-        intersect_widths(&mut margins.left_reliable, &settled.left);
-    }
-}
-
-/// Per-row minimum of `dst` and `src`. If `dst` is empty (no look-ahead
-/// profile), it becomes `src` so settlement still gates docking on its own.
-fn intersect_widths(dst: &mut Vec<u16>, src: &[u16]) {
-    if dst.is_empty() {
-        *dst = src.to_vec();
-        return;
-    }
-    for (row, d) in dst.iter_mut().enumerate() {
-        *d = (*d).min(src.get(row).copied().unwrap_or(0));
-    }
-}
-
-/// Calculate widget placements for multiple widgets
-/// Returns a list of placements for widgets that fit
-pub fn calculate_placements(
-    messages_area: Rect,
-    margins: &Margins,
-    data: &InfoWidgetData,
-) -> Vec<WidgetPlacement> {
-    let mut guard = get_or_init_state();
-    let state = match guard.as_mut() {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-
-    let outcome = calculate_placements_with_cloud_reflow(
-        messages_area,
-        margins,
-        data,
-        state.enabled,
-        &state.anchors,
-    );
-    state.anchors = outcome.anchors;
-    state.placements = outcome.visible.clone();
-    if swarm_dock_engaged(state) {
-        state.swarm_dock_last_engaged = Some(Instant::now());
-    }
-    outcome.visible
-}
-
-/// Repack cloud details only when asynchronously loaded Overview rows cannot
-/// grow inside their original anchor. Keep the resident layout unless a fresh
-/// priority pass fits the full Overview without losing primary visible widgets.
-/// The supplemental directory inventory may yield when the viewport is short.
-pub(super) fn calculate_placements_with_cloud_reflow(
-    area: Rect,
-    margins: &Margins,
-    data: &InfoWidgetData,
-    enabled: bool,
-    anchors: &[super::info_widget_layout::WidgetAnchor],
-) -> super::info_widget_layout::PlacementOutcome {
-    use super::info_widget_layout::calculate_placements_anchored;
-    let resident = calculate_placements_anchored(area, margins, data, enabled, anchors);
-    if data.cloud_info.is_none() || anchors.is_empty() {
-        return resident;
-    }
-    let Some(overview) = resident
-        .visible
-        .iter()
-        .find(|p| p.kind == WidgetKind::Overview)
-    else {
-        return resident;
-    };
-    let needed =
-        calculate_widget_height(WidgetKind::Overview, data, overview.rect.width, area.height);
-    if overview.rect.height >= needed {
-        return resident;
-    }
-    let fresh = calculate_placements_anchored(area, margins, data, enabled, &[]);
-    let fits = fresh.visible.iter().any(|p| {
-        p.kind == WidgetKind::Overview
-            && p.rect.height
-                >= calculate_widget_height(WidgetKind::Overview, data, p.rect.width, area.height)
-    });
-    let preserves = resident.visible.iter().all(|old| {
-        old.kind == WidgetKind::CloudDirectories
-            || fresh.visible.iter().any(|new| new.kind == old.kind)
-    });
-    if fits && preserves { fresh } else { resident }
-}
-
-/// How long after a scroll the transcript still counts as moving for resident
-/// widgets: a covered slot during or just after a scroll is waited out in
-/// place rather than re-homed.
-const SCROLL_CHURN_GRACE: Duration = Duration::from_millis(1500);
-
-/// How long the inline swarm strip keeps standing down after the SwarmStatus
-/// dock disengages. The dock's placement naturally churns while content
-/// streams past it (hidden-in-place blinks, anchor abandonment, re-homing a
-/// few frames later). Each strip appearance adds a row to the bottom chrome
-/// and shoves the whole transcript up, so reacting instantly turns that churn
-/// into visible up/down flicker. Standing down through a short linger converts
-/// the churn into "strip stays hidden"; a genuine dock removal only delays the
-/// strip's return by this much, once.
-const SWARM_STRIP_STAND_DOWN_LINGER: Duration = Duration::from_millis(2000);
-
-/// Whether the SwarmStatus dock widget is engaged: either actually placed, or
-/// hidden-in-place behind a live anchor (a wide transcript line is momentarily
-/// covering its slot and it will pop back into the same spot).
-fn swarm_dock_engaged(state: &WidgetsState) -> bool {
-    state.enabled
-        && (state
-            .placements
-            .iter()
-            .any(|p| p.kind == WidgetKind::SwarmStatus)
-            || state
-                .anchors
-                .iter()
-                .any(|a| a.placement.kind == WidgetKind::SwarmStatus))
-}
-
-/// Whether the inline swarm strip (above the status line) should stand down
-/// because the SwarmStatus dock widget (margin HUD) is showing - or was very
-/// recently showing - the same agents.
-///
-/// The strip is built before widget placement runs each frame, so this checks
-/// the previous frame's state, like [`widget_visible_facts`]. Engagement
-/// includes hidden-in-place anchors, and disengagement is debounced by
-/// [`SWARM_STRIP_STAND_DOWN_LINGER`]: both exist so the dock's frame-to-frame
-/// placement churn cannot toggle the strip row on and off, which resizes the
-/// bottom chrome and makes the whole transcript jump up and down (flicker).
-/// One frame of overlap when the dock first appears is visually harmless.
-pub(crate) fn swarm_strip_stands_down_for_dock() -> bool {
-    let guard = get_or_init_state();
-    let Some(state) = guard.as_ref() else {
-        return false;
-    };
-    if swarm_dock_engaged(state) {
-        return true;
-    }
-    state
-        .swarm_dock_last_engaged
-        .is_some_and(|at| at.elapsed() < SWARM_STRIP_STAND_DOWN_LINGER)
-}
-
-/// Forget the per-frame placement/anchor state because the widget render pass
-/// was skipped this frame (idle donut takeover, or no widget data at all).
-/// Without this, `state.placements` keeps reporting widgets from the last
-/// widget-bearing frame: the swarm strip would stand down for a dock that is
-/// no longer drawn, leaving the managed agents visible nowhere.
-pub(crate) fn note_widget_pass_skipped() {
-    let mut guard = get_or_init_state();
-    if let Some(state) = guard.as_mut() {
-        state.placements.clear();
-        state.anchors.clear();
-        state.swarm_dock_last_engaged = None;
-    }
-}
-
-/// Clear the remembered per-frame widget placements (and anchors). Tests that
-/// assert on placement-dependent behavior (e.g. the swarm strip standing down
-/// while the dock is visible) call this so state from earlier tests in the
-/// same process cannot leak into their frame.
-#[cfg(test)]
-pub(crate) fn clear_widget_placements_for_tests() {
-    let mut guard = get_or_init_state();
-    if let Some(state) = guard.as_mut() {
-        state.placements.clear();
-        state.anchors.clear();
-        state.swarm_dock_last_engaged = None;
-    }
-}
-
-/// Calculate the height needed for a specific widget type
-pub(crate) fn calculate_widget_height(
-    kind: WidgetKind,
-    data: &InfoWidgetData,
-    width: u16,
-    max_height: u16,
-) -> u16 {
-    let inner_width = width.saturating_sub(2) as usize;
-    let border_height = 2u16;
-
-    let content_height = match kind {
-        WidgetKind::WorkspaceMap => {
-            if data.workspace_rows.is_empty() {
-                return 0;
-            }
-            let (_preferred_w, preferred_h) =
-                super::workspace_map_widget::preferred_size(&data.workspace_rows);
-            preferred_h.min(max_height.saturating_sub(border_height))
-        }
-        WidgetKind::Overview => {
-            let mut overview = data.clone();
-            // Keep memory in its own widget so graph rendering stays focused.
-            overview.memory_info = None;
-            let inner_h = max_height.saturating_sub(border_height);
-            let layout = compute_page_layout(&overview, inner_width, inner_h);
-            if layout.max_page_height == 0 {
-                // Taller than the pocket even as a compact page. Rather than
-                // dropping the Overview (and with it usage limits and changes,
-                // which it merges in place of their own widgets), take the
-                // pocket and let the renderer truncate the compact page. The
-                // sections are ordered by importance, so the tail is what goes.
-                let full = compute_page_layout(&overview, inner_width, u16::MAX);
-                if full.max_page_height == 0
-                    || inner_h
-                        < WidgetKind::Overview
-                            .min_height()
-                            .saturating_sub(border_height)
-                {
-                    return 0;
-                }
-                return max_height;
-            }
-            layout.max_page_height
-        }
-        WidgetKind::Diagrams => {
-            if data.diagrams.is_empty() {
-                return 0;
-            }
-            // Use the full available height so the image fills the panel
-            max_height.saturating_sub(border_height)
-        }
-        // Text widgets: the height is whatever the body actually renders at
-        // the full available height, so estimate and render can never drift.
-        _ => {
-            // Rendering is permissive (e.g. the swarm widget still draws a
-            // session list), but layout only admits widgets with data.
-            if !data.has_data_for(kind) {
-                return 0;
-            }
-            let inner = Rect::new(
-                0,
-                0,
-                width.saturating_sub(2),
-                max_height.saturating_sub(border_height),
-            );
-            let framed = render_widget_content(kind, data, inner);
-            if framed.is_empty() {
-                return 0;
-            }
-            framed.lines.len() as u16
-        }
-    };
-
-    let total = content_height + border_height;
-    total.min(max_height)
-}
-
-/// Legacy API for backwards compatibility - will be removed
-/// Calculate the widget layout based on available space
-/// Returns the Rect where the widget should be drawn, or None if it shouldn't show
-#[deprecated(note = "Use calculate_placements instead")]
-pub fn calculate_layout(
-    messages_area: Rect,
-    free_widths: &[u16],
-    data: &InfoWidgetData,
-) -> Option<Rect> {
-    let margins = Margins {
-        right_widths: free_widths.to_vec(),
-        left_widths: Vec::new(),
-        centered: false,
-        ..Default::default()
-    };
-    let placements = calculate_placements(messages_area, &margins, data);
-    placements.first().map(|p| p.rect)
-}
-
-/// Render all placed widgets
-pub fn render_all(frame: &mut Frame, placements: &[WidgetPlacement], data: &InfoWidgetData) {
-    for placement in placements {
-        render_single_widget(frame, placement, data);
-    }
-}
+#[path = "info_widget/placement_state.rs"]
+mod placement_state;
+pub(crate) use layout::calculate_widget_height;
+#[allow(unused_imports)]
+pub use placement_state::*;
 
 /// Shrink a text widget's box so its bottom border hugs the rendered body.
 /// The slot can be taller than the body (Overview reserves its tallest page,
@@ -1410,9 +991,9 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         let Some(framed) = render_overview_framed(data, inner) else {
             return;
         };
-        let (rect, inner) = tight_rects(rect, inner, framed.lines.len());
+        let (rect, inner) = tight_rects(rect, inner, framed.row_count());
         frame.render_widget(framed.apply(block, rect.width), rect);
-        frame.render_widget(Paragraph::new(framed.lines), inner);
+        frame.render_widget(Paragraph::new(framed.into_lines()), inner);
         return;
     }
     if placement.kind == WidgetKind::WorkspaceMap {
@@ -1435,9 +1016,9 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
     if framed.is_empty() {
         return;
     }
-    let (rect, inner) = tight_rects(rect, inner, framed.lines.len());
+    let (rect, inner) = tight_rects(rect, inner, framed.row_count());
     frame.render_widget(framed.apply(block, rect.width), rect);
-    frame.render_widget(Paragraph::new(framed.lines), inner);
+    frame.render_widget(Paragraph::new(framed.into_lines()), inner);
 }
 
 fn diagram_footer(data: &InfoWidgetData) -> String {
@@ -1478,20 +1059,35 @@ fn overview_footer(data: &InfoWidgetData) -> String {
     if data.context_info_stale {
         return "context syncing".into();
     }
-    let used = data.observed_context_tokens.or_else(|| {
-        data.context_info
-            .as_ref()
-            .filter(|info| info.total_chars > 0)
-            .map(|info| info.estimated_tokens() as u64)
-    });
+    let used = data
+        .observed_context_tokens
+        .or(data.last_reported_context_tokens)
+        .or_else(|| {
+            data.context_info
+                .as_ref()
+                .filter(|info| info.total_chars > 0)
+                .map(|info| info.estimated_tokens(data.token_family()) as u64)
+        });
+    let reported =
+        data.observed_context_tokens.is_some() || data.last_reported_context_tokens.is_some();
     match (used, data.context_limit) {
+        (Some(used), _) if data.compaction_threshold_tokens.is_some_and(|t| t > 0) => {
+            let threshold = data.compaction_threshold_tokens.unwrap_or_default() as u64;
+            let estimate = if reported { "" } else { "~" };
+            format!(
+                "{}{estimate}{}/{} to compact",
+                if data.historical_context {
+                    "saved "
+                } else {
+                    ""
+                },
+                crate::kv_cache_monitor::format_token_count(used),
+                crate::kv_cache_monitor::format_token_count(threshold),
+            )
+        }
         (Some(used), Some(limit)) => {
             let left = (limit as u64).saturating_sub(used);
-            let estimate = if data.observed_context_tokens.is_none() {
-                "~"
-            } else {
-                ""
-            };
+            let estimate = if reported { "" } else { "~" };
             format!(
                 "{}{estimate}{} ctx left",
                 if data.historical_context {
@@ -1612,240 +1208,10 @@ fn render_overview_framed(data: &InfoWidgetData, inner: Rect) -> Option<Framed> 
     }
     Some(framed.footer_if_empty(frame::dim(overview_footer(data))))
 }
-#[cfg(test)]
-#[derive(Debug, Clone)]
-struct MemorySubgraph {
-    nodes: Vec<GraphNode>,
-    _edges: Vec<GraphEdge>,
-}
-#[cfg(test)]
-fn select_contextual_subgraph(
-    info: &MemoryInfo,
-    max_nodes: usize,
-    max_edges: usize,
-) -> Option<MemorySubgraph> {
-    if info.graph_nodes.is_empty() || max_nodes == 0 {
-        return None;
-    }
-    let node_count = info.graph_nodes.len();
-    let center_idx = pick_subgraph_center(info)?;
-    let mut neighbors: Vec<Vec<(usize, usize)>> = vec![Vec::new(); node_count];
-    for (edge_idx, edge) in info.graph_edges.iter().enumerate() {
-        if edge.source >= node_count || edge.target >= node_count {
-            continue;
-        }
-        neighbors[edge.source].push((edge.target, edge_idx));
-        neighbors[edge.target].push((edge.source, edge_idx));
-    }
-    let mut selected = Vec::with_capacity(max_nodes.min(node_count));
-    let mut selected_set: HashSet<usize> = HashSet::new();
-    let mut queue = std::collections::VecDeque::new();
-    selected.push(center_idx);
-    selected_set.insert(center_idx);
-    queue.push_back(center_idx);
-    while let Some(current) = queue.pop_front() {
-        if selected.len() >= max_nodes {
-            break;
-        }
-        let mut ranked = neighbors[current].clone();
-        ranked.sort_by(|(a_idx, a_edge), (b_idx, b_edge)| {
-            edge_kind_priority(&info.graph_edges[*b_edge].kind)
-                .cmp(&edge_kind_priority(&info.graph_edges[*a_edge].kind))
-                .then_with(|| {
-                    graph_node_score(&info.graph_nodes[*b_idx])
-                        .partial_cmp(&graph_node_score(&info.graph_nodes[*a_idx]))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| a_idx.cmp(b_idx))
-        });
-        for (next_idx, _) in ranked {
-            if selected.len() >= max_nodes {
-                break;
-            }
-            if selected_set.insert(next_idx) {
-                selected.push(next_idx);
-                queue.push_back(next_idx);
-            }
-        }
-    }
-
-    if selected.len() < max_nodes {
-        let mut remaining: Vec<usize> = (0..node_count)
-            .filter(|idx| !selected_set.contains(idx))
-            .collect();
-        remaining.sort_by(|a, b| {
-            graph_node_score(&info.graph_nodes[*b])
-                .partial_cmp(&graph_node_score(&info.graph_nodes[*a]))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.cmp(b))
-        });
-        for idx in remaining {
-            if selected.len() >= max_nodes {
-                break;
-            }
-            selected_set.insert(idx);
-            selected.push(idx);
-        }
-    }
-
-    let mut old_to_new = HashMap::new();
-    let mut sub_nodes = Vec::with_capacity(selected.len());
-    for (new_idx, old_idx) in selected.iter().copied().enumerate() {
-        old_to_new.insert(old_idx, new_idx);
-        sub_nodes.push(info.graph_nodes[old_idx].clone());
-    }
-
-    let center_new = old_to_new.get(&center_idx).copied().unwrap_or(0);
-    let mut dedup: HashSet<(usize, usize, String)> = HashSet::new();
-    let mut sub_edges: Vec<GraphEdge> = info
-        .graph_edges
-        .iter()
-        .filter_map(|edge| {
-            let source = *old_to_new.get(&edge.source)?;
-            let target = *old_to_new.get(&edge.target)?;
-            if source == target {
-                return None;
-            }
-            if !dedup.insert((source, target, edge.kind.clone())) {
-                return None;
-            }
-            Some(GraphEdge {
-                source,
-                target,
-                kind: edge.kind.clone(),
-            })
-        })
-        .collect();
-
-    sub_edges.sort_by(|a, b| {
-        let a_center = a.source == center_new || a.target == center_new;
-        let b_center = b.source == center_new || b.target == center_new;
-        b_center
-            .cmp(&a_center)
-            .then_with(|| edge_kind_priority(&b.kind).cmp(&edge_kind_priority(&a.kind)))
-            .then_with(|| a.source.cmp(&b.source))
-            .then_with(|| a.target.cmp(&b.target))
-    });
-    if sub_edges.len() > max_edges {
-        sub_edges.truncate(max_edges);
-    }
-
-    Some(MemorySubgraph {
-        nodes: sub_nodes,
-        _edges: sub_edges,
-    })
-}
-
-#[cfg(test)]
-fn pick_subgraph_center(info: &MemoryInfo) -> Option<usize> {
-    let mut best_idx: Option<usize> = None;
-    let mut best_score: f32 = -1.0;
-
-    for (idx, node) in info.graph_nodes.iter().enumerate() {
-        let mut score = graph_node_score(node);
-        if node.kind == "tag" || node.kind == "cluster" {
-            score -= 0.75;
-        }
-        if !node.is_active {
-            score -= 1.0;
-        }
-        if score > best_score {
-            best_score = score;
-            best_idx = Some(idx);
-        }
-    }
-
-    best_idx
-}
-
-#[cfg(test)]
-fn edge_kind_priority(kind: &str) -> u8 {
-    match kind {
-        "contradicts" => 6,
-        "supersedes" => 5,
-        "derived_from" => 4,
-        "relates_to" => 3,
-        "in_cluster" => 2,
-        "has_tag" => 1,
-        _ => 1,
-    }
-}
-
-/// Render content for a specific widget type: body rows plus border text.
-fn render_widget_content(kind: WidgetKind, data: &InfoWidgetData, inner: Rect) -> Framed {
-    let framed = match kind {
-        // Image/map/paged widgets are handled specially in render_single_widget.
-        WidgetKind::Diagrams | WidgetKind::WorkspaceMap | WidgetKind::Overview => {
-            return Framed::default();
-        }
-        WidgetKind::MemoryActivity => render_memory_widget(data, inner),
-        WidgetKind::SwarmStatus => render_swarm_widget(data, inner),
-        WidgetKind::BackgroundTasks => render_background_widget(data, inner),
-        WidgetKind::Compaction => render_compaction_widget(data, inner),
-        WidgetKind::AmbientMode => render_ambient_widget(data, inner),
-        WidgetKind::UsageLimits if super::info_widget_overview::startup_usage_pending(data) => {
-            Framed::body(
-                startup_usage_lines(inner.width)
-                    .into_iter()
-                    .skip(1)
-                    .collect(),
-            )
-            .title(frame::label("OpenAI limits"))
-            .footer(frame::dim("first snapshot"))
-        }
-        WidgetKind::UsageLimits => render_usage_widget(data, inner),
-        WidgetKind::KvCache => render_kv_cache_widget(data, inner),
-        WidgetKind::ModelInfo => render_model_widget(data, inner),
-        WidgetKind::Tips => render_tips_widget(inner),
-        WidgetKind::GitStatus => render_changes_framed(data, inner),
-        WidgetKind::CloudVm => super::info_widget_cloud::render_cloud_widget(data, inner),
-        WidgetKind::CloudDirectories => {
-            super::info_widget_cloud_directories::render_cloud_directories(data, inner)
-        }
-        WidgetKind::Commits => render_commits_widget(data, inner),
-    };
-    framed.settle()
-}
-
-fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
-    let Some(info) = data.compaction_info.as_ref() else {
-        return Framed::default();
-    };
-    let title_color = if info.is_compacting {
-        rgb(255, 220, 140)
-    } else {
-        rgb(110, 210, 140)
-    };
-    let status = if info.is_compacting {
-        "compacting"
-    } else {
-        "compacted"
-    };
-    let summary_tokens = (info.summary_chars / crate::compaction::CHARS_PER_TOKEN)
-        .max(usize::from(info.summary_chars > 0));
-    let detail = format!(
-        "{} old · {} active",
-        info.compacted_messages, info.active_messages
-    );
-    let summary = format!(
-        "~{} tok",
-        crate::kv_cache_monitor::format_token_count(summary_tokens as u64)
-    );
-    let footer = if info.mode.trim().is_empty() {
-        summary
-    } else {
-        format!("{summary} · {}", info.mode.trim())
-    };
-    Framed::body(vec![Line::from(Span::styled(
-        clip(&detail, inner.width as usize),
-        Style::default().fg(rgb(180, 180, 190)),
-    ))])
-    .title(Line::from(vec![
-        frame::label("Compaction "),
-        Span::styled(status, Style::default().fg(title_color).bold()),
-    ]))
-    .footer(frame::dim(footer))
-}
+#[path = "info_widget/subgraph_render.rs"]
+mod subgraph_render;
+#[allow(unused_imports)]
+pub(crate) use subgraph_render::*;
 
 #[path = "info_widget_cache.rs"]
 mod cache_render;
@@ -2075,7 +1441,7 @@ fn render_sections(
 
     // Memory info
     if let Some(info) = &data.memory_info
-        && (info.total_count > 0 || info.activity.is_some())
+        && info.has_content()
     {
         if matches!(focus, Some(InfoPageKind::MemoryExpanded)) {
             lines.extend(render_memory_expanded(info, inner));
@@ -2092,20 +1458,14 @@ fn render_sections(
     }
 
     // Usage info (subscription limits)
-    lines.extend(super::info_widget_overview::render_overview_usage(
-        data,
-        inner.width,
-    ));
+    lines.extend(overview::render_overview_usage(data, inner.width));
 
     // Changed files (the detail behind the line's git counts).
     if data.dual_git_info.is_some() || data.git_info.as_ref().is_some_and(changes_has_data) {
         lines.extend(render_git_widget(data, inner));
     }
 
-    lines.extend(super::info_widget_cloud::render_cloud_summary(
-        data,
-        inner.width,
-    ));
+    lines.extend(cloud::render_cloud_summary(data, inner.width));
     lines
 }
 
@@ -2120,6 +1480,10 @@ mod cloud_reflow_tests;
 #[cfg(test)]
 #[path = "info_widget_startup_tests.rs"]
 mod startup_tests;
+
+#[cfg(test)]
+#[path = "info_widget_subgraph_tests.rs"]
+mod subgraph_tests;
 
 #[cfg(test)]
 #[path = "info_widget_tests.rs"]

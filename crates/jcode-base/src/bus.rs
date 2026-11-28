@@ -10,7 +10,7 @@ pub use jcode_batch_types::{BatchProgress, BatchSubcallProgress, BatchSubcallSta
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
@@ -122,6 +122,10 @@ pub struct FileTouch {
     pub summary: Option<String>,
     /// Optional compact preview of what changed. Keep this short and already truncated.
     pub detail: Option<String>,
+    /// Lines added by this touch (0 for reads).
+    pub added: u64,
+    /// Lines removed by this touch (0 for reads).
+    pub removed: u64,
 }
 
 /// Streaming output tail for a swarm worker session, used to render the inline
@@ -301,6 +305,9 @@ pub struct SwarmAwaitCompleted {
     pub notify: bool,
     /// Wake an idle requesting agent (or soft-interrupt it when busy).
     pub wake: bool,
+    /// Periodic progress check-in for an await that is still pending, not a
+    /// result. Keeps a long wait from silencing its coordinator.
+    pub checkin: bool,
 }
 
 /// A worker report that must reach its owner's model, not just its UI.
@@ -420,6 +427,12 @@ pub enum SessionUpdateStatus {
 
 #[derive(Clone, Debug)]
 pub enum BusEvent {
+    /// A provider, model, effort or mode change that was just written into the
+    /// session's chat log.
+    SettingChange {
+        session_id: String,
+        message: String,
+    },
     ToolUpdated(ToolEvent),
     TodoUpdated(TodoEvent),
     /// A session's stored todo list, plan or goals were rewritten. Carries the
@@ -445,6 +458,10 @@ pub enum BusEvent {
     BackgroundTaskStalled(BackgroundTaskStalled),
     /// A backgrounded `swarm await_members` watcher reached a terminal result.
     SwarmAwaitCompleted(SwarmAwaitCompleted),
+    CacheKeepalive {
+        session_id: String,
+        usage: jcode_message_types::CacheKeepaliveUsage,
+    },
     /// A spawned worker finished and its owner needs to coordinate next steps.
     SwarmWorkerReported(SwarmWorkerReported),
     /// Usage report fetched from providers
@@ -469,6 +486,10 @@ pub enum BusEvent {
     UpdateStatus(UpdateStatus),
     /// Interactive client update status for a specific session
     SessionUpdateStatus(SessionUpdateStatus),
+    /// A session's turn reservation was released. Carries the session id.
+    /// Queued after-yield prompts wait for exactly this, whichever owner
+    /// (client, swarm wake, background completion) ran the turn.
+    TurnReleased(String),
     /// External dictation command completed with transcript text
     DictationCompleted {
         dictation_id: String,
@@ -487,11 +508,23 @@ pub enum BusEvent {
     VoiceInputWake,
     /// Background compaction task finished (check_and_apply should be called)
     CompactionFinished,
+    /// A session applied a finished compaction. All of its attached clients
+    /// need the same result, not only the client that consumed the worker.
+    CompactionApplied {
+        session_id: String,
+        event: Box<crate::protocol::ServerEvent>,
+    },
+    /// A background compaction task started summarizing. Carries the trigger
+    /// label so attached clients can render a running divider without polling.
+    CompactionStarted {
+        trigger: String,
+        pre_tokens: u64,
+    },
     /// Provider's available models list may have changed
     ModelsUpdated,
     /// A single route's usage changed. Carries its snapshot so busy agents do
     /// not prevent clients from refreshing cached picker metadata.
-    ModelUsageUpdated(crate::provider::ModelRoute),
+    ModelUsageUpdated(jcode_provider_core::ModelRoute),
     /// Synchronous provider activation after a login/import has completed, so
     /// the model picker can stop hiding the stale pre-auth catalog.
     AuthCatalogRefreshReady,
@@ -530,6 +563,7 @@ impl BusEvent {
             Self::BackgroundTaskProgress(event) => Some(&event.session_id),
             Self::BackgroundTaskStalled(event) => Some(&event.session_id),
             Self::SwarmAwaitCompleted(event) => Some(&event.session_id),
+            Self::CacheKeepalive { session_id, .. } => Some(session_id),
             Self::SwarmWorkerReported(event) => Some(&event.session_id),
             Self::UiActivity(event) => event.session_id.as_deref(),
             Self::ToolUpdated(event) => Some(&event.session_id),
@@ -582,7 +616,8 @@ fn latest_update_status() -> &'static Mutex<Option<UpdateStatus>> {
 #[derive(Default)]
 struct ModelsUpdatedPublishState {
     last_published_at: Option<Instant>,
-    publish_pending: bool,
+    // A cancelled debounce task leaves no live timer to coalesce with.
+    pending_timer: Weak<()>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -668,6 +703,7 @@ impl Bus {
                 | BusEvent::BackgroundTaskProgress(_)
                 | BusEvent::BackgroundTaskStalled(_)
                 | BusEvent::SwarmAwaitCompleted(_)
+                | BusEvent::CacheKeepalive { .. }
                 | BusEvent::SwarmWorkerReported(_)
                 | BusEvent::UiActivity(_)
                 | BusEvent::ToolUpdated(_)
@@ -717,7 +753,7 @@ impl Bus {
         // A models-updated publish means some provider catalog changed
         // out-of-band. Invalidate memoized route catalogs so the next render
         // rebuilds from the new cache instead of serving a stale memo.
-        crate::provider::catalog_scheduler::bump_catalog_generation();
+        crate::catalog_generation::bump();
 
         let delay = {
             let now = Instant::now();
@@ -734,24 +770,29 @@ impl Bus {
                     let elapsed = now.saturating_duration_since(last);
                     if elapsed >= MODELS_UPDATED_DEBOUNCE {
                         state.last_published_at = Some(now);
+                        state.pending_timer = Weak::new();
                         None
-                    } else if state.publish_pending {
+                    } else if state.pending_timer.strong_count() != 0 {
                         return;
                     } else {
-                        state.publish_pending = true;
-                        Some(MODELS_UPDATED_DEBOUNCE - elapsed)
+                        let timer = Arc::new(());
+                        state.pending_timer = Arc::downgrade(&timer);
+                        Some((MODELS_UPDATED_DEBOUNCE - elapsed, timer))
                     }
                 }
             }
         };
 
-        if let Some(delay) = delay {
+        if let Some((delay, timer)) = delay {
             let Ok(handle) = tokio::runtime::Handle::try_current() else {
                 let mut state = self
                     .models_updated_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.publish_pending = false;
+                if !state.pending_timer.ptr_eq(&Arc::downgrade(&timer)) {
+                    return;
+                }
+                state.pending_timer = Weak::new();
                 state.last_published_at = Some(Instant::now());
                 drop(state);
                 self.publish(BusEvent::ModelsUpdated);
@@ -768,7 +809,10 @@ impl Bus {
                 let mut state = state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                state.publish_pending = false;
+                if !state.pending_timer.ptr_eq(&Arc::downgrade(&timer)) {
+                    return;
+                }
+                state.pending_timer = Weak::new();
                 state.last_published_at = Some(Instant::now());
                 drop(state);
                 if sender.send(BusEvent::ModelsUpdated).is_err() {
@@ -795,6 +839,7 @@ mod tests {
             notification: "accepted continuation".into(),
             notify: true,
             wake: true,
+            checkin: false,
         })
     }
 
@@ -880,6 +925,30 @@ mod tests {
         assert!(bus.runtime_delivery_checkpoint().is_none());
         drop(receiver.try_recv().unwrap());
         assert!(bus.runtime_delivery_checkpoint().is_some());
+    }
+
+    #[test]
+    fn cancelled_debounce_does_not_suppress_next_models_update() {
+        let runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap()
+        };
+        let bus = Bus::new_isolated_for_tests();
+        let mut rx = bus.subscribe();
+        runtime().block_on(async {
+            bus.publish_models_updated();
+            bus.publish_models_updated();
+            assert!(matches!(rx.try_recv(), Ok(BusEvent::ModelsUpdated)));
+        });
+        runtime().block_on(async {
+            bus.publish_models_updated();
+            assert!(matches!(
+                timeout(Duration::from_secs(2), rx.recv()).await,
+                Ok(Ok(BusEvent::ModelsUpdated))
+            ));
+        });
     }
 
     #[tokio::test]

@@ -79,7 +79,7 @@ state. An OAuth token that has since auto-refreshed can still show a days-old
 "validation failed / expired" entry here.
 
 To avoid presenting stale records as current fact, `format_record_label`
-(`crates/jcode-base/src/auth/validation.rs`) flags any record older than
+(`crates/jcode-base/src/auth/status/validation.rs`) flags any record older than
 `doctor::VALIDATION_STALE_AFTER_MS` (7 days) as `stale, ... re-validate`. Treat a
 stale record as "unknown, re-check", never as ground truth. Re-validate with:
 
@@ -101,7 +101,7 @@ jcode auth-test --provider <id>
 On a fresh install jcode can **reuse logins left behind by other coding
 agents**, both OAuth tokens and API keys. Detection is consent-gated: jcode
 lists the sources it found and only reads them after you approve each one
-(`crates/jcode-base/src/auth/external.rs`, `unconsented_sources` /
+(`crates/jcode-base/src/auth/providers/external.rs`, `unconsented_sources` /
 `trust_external_auth_source`). Nothing is copied into jcode's own stores; the
 external file is read in place.
 
@@ -125,3 +125,17 @@ Notes:
 - Other tool-specific importers exist for Claude Code, Codex, Gemini CLI,
   GitHub Copilot, and Cursor (see `auth/claude.rs`, `auth/codex.rs`,
   `auth/gemini.rs`, `auth/copilot.rs`, `auth/cursor.rs`).
+- Grok Build keeps its login in `~/.jcode/grok_build_auth.json`. The Grok CLI's
+  `$GROK_HOME/auth.json` (default `~/.grok/auth.json`) is only read, and refreshed
+  tokens only written back, after the user trusts it (source id
+  `grok_cli_auth_json`). Cursor's `auth.json` is the same: trusting it also lets
+  jcode write refreshed tokens back, merged into the existing JSON so Cursor's
+  other keys survive.
+- Cursor keeps its own login in `~/.jcode/cursor-login.json` (mode 0600, one
+  labelled account). `jcode login --provider cursor` signs in through
+  `cursor.com/loginDeepControl` and polls for approval, as the Cursor agent CLI
+  does; `--from-app` copies the sign-in of the local Cursor app (`state.vscdb`,
+  else the Cursor CLI's `auth.json`) once, read-only, and says exactly what is
+  missing when Cursor is absent or signed out. The login refreshes in place. It
+  never joins Auto-switch until the owner places it. Not supported: several
+  Cursor accounts at once.

@@ -133,6 +133,11 @@ export function summarize(event: ApiEvent): string {
       return `${event.input + event.output} tokens`;
     case "permission_request":
       return event.request_id;
+    case "background_tasks":
+      return event.snapshot.tasks.map(task => {
+        if (task.cancelled === true) return "Cancelled";
+        return task.last_output_line?.trim() ?? task.exit_code?.toFixed(0) ?? task.label;
+      }).join("\n");
     default:
       return event.ev;
   }

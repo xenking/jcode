@@ -1,0 +1,116 @@
+{
+ "five_hour": null,
+ "seven_day": {
+  "utilization": 4.0,
+  "resets_at": "2026-11-30T23:00:00.566357+00:00",
+  "limit_dollars": null,
+  "used_dollars": null,
+  "remaining_dollars": null,
+  "locked_reason": null
+ },
+ "seven_day_oauth_apps": null,
+ "seven_day_opus": null,
+ "seven_day_sonnet": null,
+ "seven_day_cowork": null,
+ "seven_day_omelette": null,
+ "tangelo": null,
+ "iguana_necktie": null,
+ "omelette_promotional": null,
+ "nimbus_quill": null,
+ "cinder_cove": null,
+ "copper_kite": null,
+ "brass_thimble": null,
+ "harbor_lantern": null,
+ "maple_sundial": null,
+ "wattle_ember": null,
+ "promo_credits": null,
+ "amber_ladder": null,
+ "granite_teacup": null,
+ "amber_cistern": null,
+ "amber_cistern_offer": null,
+ "juniper_tide": null,
+ "cedar_ember": {
+  "eligible": false,
+  "ineligible_reason": "surface",
+  "at_limit": false,
+  "exhausted": [],
+  "grants": [],
+  "next_grant_id": null,
+  "weekly_resets_at": null,
+  "cooldown_until": null,
+  "event_props": null
+ },
+ "starry_waterfall": null,
+ "amber_gauge": null,
+ "pace": null,
+ "indicator": null,
+ "message_limit": null,
+ "usage_scopes": null,
+ "extra_usage": null,
+ "limits": [
+  {
+   "kind": "weekly_all",
+   "group": "weekly",
+   "percent": 4,
+   "severity": "normal",
+   "resets_at": "2026-11-30T23:00:00.566357+00:00",
+   "scope": null,
+   "is_active": true
+  },
+  {
+   "kind": "weekly_scoped",
+   "group": "weekly",
+   "percent": 1,
+   "severity": "normal",
+   "resets_at": "2026-11-30T23:00:00.566532+00:00",
+   "scope": {
+    "model": {
+     "id": null,
+     "display_name": "Fable"
+    },
+    "surface": null
+   },
+   "is_active": false
+  }
+ ],
+ "spend": null,
+ "member_dashboard_available": false,
+ "usage_credits_settings_path": null,
+ "seven_day_breakdown": {
+  "as_of": "2026-11-26T08:55:34.572839+00:00",
+  "window_started_at": "2026-11-23T23:00:00.566357+00:00",
+  "rows": [
+   {
+    "key": "claude_code",
+    "display_name": "Claude Code",
+    "percent": 100,
+    "percent_of_limit": 4
+   },
+   {
+    "key": "chat",
+    "display_name": "Chats",
+    "percent": 0,
+    "percent_of_limit": 0
+   },
+   {
+    "key": "cowork",
+    "display_name": "Cowork",
+    "percent": 0,
+    "percent_of_limit": 0
+   },
+   {
+    "key": "other",
+    "display_name": "Other",
+    "percent": 0,
+    "percent_of_limit": 0
+   }
+  ]
+ },
+ "weekly_scoped_shares": [
+  {
+   "limit_index": 1,
+   "used_percent_of_weekly": 0,
+   "allowance_percent_of_weekly": 50
+  }
+ ]
+}

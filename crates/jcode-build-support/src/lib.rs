@@ -1,17 +1,23 @@
+pub mod runtime_generation;
+
+mod linux_prerelease;
 mod paths;
 mod platform_support;
 mod source_state;
 mod storage_helpers;
+mod update_install;
 mod version_gc;
 
+pub use linux_prerelease::{dispatch_linux_prerelease, linux_prerelease_candidate};
 pub use paths::{
     SELFDEV_CARGO_PROFILE, binary_name, binary_stem, client_update_candidate,
     current_binary_build_time_string, current_binary_built_at, find_dev_binary,
-    find_repo_in_ancestors, get_repo_dir, is_jcode_repo, launcher_binary_path, launcher_dir,
-    preferred_reload_candidate, release_binary_path, resolve_binary_payload, run_selfdev_build,
-    selfdev_binary_path, selfdev_build_command, selfdev_build_command_for_target,
-    shared_server_update_candidate, update_launcher_symlink_to_current,
-    update_launcher_symlink_to_stable, version_matches_installed_channel,
+    find_repo_in_ancestors, get_repo_dir, is_dynamic_loader_path, is_jcode_repo,
+    launcher_binary_path, launcher_dir, preferred_reload_candidate, release_binary_path,
+    resolve_binary_payload, run_selfdev_build, selfdev_binary_path, selfdev_build_command,
+    selfdev_build_command_for_target, shared_server_update_candidate,
+    update_launcher_symlink_to_current, update_launcher_symlink_to_stable,
+    version_matches_installed_channel,
 };
 pub use source_state::{
     current_build_info, current_git_diff, current_git_hash, current_git_hash_full,
@@ -26,12 +32,16 @@ pub use storage_helpers::{
     shared_server_binary_path, shared_server_version_file, stable_binary_path, stable_version_file,
     version_binary_path, write_build_progress,
 };
+pub use update_install::{
+    ChannelAdvance, advance_update_channels, install_verified_binary_at_version,
+    selfdev_hold_reason, verify_binary_built_from,
+};
 pub use version_gc::{
     DEFAULT_KEEP_RECENT_VERSIONS, KEEP_VERSIONS_ENV, VersionPruneReport, prune_old_versions,
     prune_old_versions_in,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use jcode_storage as storage;
 use serde::{Deserialize, Serialize};
@@ -738,11 +748,19 @@ pub fn promote_version_to_shared_server(version: &str) -> Result<Option<String>>
         anyhow::bail!("Invalid installed version label: {version:?}");
     }
     let previous = read_shared_server_version()?;
-    if previous.as_deref() == Some(version) {
-        let target = version_binary_path(version)?;
-        if !target.exists() {
-            anyhow::bail!("Version binary not found at {:?}", target);
-        }
+    let target = version_binary_path(version)?;
+    if !target.is_file() {
+        anyhow::bail!("Version binary not found at {:?}", target);
+    }
+    let selected = runtime_generation::channel_diagnostics(
+        &shared_server_binary_path()?,
+        &shared_server_version_file()?,
+    );
+    let resolved_target = std::fs::canonicalize(&target)
+        .with_context(|| format!("cannot resolve installed runtime {}", target.display()))?;
+    if previous.as_deref() == Some(version)
+        && selected.resolved_path.as_ref() == Some(&resolved_target)
+    {
         return Ok(previous);
     }
     update_shared_server_symlink(version)?;
@@ -871,9 +889,33 @@ pub fn repair_stale_shared_server_channel() -> Result<SharedServerRepair> {
 fn is_release_channel_marker(marker: &str) -> bool {
     let marker = marker.trim();
     let marker = marker.strip_prefix('v').unwrap_or(marker);
-    marker.starts_with("main-")
-        || marker
-            .split('.')
+    if marker.starts_with("main-") {
+        return true;
+    }
+    if let Some(rest) = marker.strip_prefix("selfdev-")
+        && let Some((platform, sha)) = rest.split_once('-')
+    {
+        return !platform.is_empty()
+            && platform
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            && sha.len() == 40
+            && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    }
+    let core = marker.split_once('-').map_or(marker, |(base, _)| base);
+    let mut parts = core.split('.');
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    let Some(minor) = parts.next() else {
+        return false;
+    };
+    let Some(patch) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && [major, minor, patch]
+            .into_iter()
             .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
 }
 
@@ -917,9 +959,10 @@ pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
         anyhow::bail!("Binary not found at {:?}", source);
     }
 
-    let version = repo_build_version(repo_dir)?;
+    let source_state = current_source_state(repo_dir)?;
+    let version = source_state.version_label;
 
-    let versioned = install_binary_at_version(&source, &version)?;
+    let versioned = install_verified_binary_at_version(&source, &version, &source_state.full_hash)?;
     update_stable_symlink(&version)?;
     update_current_symlink(&version)?;
     update_shared_server_symlink(&version)?;

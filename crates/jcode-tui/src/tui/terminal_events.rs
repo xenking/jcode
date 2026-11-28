@@ -6,7 +6,7 @@
 //! before *any* picker, shortcut, or composer sees them. The async reader and
 //! synchronous burst drains share this filter, just like crossterm's reader.
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::Stream;
 use jcode_tui_style::ThemeMode;
 use std::collections::VecDeque;
@@ -61,6 +61,39 @@ struct ColorReports {
 impl ColorReports {
     fn recognized(&self) -> bool {
         self.body.starts_with("11;rgb:") || self.body.starts_with("11;rgba:")
+    }
+
+    /// Ask the terminal for its background color without waiting for the reply.
+    /// A reply is then expected until `REPORT_TIMEOUT` has passed.
+    fn query_background(&mut self, now: Instant, passthrough: bool) {
+        let query = background_query(passthrough);
+        let mut stdout = io::stdout().lock();
+        if stdout
+            .write_all(query)
+            .and_then(|()| stdout.flush())
+            .is_ok()
+        {
+            self.expecting_until = Some(now + REPORT_TIMEOUT);
+        }
+    }
+
+    /// Switch the app theme to the one the latest complete report implies.
+    /// Returns whether the theme changed, which needs a full redraw.
+    fn apply_detected_theme(&mut self) -> bool {
+        let Some(mode) = self.mode.take() else {
+            return false;
+        };
+        if !super::theme_detect::auto_theme_enabled() || mode == jcode_tui_style::theme_mode() {
+            return false;
+        }
+        jcode_tui_style::set_theme_mode(mode);
+        THEME_REDRAW_PENDING.store(true, Ordering::Relaxed);
+        true
+    }
+
+    /// Next input event that is not part of a color report.
+    fn pop_ready(&mut self) -> Option<Event> {
+        self.ready.pop_front()
     }
 
     fn reset(&mut self, replay: bool) {
@@ -226,6 +259,70 @@ struct RuntimeTheme {
 }
 
 impl RuntimeTheme {
+    /// Feed one raw terminal event: track focus, query on regaining focus, and
+    /// route it through the color-report filter.
+    fn ingest(&mut self, event: Event, now: Instant) {
+        self.note_focus(&event);
+        if event == Event::FocusGained {
+            self.query_if_due(now, true);
+        }
+        self.reports.push(event, now);
+    }
+
+    /// Timer tick: expire a stale held report, then send a query if one is due.
+    fn on_timer(&mut self, now: Instant) {
+        self.reports.expire(now);
+        self.query_if_due(now, false);
+    }
+
+    fn query_if_due(&mut self, now: Instant, focused: bool) {
+        self.queries_enabled = super::theme_detect::runtime_queries_enabled();
+        if !self.queries_enabled {
+            return;
+        }
+        if self.cache_query_at.is_some_and(|at| now >= at) {
+            self.cache_query_at = None;
+            // tmux consumes outer-terminal color replies to update its cache.
+            // Read that refreshed cache on the next timer tick, without blocking
+            // the input stream or competing for stdin.
+            self.reports.query_background(now, false);
+            return;
+        }
+        let interval = if focused {
+            Duration::from_secs(1)
+        } else {
+            self.timer_query_interval(now)
+        };
+        if self
+            .last_query
+            .is_some_and(|last| now.duration_since(last) < interval)
+        {
+            return;
+        }
+        self.last_query = Some(now);
+        let passthrough = tmux_passthrough_enabled();
+        if passthrough {
+            self.cache_query_at = Some(now + PREFIX_TIMEOUT);
+        }
+        self.reports.query_background(now, passthrough);
+    }
+
+    fn take_event(&mut self) -> Option<Event> {
+        if self.reports.apply_detected_theme() {
+            // Reuse the existing resize invalidation/redraw path without inventing
+            // a keypress or changing focus self. The actual dimensions stay intact.
+            if let Ok((width, height)) = crossterm::terminal::size() {
+                return Some(Event::Resize(width, height));
+            }
+        }
+        let event = self.reports.pop_ready()?;
+        self.note_input(&event, Instant::now());
+        Some(match event {
+            Event::Key(key) => Event::Key(normalize_ctrl_layout(key)),
+            other => other,
+        })
+    }
+
     fn note_focus(&mut self, event: &Event) {
         match event {
             Event::FocusGained => self.unfocused = false,
@@ -340,67 +437,51 @@ fn tmux_passthrough_enabled() -> bool {
     })
 }
 
-fn query_if_due(state: &mut RuntimeTheme, now: Instant, focused: bool) {
-    state.queries_enabled = super::theme_detect::runtime_queries_enabled();
-    if !state.queries_enabled {
-        return;
+/// Crossterm resolves Windows keys using the active layout and discards the
+/// Kitty base-layout codepoint on Unix. Recover Ctrl letter bindings for
+/// standard ЙЦУКЕН without translating text input or AltGr chords.
+pub(super) fn normalize_ctrl_layout(mut key: KeyEvent) -> KeyEvent {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return key;
     }
-    if state.cache_query_at.is_some_and(|at| now >= at) {
-        state.cache_query_at = None;
-        // tmux consumes outer-terminal color replies to update its cache.
-        // Read that refreshed cache on the next timer tick, without blocking
-        // the input stream or competing for stdin.
-        write_background_query(state, now, false);
-        return;
-    }
-    let interval = if focused {
-        Duration::from_secs(1)
-    } else {
-        state.timer_query_interval(now)
+    let KeyCode::Char(ch) = key.code else {
+        return key;
     };
-    if state
-        .last_query
-        .is_some_and(|last| now.duration_since(last) < interval)
-    {
-        return;
-    }
-    state.last_query = Some(now);
-    let passthrough = tmux_passthrough_enabled();
-    if passthrough {
-        state.cache_query_at = Some(now + PREFIX_TIMEOUT);
-    }
-    write_background_query(state, now, passthrough);
-}
-
-fn write_background_query(state: &mut RuntimeTheme, now: Instant, passthrough: bool) {
-    // Query only the background. No stdin read and no blocking response wait.
-    let query = background_query(passthrough);
-    let mut stdout = io::stdout().lock();
-    if stdout
-        .write_all(query)
-        .and_then(|()| stdout.flush())
-        .is_ok()
-    {
-        state.reports.expecting_until = Some(now + REPORT_TIMEOUT);
-    }
-}
-
-fn take_event(state: &mut RuntimeTheme) -> Option<Event> {
-    if let Some(mode) = state.reports.mode.take()
-        && super::theme_detect::auto_theme_enabled()
-        && mode != jcode_tui_style::theme_mode()
-    {
-        jcode_tui_style::set_theme_mode(mode);
-        THEME_REDRAW_PENDING.store(true, Ordering::Relaxed);
-        // Reuse the existing resize invalidation/redraw path without inventing
-        // a keypress or changing focus state. The actual dimensions stay intact.
-        if let Ok((width, height)) = crossterm::terminal::size() {
-            return Some(Event::Resize(width, height));
-        }
-    }
-    let event = state.reports.ready.pop_front()?;
-    state.note_input(&event, Instant::now());
-    Some(event)
+    let latin: char = match ch.to_lowercase().next() {
+        Some('й') => 'q',
+        Some('ц') => 'w',
+        Some('у') => 'e',
+        Some('к') => 'r',
+        Some('е') => 't',
+        Some('н') => 'y',
+        Some('г') => 'u',
+        Some('ш') => 'i',
+        Some('щ') => 'o',
+        Some('з') => 'p',
+        Some('ф') => 'a',
+        Some('ы' | 'і') => 's',
+        Some('в') => 'd',
+        Some('а') => 'f',
+        Some('п') => 'g',
+        Some('р') => 'h',
+        Some('о') => 'j',
+        Some('л') => 'k',
+        Some('д') => 'l',
+        Some('я') => 'z',
+        Some('ч') => 'x',
+        Some('с') => 'c',
+        Some('м') => 'v',
+        Some('и') => 'b',
+        Some('т') => 'n',
+        Some('ь') => 'm',
+        _ => return key,
+    };
+    key.code = KeyCode::Char(if ch.is_uppercase() {
+        latin.to_ascii_uppercase()
+    } else {
+        latin
+    });
+    key
 }
 
 /// Nonblocking burst drain with the same report filter as [`EventStream`].
@@ -408,7 +489,7 @@ fn take_event(state: &mut RuntimeTheme) -> Option<Event> {
 /// were consumed. The async reader will deliver any remaining report/replay.
 pub(super) fn try_read() -> io::Result<Option<Event>> {
     let mut state = runtime().lock().unwrap_or_else(|error| error.into_inner());
-    if let Some(event) = take_event(&mut state) {
+    if let Some(event) = state.take_event() {
         return Ok(Some(event));
     }
     for _ in 0..64 {
@@ -417,12 +498,8 @@ pub(super) fn try_read() -> io::Result<Option<Event>> {
         }
         let event = crossterm::event::read()?;
         let now = Instant::now();
-        state.note_focus(&event);
-        if event == Event::FocusGained {
-            query_if_due(&mut state, now, true);
-        }
-        state.reports.push(event, now);
-        if let Some(event) = take_event(&mut state) {
+        state.ingest(event, now);
+        if let Some(event) = state.take_event() {
             return Ok(Some(event));
         }
     }
@@ -470,7 +547,7 @@ impl EventStream {
         state: &mut RuntimeTheme,
         cx: &mut Context<'_>,
     ) -> Poll<Option<io::Result<Event>>> {
-        if let Some(event) = take_event(state) {
+        if let Some(event) = state.take_event() {
             return Poll::Ready(Some(Ok(event)));
         }
         // Bound the work per poll while draining the key-shaped color report.
@@ -478,12 +555,8 @@ impl EventStream {
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(event))) => {
                     let now = Instant::now();
-                    state.note_focus(&event);
-                    if event == Event::FocusGained {
-                        query_if_due(state, now, true);
-                    }
-                    state.reports.push(event, now);
-                    if let Some(event) = take_event(state) {
+                    state.ingest(event, now);
+                    if let Some(event) = state.take_event() {
                         return Poll::Ready(Some(Ok(event)));
                     }
                 }
@@ -506,8 +579,7 @@ impl Stream for EventStream {
         let fired = this.tick.as_mut().poll(cx).is_ready();
         if fired {
             let now = Instant::now();
-            state.reports.expire(now);
-            query_if_due(&mut state, now, false);
+            state.on_timer(now);
         }
         let result = this.poll_events(&mut state, cx);
         // Arm after draining input: a report that just started being held needs
@@ -528,8 +600,6 @@ mod tests {
         );
     }
     use super::*;
-    use crossterm::event::KeyEvent;
-
     #[test]
     fn idle_timer_sleeps_until_the_next_query_instead_of_polling() {
         let now = Instant::now();
@@ -585,6 +655,28 @@ mod tests {
 
     fn key(ch: char, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(ch), modifiers))
+    }
+
+    #[test]
+    fn cyrillic_ctrl_chords_reach_the_same_bindings_as_latin() {
+        let mut state = RuntimeTheme::default();
+        let ctrl = KeyModifiers::CONTROL;
+        let shifted = ctrl | KeyModifiers::SHIFT;
+        let alt_gr = ctrl | KeyModifiers::ALT;
+        for (input, expected) in [
+            (key('с', ctrl), key('c', ctrl)),
+            (key('в', ctrl), key('d', ctrl)),
+            (key('д', ctrl), key('l', ctrl)),
+            (key('і', ctrl), key('s', ctrl)),
+            (key('С', shifted), key('C', shifted)),
+            (key('С', ctrl), key('C', ctrl)),
+            (key('с', KeyModifiers::NONE), key('с', KeyModifiers::NONE)),
+            (key('с', alt_gr), key('с', alt_gr)),
+            (key('ё', ctrl), key('ё', ctrl)),
+        ] {
+            state.reports.push(input.clone(), Instant::now());
+            assert_eq!(state.take_event(), Some(expected), "{input:?}");
+        }
     }
 
     fn report(filter: &mut ColorReports, body: &str, bel: bool, now: Instant) {

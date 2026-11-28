@@ -5,14 +5,26 @@ impl Config {
         let path = Self::path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let mut effective_disabled_tools: Vec<String> =
-            self.tools.selection().disabled_tools.into_iter().collect();
-        effective_disabled_tools.sort();
+        [
+            format!("**Configuration** (`{path}`)"),
+            self.keybindings_summary(),
+            self.dictation_summary(),
+            self.display.summary(),
+            self.features_summary(),
+            self.tools_summary(),
+            self.provider_summary(),
+            self.agent_models_summary(),
+            self.gateway_summary(),
+            self.ambient_summary(),
+            self.notifications_summary(),
+            FOOTER.to_string(),
+        ]
+        .join("\n\n")
+    }
 
+    fn keybindings_summary(&self) -> String {
         format!(
-            r#"**Configuration** (`{}`)
-
-**Keybindings:**
+            r#"**Keybindings:**
 - Scroll up: `{}`
 - Scroll down: `{}`
 - Scroll up fallback: `{}`
@@ -33,108 +45,7 @@ impl Config {
 - Workspace left: `{}`
 - Workspace down: `{}`
 - Workspace up: `{}`
-- Workspace right: `{}`
-
-**Dictation:**
-- Command: `{}`
-- Mode: `{}`
-- Hotkey: `{}`
-- Timeout: {}s
-
-**Display:**
-- Diff mode: {}
-- Centered: {}
-- Markdown spacing: {}
-- LaTeX rendering: {}
-- Pin images: {}
-- Queue mode: {}
-- Auto server reload: {}
-- Mouse capture: {}
-- Debug socket: {}
-- Emoji: {}
-- Idle animation: {}
-- Prompt entry animation: {}
-- Compact notifications: {}
-- Chat native scrollbar: {}
-- Side panel native scrollbar: {}
-- Disabled animations: {}
-- Performance tier: {}
-- Animation FPS: {}
-- Redraw FPS: {}
-- Copy badge Alt label: {}
-- Show agentgrep output: {}
-- Tool call details: {}
-- Theme: {}
-- Custom colors: {}
-
-**Features:**
-- Check updates: {}
-- Memory: {}
-- Swarm: {}
-- Auto-poke: {}
-- Message timestamps: {}
-- Persist memory injections: {}
-- KV cache miss notices: {}
-- Update channel: {}
-
-**Tools:**
-- Profile: {}
-- Enabled allow-list: {}
-- Disabled tools: {}
-- Disable base tools: {}
-- MCP tools: {}
-- MCP auto threshold: {} tokens
-- Codemode: {}
-
-**Provider:**
-- Default model: {}
-- Default provider: {}
-- OpenAI reasoning effort: {}
-- Anthropic reasoning effort: {}
-- OpenAI transport: {}
-- OpenAI service tier: {}
-- OpenAI native compaction: {}
-- OpenAI native compaction threshold ratio: {:.2}
-- Cross-provider failover: {}
-
-**Agent models:**
-- Swarm / subagent: {}
-- Swarm spawn mode: {}
-- Swarm root effort: {}
-- Spawn hook: {}
-- Review: {}
-- Judge: {}
-- Memory recall: Jev ({})
-- Memory extraction sidecar: {}
-- Ambient: {}
-
-**Gateway:**
-- Enabled: {}
-- Bind address: {}:{}
-
-**Ambient:**
-- Enabled: {}
-- Provider: {}
-- Model: {}
-- Interval: {}-{} minutes
-- Pause on active session: {}
-- Proactive work: {}
-- Work branch prefix: `{}`
-- Visible mode: {}
-
-**Notifications:**
-- ntfy.sh: {}
-- Desktop: {}
-- Email: {}
-- Email replies: {}
-- Telegram: {}
-- Telegram replies: {}
-- Discord: {}
-- Discord replies: {}
-
-*Edit the config file or set environment variables to customize.*
-*Environment variables (e.g., `JCODE_SCROLL_UP_KEY`, `JCODE_GATEWAY_ENABLED`) override file settings.*"#,
-            path,
+- Workspace right: `{}`"#,
             self.keybindings.scroll_up,
             self.keybindings.scroll_down,
             self.keybindings.scroll_up_fallback,
@@ -160,6 +71,16 @@ impl Config {
             self.keybindings.workspace_down,
             self.keybindings.workspace_up,
             self.keybindings.workspace_right,
+        )
+    }
+
+    fn dictation_summary(&self) -> String {
+        format!(
+            r#"**Dictation:**
+- Command: `{}`
+- Mode: `{}`
+- Hotkey: `{}`
+- Timeout: {}s"#,
             if self.dictation.command.trim().is_empty() {
                 "(disabled)"
             } else {
@@ -173,59 +94,20 @@ impl Config {
             },
             self.dictation.key,
             self.dictation.timeout_secs,
-            self.display.diff_mode.label(),
-            self.display.centered,
-            self.display.markdown_spacing.label(),
-            self.display.latex_rendering.as_str(),
-            self.display.pin_images,
-            self.display.queue_mode,
-            self.display.auto_server_reload,
-            self.display.mouse_capture,
-            self.display.debug_socket,
-            self.display.emoji,
-            self.display.idle_animation,
-            self.display.prompt_entry_animation,
-            self.display.compact_notifications,
-            self.display.native_scrollbars.chat,
-            self.display.native_scrollbars.side_panel,
-            if self.display.disabled_animations.is_empty() {
-                "(none)".to_string()
-            } else {
-                self.display.disabled_animations.join(", ")
-            },
-            if self.display.performance.is_empty() {
-                "auto"
-            } else {
-                &self.display.performance
-            },
-            self.display.animation_fps,
-            self.display.redraw_fps,
-            if self.display.copy_badge_alt_label.trim().is_empty() {
-                "auto"
-            } else {
-                self.display.copy_badge_alt_label.trim()
-            },
-            self.display.show_agentgrep_output,
-            self.display.tool_call_details,
-            if self.display.theme.trim().is_empty() {
-                "auto"
-            } else {
-                self.display.theme.trim()
-            },
-            if self.display.colors.is_empty() {
-                "default (run /colors to customize)".to_string()
-            } else {
-                format!(
-                    "{} custom ({})",
-                    self.display.colors.len(),
-                    self.display
-                        .colors
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            },
+        )
+    }
+
+    fn features_summary(&self) -> String {
+        format!(
+            r#"**Features:**
+- Check updates: {}
+- Memory: {}
+- Swarm: {}
+- Auto-poke: {}
+- Message timestamps: {}
+- Persist memory injections: {}
+- KV cache miss notices: {}
+- Update channel: {}"#,
             self.features.check_updates,
             self.features.memory,
             self.features.swarm,
@@ -234,6 +116,22 @@ impl Config {
             self.features.persist_memory_injections,
             self.features.kv_cache_miss_notices,
             self.features.update_channel,
+        )
+    }
+
+    fn tools_summary(&self) -> String {
+        let mut effective_disabled_tools: Vec<String> =
+            self.tools.selection().disabled_tools.into_iter().collect();
+        effective_disabled_tools.sort();
+        format!(
+            r#"**Tools:**
+- Profile: {}
+- Enabled allow-list: {}
+- Disabled tools: {}
+- Disable base tools: {}
+- MCP tools: {}
+- MCP auto threshold: {} tokens
+- Codemode: {}"#,
             if self.tools.profile.trim().is_empty() {
                 "full"
             } else {
@@ -253,6 +151,21 @@ impl Config {
             self.tools.mcp_tools.as_str(),
             self.tools.mcp_tools_token_threshold,
             self.tools.codemode,
+        )
+    }
+
+    fn provider_summary(&self) -> String {
+        format!(
+            r#"**Provider:**
+- Default model: {}
+- Default provider: {}
+- OpenAI reasoning effort: {}
+- Anthropic reasoning effort: {}
+- OpenAI transport: {}
+- OpenAI service tier: {}
+- OpenAI native compaction: {}
+- OpenAI native compaction threshold ratio: {:.2}
+- Cross-provider failover: {}"#,
             self.provider
                 .default_model
                 .as_deref()
@@ -280,12 +193,25 @@ impl Config {
             self.provider.openai_native_compaction_mode.as_str(),
             self.provider.openai_native_compaction_threshold_tokens,
             self.provider.cross_provider_failover.as_str(),
-            self.agents
-                .swarm_model
-                .as_deref()
-                .unwrap_or("(inherit current session)"),
-            self.agents.swarm_spawn_mode.as_str(),
-            self.agents.root_effort_for_swarm(),
+        )
+    }
+
+    fn agent_models_summary(&self) -> String {
+        let agents = self.agents.summary();
+        format!(
+            r#"**Agent models:**
+- Swarm / subagent: {}
+- Swarm spawn mode: {}
+- Swarm root effort: {}
+- Spawn hook: {}
+- Review: {}
+- Judge: {}
+- Memory recall: Jev ({})
+- Memory extraction sidecar: {}
+- Ambient: {}"#,
+            agents.swarm_model,
+            agents.swarm_spawn_mode,
+            agents.swarm_root_effort,
             self.terminal
                 .spawn_hook
                 .as_deref()
@@ -298,19 +224,35 @@ impl Config {
                 .model
                 .as_deref()
                 .unwrap_or("(inherit current session)"),
-            self.agents.memory_jev_provider,
-            if self.agents.memory_sidecar_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            },
+            agents.memory_jev_provider,
+            agents.memory_sidecar,
             self.ambient
                 .model
                 .as_deref()
                 .unwrap_or("(provider default)"),
-            self.gateway.enabled,
-            self.gateway.bind_addr,
-            self.gateway.port,
+        )
+    }
+
+    fn gateway_summary(&self) -> String {
+        format!(
+            r#"**Gateway:**
+- Enabled: {}
+- Bind address: {}:{}"#,
+            self.gateway.enabled, self.gateway.bind_addr, self.gateway.port,
+        )
+    }
+
+    fn ambient_summary(&self) -> String {
+        format!(
+            r#"**Ambient:**
+- Enabled: {}
+- Provider: {}
+- Model: {}
+- Interval: {}-{} minutes
+- Pause on active session: {}
+- Proactive work: {}
+- Work branch prefix: `{}`
+- Visible mode: {}"#,
             self.ambient.enabled,
             self.ambient.provider.as_deref().unwrap_or("(auto)"),
             self.ambient
@@ -323,6 +265,20 @@ impl Config {
             self.ambient.proactive_work,
             self.ambient.work_branch_prefix,
             self.ambient.visible,
+        )
+    }
+
+    fn notifications_summary(&self) -> String {
+        format!(
+            r#"**Notifications:**
+- ntfy.sh: {}
+- Desktop: {}
+- Email: {}
+- Email replies: {}
+- Telegram: {}
+- Telegram replies: {}
+- Discord: {}
+- Discord replies: {}"#,
             self.safety
                 .ntfy_topic
                 .as_deref()
@@ -379,6 +335,9 @@ impl Config {
     }
 }
 
+const FOOTER: &str = r#"*Edit the config file or set environment variables to customize.*
+*Environment variables (e.g., `JCODE_SCROLL_UP_KEY`, `JCODE_GATEWAY_ENABLED`) override file settings.*"#;
+
 impl Config {
     /// Keyboards the companion watches for global push-to-talk.
     ///
@@ -394,14 +353,13 @@ impl Config {
             .and_then(|desktop| desktop.get("voice"))
             .and_then(|voice| voice.get("global_devices"))
             .and_then(|devices| devices.as_array())
-            .map(|devices| {
-                devices
-                    .iter()
-                    .filter_map(|device| device.as_str())
-                    .filter(|device| !device.trim().is_empty())
-                    .map(std::path::PathBuf::from)
-                    .collect()
-            })
-            .unwrap_or_default()
+            // Missing legacy desktop devices means there are no configured
+            // devices, not a configuration read or parse failure.
+            .into_iter()
+            .flatten()
+            .filter_map(|device| device.as_str())
+            .filter(|device| !device.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .collect()
     }
 }

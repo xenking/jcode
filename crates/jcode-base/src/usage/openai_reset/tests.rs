@@ -19,6 +19,52 @@ fn automatic_reset_receipts_survive_retries_and_fail_closed_on_corruption() {
     assert!(recent_auto_reset(&path, 1301).is_err());
 }
 
+#[test]
+fn expiring_reset_needs_a_grant_due_soon_and_used_quota() {
+    let now = 1_800_000_000;
+    let at = |secs: i64| {
+        chrono::DateTime::from_timestamp(now + secs, 0)
+            .unwrap()
+            .to_rfc3339()
+    };
+    let usage = |ratio: f32, expires_in: i64| OpenAIUsageData {
+        seven_day: Some(OpenAIUsageWindow {
+            usage_ratio: ratio,
+            ..Default::default()
+        }),
+        fetched_at: Some(Instant::now()),
+        openai_reset_credits: Some(OpenAiResetCredits {
+            available_count: 1,
+            available_expirations: vec![Some(at(expires_in))],
+            account_label: Some("work".into()),
+            ordinary_usage_allowed: Some(true),
+        }),
+        ..Default::default()
+    };
+    assert!(expiring_reset_eligible(
+        &usage(0.4, 300),
+        Some("work"),
+        now,
+        600
+    ));
+    assert!(
+        !expiring_reset_eligible(&usage(0.0, 300), Some("work"), now, 600),
+        "nothing to restore"
+    );
+    assert!(
+        !expiring_reset_eligible(&usage(0.4, 900), Some("work"), now, 600),
+        "not due yet"
+    );
+    assert!(!expiring_reset_eligible(
+        &usage(0.4, 300),
+        Some("personal"),
+        now,
+        600
+    ));
+    // The wall rule still refuses the same login: it is not at its limit.
+    assert!(!auto_reset_eligible(&usage(0.4, 300), Some("work")));
+}
+
 fn exhausted_weekly_usage() -> OpenAIUsageData {
     OpenAIUsageData {
         seven_day: Some(OpenAIUsageWindow {
@@ -292,6 +338,7 @@ async fn auth_rate_limit_and_unsupported_errors_have_actionable_safe_messages() 
 
 #[test]
 fn reset_cache_invalidation_is_scoped_to_target_account() {
+    let _shared = super::super::cache::lock_usage_cache_tests();
     let key = openai_usage_cache_key("test-token-reset", Some("reset-target-test"));
     let other_key = openai_usage_cache_key("test-token-other", Some("reset-other-test"));
     let data = OpenAIUsageData {
@@ -317,6 +364,7 @@ fn provider_text_cannot_inject_terminal_controls() {
 #[tokio::test]
 async fn reset_generation_prevents_old_fetches_from_repopulating_usage() {
     let _guard = crate::storage::lock_test_env();
+    let _shared = super::super::cache::lock_usage_cache_tests();
     let generation = openai_usage_generation();
     let key = openai_usage_cache_key("old-request", Some("reset-race-test"));
     let exhausted = OpenAIUsageData {

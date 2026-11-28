@@ -63,7 +63,7 @@ fn claim_prune_slot(base: &Path) -> bool {
         return false;
     }
     // Touch (create or refresh) the marker to claim the slot.
-    std::fs::write(&marker, b"").is_ok()
+    storage::touch_stamp(&marker).is_ok()
 }
 
 /// Core of [`prune_old_session_backups`], parameterized on the directory and
@@ -131,6 +131,7 @@ mod tests {
             claim_prune_slot(&dir),
             "claim should succeed after the interval elapses"
         );
+        assert!(!claim_prune_slot(&dir), "refresh must close the slot again");
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -53,6 +53,37 @@ pub fn is_cache_ttl_1h() -> bool {
 /// The name is kept so existing call sites don't churn.
 pub const CLAUDE_CLI_USER_AGENT: &str = concat!("jcode/", env!("CARGO_PKG_VERSION"));
 
+/// Claude Code release whose identity the account endpoints (`/api/oauth/usage`,
+/// `/profile` and saved resets) are called with: the release the reference
+/// CLI presents. The usage endpoint evaluates saved resets per caller and hides them from a
+/// caller that is not Claude Code (`ineligible_reason: "surface"` /
+/// `"cli_version"`). Inference requests keep the honest [`CLAUDE_CLI_USER_AGENT`].
+/// Raise it with the reference CLI; `JCODE_CLAUDE_CODE_VERSION` overrides it at runtime.
+const USAGE_ENDPOINT_CLAUDE_CODE_VERSION: &str = "2.1.326";
+
+/// `User-Agent` for the account usage, profile and saved-reset endpoints.
+pub fn usage_endpoint_user_agent() -> String {
+    let version = match std::env::var("JCODE_CLAUDE_CODE_VERSION") {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
+        _ => USAGE_ENDPOINT_CLAUDE_CODE_VERSION.to_owned(),
+    };
+    format!("claude-cli/{version} (external, cli)")
+}
+
+/// The request identity of the reference CLI on Claude's account endpoints:
+/// accept, content type, the oauth beta, the Claude Code user agent and the
+/// bearer token, and nothing else.
+pub fn apply_claude_account_headers(
+    req: reqwest::RequestBuilder,
+    access_token: &str,
+) -> reqwest::RequestBuilder {
+    req.header("Accept", "application/json, text/plain, */*")
+        .header("Content-Type", "application/json")
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("User-Agent", usage_endpoint_user_agent())
+        .bearer_auth(access_token)
+}
+
 pub const OAUTH_BETA_HEADERS: &str = ANTHROPIC_OAUTH_BETA_HEADERS;
 
 /// Whether a model id effectively runs with the 1M-token context beta.
@@ -78,6 +109,48 @@ pub fn apply_oauth_attribution_headers(
 
 /// Available models
 pub const AVAILABLE_MODELS: &[&str] = jcode_provider_core::ALL_CLAUDE_MODELS;
+
+pub const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+
+pub fn direct_api_url() -> String {
+    let base = std::env::var("JCODE_ANTHROPIC_API_BASE")
+        .ok()
+        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
+    match base {
+        Some(base) if base.ends_with("/messages") => base,
+        Some(base) => format!("{base}/messages"),
+        None => ANTHROPIC_MESSAGES_URL.to_string(),
+    }
+}
+
+pub fn direct_auth_mode() -> String {
+    std::env::var("JCODE_ANTHROPIC_AUTH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if std::env::var("ANTHROPIC_AUTH_TOKEN")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                "bearer".to_string()
+            } else {
+                "header".to_string()
+            }
+        })
+        .trim()
+        .to_ascii_lowercase()
+}
+
+pub fn native_fast_api_configured() -> bool {
+    direct_api_url() == ANTHROPIC_MESSAGES_URL
+        && direct_auth_mode() == "header"
+        && std::env::var("JCODE_ANTHROPIC_AUTH_HEADER")
+            .as_deref()
+            .unwrap_or("x-api-key")
+            .eq_ignore_ascii_case("x-api-key")
+}
 
 pub fn load_anthropic_api_key() -> Result<String> {
     if std::env::var("JCODE_ANTHROPIC_AUTH")

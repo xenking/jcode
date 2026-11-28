@@ -1,5 +1,4 @@
 use super::*;
-use crate::provider_catalog::{LoginProviderDescriptor, LoginProviderTarget};
 pub(super) use jcode_provider_core::{ActiveProvider, ProviderAvailability};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,27 +85,6 @@ impl MultiProvider {
         self.invalidate_routes_memo();
     }
 
-    pub fn config_default_provider_for_login_provider(
-        provider: LoginProviderDescriptor,
-    ) -> Option<&'static str> {
-        match provider.target {
-            LoginProviderTarget::Claude | LoginProviderTarget::ClaudeApiKey => Some("claude"),
-            LoginProviderTarget::OpenAi | LoginProviderTarget::OpenAiApiKey => Some("openai"),
-            LoginProviderTarget::OpenRouter => Some("openrouter"),
-            LoginProviderTarget::Bedrock => Some("bedrock"),
-            LoginProviderTarget::OpenAiCompatible(profile) => Some(profile.id),
-            LoginProviderTarget::Cursor => Some("cursor"),
-            LoginProviderTarget::Copilot => Some("copilot"),
-            LoginProviderTarget::Gemini => Some("gemini"),
-            LoginProviderTarget::Antigravity => Some("antigravity"),
-            LoginProviderTarget::AutoImport
-            | LoginProviderTarget::Jcode
-            | LoginProviderTarget::Azure
-            | LoginProviderTarget::GrokBuild
-            | LoginProviderTarget::Google => None,
-        }
-    }
-
     pub fn openai_compatible_profile_id_from_route<'a>(
         api_method: &'a str,
         provider_display: &str,
@@ -190,6 +168,7 @@ impl MultiProvider {
             ModelRouteApiMethod::Copilot => Some("copilot".to_string()),
             ModelRouteApiMethod::Cursor => Some("cursor".to_string()),
             ModelRouteApiMethod::Bedrock => Some("bedrock".to_string()),
+            ModelRouteApiMethod::AntigravityHttps => Some("antigravity".to_string()),
             ModelRouteApiMethod::Other(method)
                 if method == "cli" && provider_display == "Antigravity" =>
             {
@@ -584,33 +563,23 @@ mod tests {
     #[test]
     fn login_provider_defaults_are_canonical_config_keys() {
         assert_eq!(
-            MultiProvider::config_default_provider_for_login_provider(
-                crate::provider_catalog::CLAUDE_LOGIN_PROVIDER,
-            ),
+            crate::provider_catalog::CLAUDE_LOGIN_PROVIDER.default_provider_key(),
             Some("claude")
         );
         assert_eq!(
-            MultiProvider::config_default_provider_for_login_provider(
-                crate::provider_catalog::OPENAI_LOGIN_PROVIDER,
-            ),
+            crate::provider_catalog::OPENAI_LOGIN_PROVIDER.default_provider_key(),
             Some("openai")
         );
         assert_eq!(
-            MultiProvider::config_default_provider_for_login_provider(
-                crate::provider_catalog::OPENAI_API_LOGIN_PROVIDER,
-            ),
+            crate::provider_catalog::OPENAI_API_LOGIN_PROVIDER.default_provider_key(),
             Some("openai")
         );
         assert_eq!(
-            MultiProvider::config_default_provider_for_login_provider(
-                crate::provider_catalog::OPENCODE_LOGIN_PROVIDER,
-            ),
+            crate::provider_catalog::OPENCODE_LOGIN_PROVIDER.default_provider_key(),
             Some("opencode")
         );
         assert_eq!(
-            MultiProvider::config_default_provider_for_login_provider(
-                crate::provider_catalog::AZURE_LOGIN_PROVIDER,
-            ),
+            crate::provider_catalog::AZURE_LOGIN_PROVIDER.default_provider_key(),
             None
         );
     }
@@ -951,6 +920,14 @@ mod tests {
             openrouter_openai.provider_key.as_deref(),
             Some("openrouter")
         );
+
+        let antigravity = MultiProvider::default_model_selection_from_route(
+            "gemini-4-neon-low",
+            "https",
+            "Antigravity",
+        );
+        assert_eq!(antigravity.model_spec, "antigravity:gemini-4-neon-low");
+        assert_eq!(antigravity.provider_key.as_deref(), Some("antigravity"));
     }
 
     #[test]

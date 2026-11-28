@@ -457,7 +457,9 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
         spawn_mode: Some("headless".to_string()),
         model: Some("openai-api:gpt-5.5".to_string()),
         effort: Some("low".to_string()),
+        speed: Some(jcode_message_types::SpeedMode::Fast),
         label: Some("review auth flow".to_string()),
+        profile: Some("scout".to_string()),
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"comm_spawn\""));
@@ -465,6 +467,7 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
     assert!(json.contains("\"request_nonce\":\"planner-fresh-123\""));
     assert!(json.contains("\"spawn_mode\":\"headless\""));
     assert!(json.contains("\"effort\":\"low\""));
+    assert!(json.contains("\"speed\":\"fast\""));
     assert!(json.contains("\"label\":\"review auth flow\""));
     assert!(json.contains("\"model\":\"openai-api:gpt-5.5\""));
     let decoded = parse_request_json(&json)?;
@@ -478,7 +481,9 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
         spawn_mode,
         model,
         effort,
+        speed,
         label,
+        profile,
         ..
     } = decoded
     else {
@@ -492,7 +497,9 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
     assert_eq!(spawn_mode.as_deref(), Some("headless"));
     assert_eq!(model.as_deref(), Some("openai-api:gpt-5.5"));
     assert_eq!(effort.as_deref(), Some("low"));
+    assert_eq!(speed, Some(jcode_message_types::SpeedMode::Fast));
     assert_eq!(label.as_deref(), Some("review auth flow"));
+    assert_eq!(profile.as_deref(), Some("scout"));
     Ok(())
 }
 
@@ -654,25 +661,37 @@ fn test_ask_user_request_and_response_roundtrip() -> Result<()> {
         request_id: "ask-1".to_string(),
         questions: questions.clone(),
         tool_call_id: "call_1".to_string(),
+        kind: AskKind::PremiumSpawn,
     };
     let json = encode_event(&event);
     assert!(json.contains("\"type\":\"ask_user_request\""));
+    // A daemon from before ask kinds sends none, which means a plain question.
+    let old: ServerEvent = serde_json::from_str(
+        r#"{"type":"ask_user_request","request_id":"ask-0","questions":[],"tool_call_id":"c"}"#,
+    )?;
+    assert!(matches!(old, ServerEvent::AskUserRequest { kind: AskKind::Question, .. }));
     let decoded: ServerEvent = serde_json::from_str(json.trim())?;
-    let ServerEvent::AskUserRequest { request_id, questions: q, .. } = decoded else {
+    let ServerEvent::AskUserRequest { request_id, questions: q, kind, .. } = decoded else {
         return Err(anyhow!("expected AskUserRequest"));
     };
     assert_eq!(request_id, "ask-1");
+    assert_eq!(kind, AskKind::PremiumSpawn);
     assert_eq!(q, questions);
 
     let response = AskResponse {
         answers: Some(vec![AskAnswer {
             selected: vec!["SQLite".to_string()],
             other: Some("libsql".to_string()),
+            comments: Default::default(),
+            other_images: vec![("image/png".into(), "YWJj".into())],
+            comment_images: [("SQLite".into(), vec![("image/jpeg".into(), "ZGVm".into())])].into_iter().collect(),
         }]),
     };
     let req = Request::AskUserResponse { id: 7, request_id: "ask-1".to_string(), response: response.clone() };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"ask_user_response\""));
+    assert!(json.contains("\"other_images\":[[\"image/png\",\"YWJj\"]]"));
+    assert!(json.contains("\"comment_images\":{\"SQLite\":[[\"image/jpeg\",\"ZGVm\"]]}"));
     let decoded = parse_request_json(&json)?;
     assert_eq!(decoded.id(), 7);
     let Request::AskUserResponse { response: r, .. } = decoded else {
@@ -680,14 +699,25 @@ fn test_ask_user_request_and_response_roundtrip() -> Result<()> {
     };
     assert_eq!(r, response);
     assert_eq!(
-        format_ask_answers(&questions, &r),
+        AskRecord::new(questions.clone(), r.clone()).model_text(),
         "User answers:\n1. Which DB? -> SQLite; Other: libsql\n"
     );
+    let legacy: Request = parse_request_json(r#"{"type":"ask_user_response","id":9,"request_id":"ask-1","response":{"answers":[{"selected":["SQLite"]}]}}"#)?;
+    let Request::AskUserResponse { response: legacy_response, .. } = &legacy else {
+        return Err(anyhow!("expected legacy AskUserResponse"));
+    };
+    let answer = &legacy_response.answers.as_ref().unwrap()[0];
+    assert!(answer.other_images.is_empty() && answer.comment_images.is_empty());
+    let encoded_legacy = serde_json::to_string(&legacy)?;
+    assert!(!encoded_legacy.contains("other_images") && !encoded_legacy.contains("comment_images"));
     let declined: Request = parse_request_json(r#"{"type":"ask_user_response","id":8,"request_id":"ask-1","response":{}}"#)?;
     let Request::AskUserResponse { response, .. } = declined else {
         return Err(anyhow!("expected AskUserResponse"));
     };
-    assert_eq!(format_ask_answers(&questions, &response), ASK_DECLINED_MESSAGE);
+    assert_eq!(
+        AskRecord::new(questions.clone(), response).model_text(),
+        ASK_DECLINED_MESSAGE
+    );
     assert!(validate_ask_questions(&questions).is_ok());
     assert!(validate_ask_questions(&[]).is_err());
     Ok(())

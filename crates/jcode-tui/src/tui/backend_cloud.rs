@@ -6,14 +6,6 @@ impl RemoteConnection {
         self.cloud_authority = Some(Arc::downgrade(live));
     }
 
-    pub(super) fn revoke_cloud_authority(&mut self) {
-        if let Some(live) = self.cloud_authority.take().and_then(|live| live.upgrade()) {
-            live.store(false, std::sync::atomic::Ordering::SeqCst);
-        }
-        for task in self.cloud_callbacks.drain(..) {
-            task.abort();
-        }
-    }
     pub(crate) fn track_cloud_callback(&mut self, task: &tokio::task::JoinHandle<()>) {
         self.cloud_callbacks.retain(|task| !task.is_finished());
         self.cloud_callbacks.push(task.abort_handle());
@@ -22,10 +14,32 @@ impl RemoteConnection {
         &mut self,
         tools: crate::protocol::SessionToolConfig,
     ) -> Result<()> {
+        let tools = if crate::tui::jarvis::enabled() {
+            crate::tui::jarvis::with_speech(tools)
+        } else {
+            tools
+        };
         let id = self.next_request_id;
         self.next_request_id += 1;
         self.send_request(Request::ConfigureTools { id, tools })
-            .await
+            .await?;
+        self.local_tools_request = Some(id);
+        self.jarvis_tools_configured = false;
+        Ok(())
+    }
+
+    /// Whether a local capability probe is awaiting the server's answer.
+    pub(crate) fn has_local_tools_request(&self) -> bool {
+        self.local_tools_request.is_some()
+    }
+
+    pub(crate) fn finish_local_tools_request(&mut self, id: u64, accepted: bool) -> bool {
+        if self.local_tools_request != Some(id) {
+            return false;
+        }
+        self.local_tools_request = None;
+        self.jarvis_tools_configured = accepted && crate::tui::jarvis::enabled();
+        true
     }
 
     pub(crate) fn cloud_callback_sender(

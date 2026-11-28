@@ -20,7 +20,7 @@ impl App {
         {
             return set.clone();
         }
-        let working_dir = self.session.working_dir.as_deref();
+        let working_dir = self.session.working_dir();
         let set: std::collections::HashSet<std::path::PathBuf> = self
             .display_messages
             .iter()
@@ -263,7 +263,7 @@ fn build_observe_tool_result_markdown(
     is_error: bool,
     title: Option<&str>,
 ) -> String {
-    let token_count = crate::util::estimate_tokens(output);
+    let token_count = crate::message::estimate_text(crate::message::TokenFamily::default(), output);
     let token_label = crate::util::format_approx_token_count(token_count);
     let output_chars = crate::util::format_number(output.len());
     // Keep these severity badges ASCII-only. Emoji/variation-selector glyphs

@@ -16,20 +16,49 @@
 // Tests hold the std env/home serialization lock across awaits on purpose.
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+/// Diagnostics to stderr that can never panic. The bridge also runs inside the
+/// daemon, whose stderr is a dead pipe once the client that started it exits,
+/// and `eprintln!` panics on a failed write: that killed the connection of any
+/// request that happened to log one (`list_sessions`, `search_sessions`).
+macro_rules! diag {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 pub mod allocator;
 pub mod background_progress;
+mod capabilities;
+pub mod search_index;
 pub mod timing;
+mod transcribe;
 pub mod translate;
+pub use transcribe::{AudioTranscriber, TranscribeError, install_audio_transcriber};
+
+#[cfg(test)]
+#[path = "tests/search_api_tests.rs"]
+mod search_api_tests;
 
 #[cfg(all(test, unix))]
+#[path = "tests/session_presence_tests.rs"]
 mod session_presence_tests;
 #[cfg(all(test, unix))]
+#[path = "tests/stdio_tests.rs"]
 mod stdio_tests;
+#[cfg(all(test, unix))]
+#[path = "tests/transcribe_tests.rs"]
+mod transcribe_tests;
 
 use anyhow::{Context, Result};
-use jcode_harness_api::{API_VERSION_MAJOR, ApiEvent, ErrorCode, ServerFrame};
+use jcode_harness_api::{
+    API_VERSION_MAJOR, ApiEvent, BackgroundTasksSnapshot, ErrorCode, ServerFrame,
+};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 // Unix sockets on Unix, named pipes on Windows, one API. Without this the
 // bridge simply did not compile for Windows, so the SDK could not run there at
@@ -53,75 +82,113 @@ fn release_large_frame(buffer: &mut Vec<u8>) {
     }
 }
 
-/// Capabilities the native daemon advertises in its ping reply. `None` means
-/// the probe failed, not that the daemon advertised no capabilities.
-///
-/// Probe only an old, universally supported control request on a disposable
-/// connection. Older daemons close that connection after ping, and may close
-/// connections receiving unknown requests. Never probe on the session stream.
-async fn daemon_capabilities(socket: &std::path::Path) -> Option<Vec<String>> {
-    let probe = async {
-        let mut stream = Stream::connect(socket).await.ok()?;
-        write_json_line(&mut stream, &serde_json::json!({"type":"ping", "id":0}))
-            .await
-            .ok()?;
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        read_frame(&mut reader, &mut line).await.ok()?;
-        let reply: Value = serde_json::from_str(&line).ok()?;
-        if reply["type"] != "pong" || reply["id"] != 0 {
-            return None;
-        }
-        Some(
-            reply["capabilities"]
-                .as_array()
-                .map(|caps| {
-                    caps.iter()
-                        .filter_map(|cap| cap.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        )
-    };
-    tokio::time::timeout(std::time::Duration::from_millis(500), probe)
-        .await
-        .ok()
-        .flatten()
+mod session_controls;
+use capabilities::DaemonCapabilities;
+use session_controls::{DaemonControl, daemon_routing_view, daemon_side_questions};
+
+const TASK_POLL_MIN: Duration = Duration::from_secs(2);
+const TASK_POLL_QUIET_MAX: Duration = Duration::from_secs(30);
+const TASK_POLL_RUNNING_MAX: Duration = Duration::from_secs(8);
+
+struct TaskWatch {
+    session_id: String,
+    task_id: Option<String>,
+    last: Option<BackgroundTasksSnapshot>,
+    delay: Duration,
 }
 
-/// Fresh source-daemon connections. A disposable Ping never subscribes,
-/// resumes, or creates a session. Failed snapshots clear connection presence.
-async fn daemon_user_connections(socket: &std::path::Path) -> std::collections::HashSet<String> {
-    let probe = async {
-        let mut stream = Stream::connect(socket)
-            .await
-            .context("connect presence probe")?;
-        write_json_line(&mut stream, &serde_json::json!({"type":"ping", "id":0})).await?;
+impl TaskWatch {
+    async fn fetch(
+        control: &mut DaemonControl,
+        socket: &std::path::Path,
+        session_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<BackgroundTasksSnapshot> {
+        Ok(serde_json::from_value(
+            control
+                .background_tasks(socket, session_id, task_id, false)
+                .await?,
+        )?)
+    }
+
+    fn accept(&mut self, snapshot: BackgroundTasksSnapshot, force: bool) -> Option<ApiEvent> {
+        if !force && self.last.as_ref() == Some(&snapshot) {
+            return None;
+        }
+        self.last = Some(snapshot.clone());
+        Some(ApiEvent::BackgroundTasks {
+            session_id: self.session_id.clone(),
+            snapshot,
+        })
+    }
+
+    fn next_delay(&mut self, changed: bool) -> Duration {
+        self.delay = if changed {
+            TASK_POLL_MIN
+        } else {
+            let running = self.last.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .tasks
+                    .iter()
+                    .any(|task| task.status == jcode_harness_api::BackgroundTaskStatus::Running)
+            });
+            (self.delay * 2).min(if running {
+                TASK_POLL_RUNNING_MAX
+            } else {
+                TASK_POLL_QUIET_MAX
+            })
+        };
+        self.delay
+    }
+}
+
+async fn daemon_draft_models(socket: &std::path::Path) -> ApiEvent {
+    let query = async {
+        // A first-frame lightweight command closes its daemon stream after the
+        // reply. Give it its own connection, never the client's session stream.
+        let mut stream = Stream::connect(socket).await?;
+        write_json_line(
+            &mut stream,
+            &serde_json::json!({"type":"comm_list_models", "id":1, "session_id":""}),
+        )
+        .await?;
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        read_frame(&mut reader, &mut line).await?;
-        let reply: Value = serde_json::from_str(&line).context("parse presence pong")?;
-        if reply["type"] != "pong" || reply["id"] != 0 {
-            anyhow::bail!("presence probe received an uncorrelated reply");
+        while read_frame(&mut reader, &mut line).await? != 0 {
+            let reply: Value = serde_json::from_str(&line)?;
+            if reply["id"] != 1 {
+                continue;
+            }
+            match reply["type"].as_str() {
+                Some("comm_list_models_response") => {
+                    return Ok(ApiEvent::DraftModels {
+                        current: reply["current_model"].as_str().map(str::to_owned),
+                        routes: if reply["model_routes"].is_null() {
+                            Vec::new()
+                        } else {
+                            serde_json::from_value(reply["model_routes"].clone())?
+                        },
+                    });
+                }
+                Some("error") => anyhow::bail!(
+                    "{}",
+                    reply["message"].as_str().unwrap_or("catalog unavailable")
+                ),
+                _ => {}
+            }
         }
-        // Older daemons do not advertise connection presence.
-        if reply["user_connected_session_ids"].is_null() {
-            return Ok(std::collections::HashSet::new());
-        }
-        let ids: Vec<String> = serde_json::from_value(reply["user_connected_session_ids"].clone())
-            .context("parse connected session IDs")?;
-        Ok::<_, anyhow::Error>(ids.into_iter().filter(|id| !id.is_empty()).collect())
+        anyhow::bail!("daemon closed before returning the draft catalog")
     };
-    match tokio::time::timeout(std::time::Duration::from_millis(500), probe).await {
-        Ok(Ok(ids)) => ids,
-        Ok(Err(error)) => {
-            eprintln!("Harness presence snapshot unavailable: {error:#}");
-            std::collections::HashSet::new()
-        }
-        Err(_) => {
-            eprintln!("Harness presence probe timed out, clearing connection presence");
-            std::collections::HashSet::new()
-        }
+    match tokio::time::timeout(std::time::Duration::from_secs(4), query).await {
+        Ok(Ok(event)) => event,
+        Ok(Err(error)) => ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message: error.to_string(),
+        },
+        Err(_) => ApiEvent::Error {
+            code: ErrorCode::Internal,
+            message: "Draft model catalog timed out".into(),
+        },
     }
 }
 
@@ -179,16 +246,6 @@ where
 #[cfg(unix)]
 pub(crate) struct InstanceLock {
     _file: std::fs::File,
-    path: PathBuf,
-}
-
-#[cfg(unix)]
-impl Drop for InstanceLock {
-    fn drop(&mut self) {
-        // Best effort: the flock is released by the fd close regardless, and a
-        // leftover empty lock file is harmless (the next bridge re-locks it).
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 /// Take the exclusive bridge lock beside the API socket, or report that a live
@@ -209,10 +266,22 @@ pub(crate) fn single_instance_lock(api_socket: &std::path::Path) -> Result<Optio
         .open(&path)
         .with_context(|| format!("open bridge lock {}", path.display()))?;
     let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-    Ok(taken.then_some(InstanceLock { _file: file, path }))
+    // Never unlink a lock inode: a successor may already be waiting on it.
+    Ok(taken.then_some(InstanceLock { _file: file }))
+}
+
+fn capture_bridge_identity() -> Result<()> {
+    use jcode_build_support::runtime_generation;
+    runtime_generation::serving_identity(jcode_build_meta::git_hash())?;
+    if let Some(warning) = runtime_generation::identity_warning() {
+        anyhow::bail!("invalid inherited API bridge identity: {warning}");
+    }
+    Ok(())
 }
 
 pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<()> {
+    capture_bridge_identity()
+        .context("capture API bridge generation before publishing its listener")?;
     // Only one bridge may own the socket.
     //
     // This is the fix for clients seeing "disconnected: harness API stream
@@ -227,7 +296,7 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
     let _lock = match single_instance_lock(&api_socket)? {
         Some(lock) => lock,
         None => {
-            eprintln!(
+            diag!(
                 "harness API bridge: another bridge already owns {}; exiting",
                 api_socket.display()
             );
@@ -269,27 +338,73 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
         std::fs::set_permissions(&api_socket, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("restrict API socket {}", api_socket.display()))?;
     }
-    eprintln!(
+    diag!(
         "harness API bridge: listening on {} -> {}",
         api_socket.display(),
         legacy_socket.display()
     );
+    drop(search_index::warm_on_start());
+    let retiring = Arc::new(AtomicBool::new(false));
+    let mut clients = tokio::task::JoinSet::new();
+    let idle_timeout = std::time::Duration::from_secs(30);
+    let mut idle_since = tokio::time::Instant::now();
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    #[cfg(unix)]
+    let parent = unsafe { libc::getppid() };
     loop {
-        let (stream, _) = listener.accept().await?;
-        let legacy = legacy_socket.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle_api_client(stream, legacy).await {
-                eprintln!("harness API bridge: client ended: {error:#}");
+        tokio::select! {
+            biased;
+            _ = tick.tick() => {
+                #[cfg(unix)]
+                if unsafe { libc::getppid() } != parent {
+                    retiring.store(true, Ordering::Relaxed);
+                }
+                if retiring.load(Ordering::Relaxed)
+                    || (clients.is_empty() && idle_since.elapsed() >= idle_timeout) {
+                    break;
+                }
             }
-            // A closed client drops its translation state and buffers.
-            allocator::trim();
-        });
+            Some(_) = clients.join_next(), if !clients.is_empty() => {
+                if clients.is_empty() { idle_since = tokio::time::Instant::now(); }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let legacy = legacy_socket.clone();
+                let retiring = Arc::clone(&retiring);
+                clients.spawn(async move {
+                    if let Err(error) = handle_api_client(stream, legacy, retiring).await {
+                        diag!("harness API bridge: client ended: {error:#}");
+                    }
+                    allocator::trim();
+                });
+            }
+        }
     }
+    // Withdraw discovery before draining, without interrupting existing streams.
+    drop(listener);
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(&api_socket);
+        drop(_lock);
+    }
+    while clients.join_next().await.is_some() {}
+    Ok(())
 }
 
-async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()> {
+async fn handle_api_client(
+    stream: Stream,
+    legacy_socket: PathBuf,
+    retiring: Arc<AtomicBool>,
+) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
-    run_bridge_stream(read_half, write_half, legacy_socket).await
+    run_bridge_stream_inner(
+        read_half,
+        write_half,
+        legacy_socket,
+        Some(retiring),
+        transcribe::installed(),
+    )
+    .await
 }
 
 /// Serve the process's stdin/stdout as one API connection.
@@ -299,6 +414,8 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
 /// while SSH still holds stdin open. This entrypoint is for a CLI process only.
 #[cfg(unix)]
 pub async fn run_bridge_stdio(legacy_socket: PathBuf) -> Result<()> {
+    capture_bridge_identity().context("capture stdio bridge generation before accepting input")?;
+    drop(search_index::warm_on_start());
     let (input, mut writer) = std::os::unix::net::UnixStream::pair()?;
     input.set_nonblocking(true)?;
     let input = tokio::net::UnixStream::from_std(input)?;
@@ -315,19 +432,48 @@ pub async fn run_bridge_stdio(legacy_socket: PathBuf) -> Result<()> {
 /// stdio. No API listener or filesystem socket is created for this connection.
 pub async fn run_bridge_stream<R, W>(
     read_half: R,
-    mut write_half: W,
+    write_half: W,
     legacy_socket: PathBuf,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    run_bridge_stream_inner(
+        read_half,
+        write_half,
+        legacy_socket,
+        None,
+        transcribe::installed(),
+    )
+    .await
+}
+
+async fn run_bridge_stream_inner<R, W>(
+    read_half: R,
+    mut write_half: W,
+    legacy_socket: PathBuf,
+    retiring: Option<Arc<AtomicBool>>,
+    transcriber: Option<Arc<dyn AudioTranscriber>>,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let runtime_identity =
+        jcode_build_support::runtime_generation::serving_identity(jcode_build_meta::git_hash())
+            .context("capture API bridge serving generation")?;
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
     let mut pending = timing::Pending::default();
 
     // 1. Handshake: first frame must be hello with a compatible version.
-    read_frame(&mut reader, &mut line).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        read_frame(&mut reader, &mut line),
+    )
+    .await
+    .context("API client hello timed out")??;
     // A malformed first frame used to abort the task, closing the connection
     // with no reply at all: the client saw only an EOF and could not tell a
     // protocol mistake from a crashed bridge. Say what was wrong, then close.
@@ -343,6 +489,19 @@ where
         }
     };
     let reply_to = hello["id"].as_u64().unwrap_or(0);
+    if hello["req"] == "retire_bridge"
+        && let Some(retiring) = retiring
+    {
+        retiring.store(true, Ordering::Relaxed);
+        write_json_line(
+            &mut write_half,
+            &serde_json::json!({
+                "v": API_VERSION_MAJOR, "reply_to": reply_to, "ev": "bridge_retiring"
+            }),
+        )
+        .await?;
+        return Ok(());
+    }
     let client_name = hello["client"].as_str().unwrap_or_default();
     let compatible = hello["req"] == "hello"
         && hello["min_version"].as_u64().unwrap_or(0) <= u64::from(API_VERSION_MAJOR)
@@ -364,57 +523,83 @@ where
     }
     let hello_at = std::time::Instant::now();
     // Do not claim a usable connection before the native daemon is reachable.
-    let legacy = Stream::connect(&legacy_socket)
+    let mut legacy = Stream::connect(&legacy_socket)
         .await
         .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
-    let daemon_connected = hello_at.elapsed();
-    let daemon_caps = daemon_capabilities(&legacy_socket)
-        .await
-        .unwrap_or_default();
+    let daemon_connected_at = std::time::Instant::now();
+    let mut control = DaemonControl::default();
+    let daemon_caps = match control.capabilities(&legacy_socket).await {
+        Some(capabilities) => capabilities,
+        None => match control
+            .capabilities_with_timeout(&legacy_socket, std::time::Duration::from_secs(2))
+            .await
+        {
+            Some(capabilities) => capabilities,
+            None => {
+                write_json_line(
+                    &mut write_half,
+                    &ServerFrame::reply(
+                        reply_to,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: "Could not verify daemon capabilities. Reconnect when the daemon is responsive; no session request was sent.".into(),
+                        },
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
+        },
+    };
+    let control = Arc::new(tokio::sync::Mutex::new(control));
+    let mut openrig_host_cap = None;
+    if daemon_caps
+        .iter()
+        .any(|cap| cap == "openrig_host_identity_v1")
+    {
+        let probe = async {
+            write_json_line(
+                &mut legacy,
+                &serde_json::json!({"type":"openrig_host_identity", "id":0}),
+            )
+            .await?;
+            let mut reader = BufReader::new(legacy);
+            let mut line = String::new();
+            read_frame(&mut reader, &mut line).await?;
+            let reply: Value = serde_json::from_str(&line)?;
+            if reply["type"] != "pong" || reply["id"] != 0 {
+                anyhow::bail!("invalid OpenRig identity reply");
+            }
+            let host = reply["capabilities"].as_array().and_then(|caps| {
+                let mut claims = caps
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|cap| cap.starts_with("openrig_self_host_id="));
+                let claim = claims.next()?;
+                claims.next().is_none().then(|| claim.to_owned())
+            });
+            Ok::<_, anyhow::Error>((reader.into_inner(), host))
+        };
+        let (stream, host) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), probe).await??;
+        legacy = stream;
+        openrig_host_cap = host;
+    }
     timing::log(&format!(
         "hello client={client_name} first_frame={:.1}ms daemon_connect={:.1}ms daemon_caps={:.1}ms",
-        timing::ms(pending.connection_age() - hello_at.elapsed()),
-        timing::ms(daemon_connected),
-        timing::ms(hello_at.elapsed() - daemon_connected),
+        timing::ms(pending.connection_age_at(hello_at)),
+        timing::ms(daemon_connected_at.saturating_duration_since(hello_at)),
+        timing::ms(daemon_connected_at.elapsed()),
     ));
-    let user_connections_supported = daemon_caps.iter().any(|cap| cap == "session_connections");
-    let runtime_commands_supported = daemon_caps.iter().any(|cap| cap == "runtime_commands");
-    let session_tools_supported = daemon_caps.iter().any(|cap| cap == "session_tools");
-    let soft_interrupt_ids_supported = daemon_caps.iter().any(|cap| cap == "soft_interrupt_ids");
+    let daemon = DaemonCapabilities::from_daemon(&daemon_caps)
+        .with_transcription(transcriber.as_ref().is_some_and(|t| t.available()));
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
+            runtime_identity: Some(runtime_identity),
             version: API_VERSION_MAJOR,
             server: format!("jcode-harness-api-bridge/{}", env!("CARGO_PKG_VERSION")),
-            capabilities: [
-                "sessions",
-                "streaming",
-                "text_framing",
-                "turn_stop_reasons",
-                "side_panel",
-                "persisted_session_discovery",
-                "runtime_info",
-                "api_key_provisioning",
-                "auth_changed_notification",
-                "usage_invalidation",
-                "session_archive",
-                "session_retention",
-                "session_files",
-                "session_fork",
-                "todo_state",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .chain(user_connections_supported.then(|| "session_connections".to_string()))
-            .chain(runtime_commands_supported.then(|| "runtime_commands".to_string()))
-            .chain(session_tools_supported.then(|| "session_tools".to_string()))
-            .chain(
-                ["soft_interrupt_ids", "background_tool_result"]
-                    .into_iter()
-                    .filter(|_| soft_interrupt_ids_supported)
-                    .map(str::to_string),
-            )
-            .collect(),
+            capabilities: daemon.hello_capabilities(openrig_host_cap),
         },
     );
     write_json_line(&mut write_half, &hello_ok).await?;
@@ -423,18 +608,17 @@ where
     let (legacy_read, mut legacy_write) = legacy.into_split();
     let mut legacy_reader = BufReader::new(legacy_read);
 
-    let mut state =
-        translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
-    state.session_tools_supported = session_tools_supported;
-    state.supports_user_response = hello["supports_user_response"].as_bool().unwrap_or(false);
-    state.client_name = Some(client_name.to_string()).filter(|n| !n.is_empty());
-    state.runtime_commands_supported = runtime_commands_supported;
-    state.soft_interrupt_ids_supported = soft_interrupt_ids_supported;
+    let mut state = translate::BridgeState::open(&daemon, &hello, client_name);
 
     // 3. Pump both directions in one select loop so translation state stays
     //    single-threaded.
     let mut api_frame = Vec::new();
     let mut legacy_frame = Vec::new();
+    let mut task_watch: Option<TaskWatch> = None;
+    let mut task_poll = None;
+    let mut transcription: Option<transcribe::Transcription> = None;
+    let task_tick = tokio::time::sleep(TASK_POLL_MIN);
+    tokio::pin!(task_tick);
     loop {
         tokio::select! {
             // A busy daemon can keep the legacy socket continuously readable.
@@ -482,10 +666,10 @@ where
                 // not a permanent rejection. Recheck on a disposable connection
                 // before dispatch, without reattaching or replaying anything on
                 // the live session stream.
-                if request["req"] == "runtime_command" && !state.runtime_commands_supported {
-                    match daemon_capabilities(&legacy_socket).await {
+                if request["req"] == "runtime_command" && !state.runtime_commands_available() {
+                    match DaemonControl::default().capabilities(&legacy_socket).await {
                         Some(capabilities) => {
-                            state.runtime_commands_supported = capabilities.iter().any(|cap| cap == "runtime_commands");
+                            state.note_runtime_commands(&capabilities);
                         }
                         None => {
                             write_json_line(&mut write_half, &ServerFrame::reply(
@@ -499,10 +683,107 @@ where
                         }
                     }
                 }
-                if request["req"] == "list_sessions" {
-                    state.user_connected_sessions = if user_connections_supported {
-                        daemon_user_connections(&legacy_socket).await
-                    } else { Default::default() };
+                if request["req"] == "session_context_breakdown" && !daemon.context_breakdown() {
+                    write_json_line(&mut write_half, &ServerFrame::reply(
+                        request["id"].as_u64().unwrap_or(0),
+                        ApiEvent::Error {
+                            code: ErrorCode::UnknownRequest,
+                            message: "This runtime does not support context breakdown.".into(),
+                        },
+                    )).await?;
+                    continue;
+                }
+                if request["req"] == "session_shake_tools" && !daemon.shake_tools() {
+                    write_json_line(&mut write_half, &ServerFrame::reply(
+                        request["id"].as_u64().unwrap_or(0),
+                        ApiEvent::Error {
+                            code: ErrorCode::UnknownRequest,
+                            message: "This runtime does not support manual Shake tools.".into(),
+                        },
+                    )).await?;
+                    continue;
+                }
+                if request["req"] == "get_routing_view" {
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    let event = if daemon.routing() {
+                        daemon_routing_view(&legacy_socket).await
+                    } else {
+                        ApiEvent::Error { code: ErrorCode::UnknownRequest, message: "This runtime does not support account routing.".into() }
+                    };
+                    write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
+                    continue;
+                }
+                if matches!(request["req"].as_str(), Some("list_side_questions" | "get_side_question_history" | "promote_side_question")) {
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    let event = if daemon.side_questions() {
+                        daemon_side_questions(&legacy_socket, &request).await
+                    } else {
+                        ApiEvent::Error { code: ErrorCode::UnknownRequest, message: "This runtime does not support side questions.".into() }
+                    };
+                    write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
+                    continue;
+                }
+                // Never wait on a task poll here: it is driven by this same
+                // select loop. Use the last presence snapshot until it finishes.
+                if request["req"] == "list_sessions" && daemon.user_connections()
+                    && let Ok(mut control) = control.try_lock()
+                {
+                    state.refresh_user_connections(&mut control, &legacy_socket).await;
+                }
+                if request["req"] == "list_draft_models" {
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    let event = daemon_draft_models(&legacy_socket).await;
+                    write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
+                    continue;
+                }
+                if request["req"] == "transcribe_audio" {
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    match transcribe::start(transcriber.as_ref(), transcription.is_some(), request) {
+                        Ok((work, bytes)) => {
+                            timing::log(&format!("transcribe_audio id={id} wav_bytes={bytes}"));
+                            pending.begin(id, "transcribe_audio", received, received.elapsed());
+                            transcription = Some(work);
+                        }
+                        Err(frame) => write_json_line(&mut write_half, &frame).await?,
+                    }
+                    continue;
+                }
+                if matches!(request["req"].as_str(), Some("watch_background_tasks" | "cancel_background_task")) {
+                    use jcode_harness_api::{ApiRequest, ClientFrame};
+                    let id = request["id"].as_u64().unwrap_or(0);
+                    let event = if daemon.background_tasks() {
+                        match serde_json::from_value::<ClientFrame>(request).map(|frame| frame.request) {
+                            Ok(ApiRequest::WatchBackgroundTasks { session_id, task_id }) if
+                                state.session_id.as_ref().is_none_or(|attached| attached == &session_id) => {
+                                task_poll = None;
+                                let mut watch = TaskWatch { session_id, task_id, last: None, delay: TASK_POLL_MIN };
+                                let event = TaskWatch::fetch(&mut *control.lock().await, &legacy_socket, &watch.session_id, watch.task_id.as_deref()).await
+                                    .map(|snapshot| watch.accept(snapshot, true).expect("forced snapshot"));
+                                task_watch = Some(watch);
+                                task_tick.as_mut().reset(tokio::time::Instant::now() + TASK_POLL_MIN);
+                                match event {
+                                    Ok(event) => event,
+                                    Err(error) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
+                                }
+                            }
+                            Ok(ApiRequest::CancelBackgroundTask { session_id, task_id }) if
+                                state.session_id.as_ref().is_none_or(|attached| attached == &session_id) => {
+                                match DaemonControl::default().background_tasks(&legacy_socket, &session_id, Some(&task_id), true).await {
+                                    Ok(_) => ApiEvent::Ok,
+                                    Err(error) => ApiEvent::Error { code: ErrorCode::Internal, message: error.to_string() },
+                                }
+                            }
+                            _ => ApiEvent::Error { code: ErrorCode::InvalidRequest, message: "Invalid background task request for this connection".into() },
+                        }
+                    } else {
+                        ApiEvent::Error { code: ErrorCode::UnknownRequest, message: "The native daemon does not support background task inspection".into() }
+                    };
+                    write_json_line(&mut write_half, &ServerFrame::reply(id, event)).await?;
+                    continue;
+                }
+                if matches!(request["req"].as_str(), Some("attach_session" | "create_session" | "detach_session")) {
+                    task_watch = None;
+                    task_poll = None;
                 }
                 // Translation may inspect persisted session/archive files. Tell
                 // Tokio before entering that synchronous region so it can keep
@@ -534,6 +815,32 @@ where
                 if heavy {
                     allocator::trim();
                 }
+            }
+            _ = &mut task_tick, if task_watch.is_some() && task_poll.is_none() => {
+                if let Some(watch) = &task_watch {
+                    let socket = legacy_socket.clone();
+                    let session_id = watch.session_id.clone();
+                    let task_id = watch.task_id.clone();
+                    let control = Arc::clone(&control);
+                    task_poll = Some(Box::pin(async move {
+                        TaskWatch::fetch(&mut *control.lock().await, &socket, &session_id, task_id.as_deref()).await
+                    }));
+                }
+            }
+            snapshot = async { task_poll.as_mut().expect("pending task poll").await }, if task_poll.is_some() => {
+                task_poll = None;
+                if let Some(watch) = &mut task_watch {
+                    let event = snapshot.ok().and_then(|snapshot| watch.accept(snapshot, false));
+                    let delay = watch.next_delay(event.is_some());
+                    task_tick.as_mut().reset(tokio::time::Instant::now() + delay);
+                    if let Some(event) = event {
+                        write_json_line(&mut write_half, &ServerFrame::event(event)).await?;
+                    }
+                }
+            }
+            frame = async { transcription.as_mut().expect("pending transcription").await }, if transcription.is_some() => {
+                transcription = None;
+                write_frame_timed(&mut write_half, &frame, &mut pending, "bridge").await?;
             }
             n = read_frame_bytes(&mut legacy_reader, &mut legacy_frame) => {
                 if n? == 0 {
@@ -628,6 +935,7 @@ where
 }
 
 #[cfg(all(test, unix))]
+#[path = "tests/runtime_command_compat_tests.rs"]
 mod runtime_command_compat_tests;
 
 #[cfg(all(test, unix))]
@@ -656,6 +964,11 @@ mod public_acceptance_tests {
         let mut reader = BufReader::new(client_read);
         write_json_line(&mut client_write, &json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1,"client":"stdio-test"})).await.unwrap();
         let (_daemon, _) = listener.accept().await.unwrap();
+        let (probe, _) = listener.accept().await.unwrap();
+        let mut probe = BufReader::new(probe);
+        let mut probe_line = String::new();
+        probe.read_line(&mut probe_line).await.unwrap();
+        write_json_line(probe.get_mut(), &json!({"type":"pong","id":0})).await.unwrap();
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         assert_eq!(
@@ -714,7 +1027,8 @@ mod public_acceptance_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn public_socket_keeps_its_attachment_after_another_sessions_state() {
         let _home_lock = translate::jcode_home_test_lock();
-        let root = std::env::temp_dir().join(format!(
+        // Unix socket paths are capped near 104 bytes; macOS TMPDIR alone is ~50.
+        let root = std::path::Path::new("/tmp").join(format!(
             "jcode-api-attachment-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -739,6 +1053,11 @@ mod public_acceptance_tests {
 
         let fake_daemon = tokio::spawn(async move {
             let (stream, _) = legacy_listener.accept().await.unwrap();
+            let (probe, _) = legacy_listener.accept().await.unwrap();
+            let mut probe = BufReader::new(probe);
+            let mut probe_line = String::new();
+            probe.read_line(&mut probe_line).await.unwrap();
+            write_json_line(probe.get_mut(), &json!({"type":"pong","id":0,"capabilities":["runtime_commands"]})).await.unwrap();
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
             let mut attached_state_id = None;
@@ -756,7 +1075,11 @@ mod public_acceptance_tests {
                         .unwrap();
                     }
                     Some("message") => {
-                        assert_eq!(request["content"], "public boundary prompt");
+                        if request["content"] == "public boundary prompt" {
+                            continue;
+                        }
+                        assert_eq!(request["content"], "hello");
+                        assert_eq!(request["active_skill"], "poteto-mode");
                         return;
                     }
                     _ => {}
@@ -801,6 +1124,13 @@ mod public_acceptance_tests {
         .await
         .unwrap();
 
+        write_json_line(
+            &mut write,
+            &json!({"id":4, "req":"send_skill_message", "session_id":"session_alpha", "content":"hello", "active_skill":"poteto-mode"}),
+        )
+        .await
+        .unwrap();
+
         tokio::time::timeout(std::time::Duration::from_secs(2), fake_daemon)
             .await
             .expect("message should cross the API/legacy boundary")
@@ -811,7 +1141,7 @@ mod public_acceptance_tests {
 }
 
 #[cfg(test)]
-#[path = "framing_tests.rs"]
+#[path = "tests/framing_tests.rs"]
 mod framing_tests;
 
 #[cfg(all(test, unix))]
@@ -905,6 +1235,11 @@ mod fragmented_reply_tests {
             let mut replies = BufReader::new(client_read).lines();
             write_json_line(&mut client_write, &json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1})).await.unwrap();
             let (daemon, _) = listener.accept().await.unwrap();
+            let (probe, _) = listener.accept().await.unwrap();
+            let mut probe = BufReader::new(probe);
+            let mut probe_line = String::new();
+            read_frame(&mut probe, &mut probe_line).await.unwrap();
+            write_json_line(probe.get_mut(), &json!({"type":"pong","id":0})).await.unwrap();
             let (daemon_read, mut daemon_write) = daemon.into_split();
             let mut requests = BufReader::new(daemon_read).lines();
             assert_eq!(serde_json::from_str::<Value>(&replies.next_line().await.unwrap().unwrap()).unwrap()["ev"], "hello_ok");

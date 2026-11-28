@@ -1,6 +1,18 @@
 use super::*;
 use crate::replay::{TimelineEvent, TimelineEventKind};
 
+#[tokio::test]
+async fn expanded_export_is_explicit_and_does_not_modify_saved_tasks() {
+    let session =
+        crate::session::Session::create_with_id("offline_expanded_plan".into(), None, None);
+    let app = App::new_for_replay_silent(session);
+    assert!(!app.pinned_todos_expanded);
+    let app = app.with_expanded_replay_todos();
+    assert!(app.pinned_todos_expanded);
+    assert!(app.pinned_todos_payload.is_none());
+    assert!(app.is_replay);
+}
+
 fn todo(name: &str) -> Value {
     json!({"id":"historical", "content":name, "status":"in_progress", "priority":"high"})
 }
@@ -43,6 +55,8 @@ fn parses_saved_and_public_todos_and_labeled_metadata() {
 #[test]
 fn ansi_preserves_rgb_blank_backgrounds_and_wide_cells() {
     use ratatui::{layout::Rect, style::Color};
+    // crossterm memoizes NO_COLOR process-wide; the ANSI output is what's under test.
+    crossterm::style::Colored::set_ansi_color_disabled(false);
     let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 2));
     buffer[(0, 0)]
         .set_symbol("界")
@@ -74,7 +88,7 @@ async fn replay_has_no_live_startup_widgets_or_todo_completion_actions() {
         }],
     );
     let mut app = App::new_for_replay_silent(session);
-    assert!(app.session.messages.is_empty());
+    assert!(app.session.has_no_messages());
     assert!(app.display_messages.is_empty());
     assert!(!app.auto_poke_incomplete_todos);
     let widget = app.info_widget_data();
@@ -107,7 +121,7 @@ async fn replay_has_no_live_startup_widgets_or_todo_completion_actions() {
     let timeline = vec![
         TimelineEvent { t:0, kind:TimelineEventKind::Thinking { duration:1 } },
         TimelineEvent { t:1, kind:TimelineEventKind::ToolDone { name:"todo".into(),
-            output:json!([{"id":"finished", "content":"Recorded completed work", "status":"completed", "priority":"high"}]).to_string(), is_error:false } },
+            output:json!([{"id":"finished", "content":"Recorded completed work", "status":"completed", "priority":"high"}]).to_string(), is_error:false, codemode:None, ask:None } },
         TimelineEvent { t:2, kind:TimelineEventKind::Done },
     ];
     for (_, event) in crate::replay::timeline_to_replay_events(&timeline) {
@@ -170,7 +184,7 @@ fn historical_frames_use_production_draw_and_never_current_todo_files() {
         crate::session::Session::create_with_id("historical_export_test".into(), None, None);
     let live: Vec<crate::todo::TodoItem> =
         serde_json::from_value(json!([todo("TODAY_ONLY_TASK")])).unwrap();
-    crate::todo::save_todos(&session.id, &live).unwrap();
+    crate::todo::save_todos(session.id(), &live).unwrap();
     let timeline = vec![
         TimelineEvent {
             t: 0,
@@ -183,6 +197,8 @@ fn historical_frames_use_production_draw_and_never_current_todo_files() {
             kind: TimelineEventKind::ToolDone {
                 name: "todo".into(),
                 output: json!([todo("HISTORICAL_FIRST")]).to_string(),
+                codemode: None,
+                ask: None,
                 is_error: false,
             },
         },
@@ -191,6 +207,8 @@ fn historical_frames_use_production_draw_and_never_current_todo_files() {
             kind: TimelineEventKind::ToolDone {
                 name: "todo".into(),
                 output: json!([todo("HISTORICAL_LATEST")]).to_string(),
+                codemode: None,
+                ask: None,
                 is_error: false,
             },
         },
@@ -234,6 +252,6 @@ fn historical_frames_use_production_draw_and_never_current_todo_files() {
             .is_err()
     );
     // Export must not mutate the user's current todo files.
-    assert_eq!(crate::todo::load_todos(&session.id).unwrap(), live);
+    assert_eq!(crate::todo::load_todos(session.id()).unwrap(), live);
     println!("HISTORICAL_EXPORT_VERIFIED");
 }

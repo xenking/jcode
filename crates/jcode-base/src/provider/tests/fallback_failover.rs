@@ -1,4 +1,5 @@
 include!("agent_failover.rs");
+include!("routing_decider.rs");
 
 #[test]
 fn test_fallback_sequence_includes_all_providers() {

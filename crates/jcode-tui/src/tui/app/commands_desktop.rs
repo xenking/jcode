@@ -120,7 +120,7 @@ pub(super) fn handle_desktop_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     let session_id = super::commands::active_session_id(app);
-    if !app.is_remote && app.session.id == session_id {
+    if !app.is_remote && app.session.id() == session_id {
         // Desktop reads the transcript from disk, so flush it first.
         let _ = app.session.save();
     }
@@ -134,7 +134,7 @@ pub(super) fn handle_desktop_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     };
 
-    let working_dir = app.session.working_dir.as_deref().map(Path::new);
+    let working_dir = app.session.working_dir().map(Path::new);
     match spawn_detached(&binary, &desktop_launch_args(&session_id), working_dir) {
         Ok(()) => {
             app.push_display_message(DisplayMessage::system(format!(

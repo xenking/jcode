@@ -83,6 +83,7 @@ fn picker_option_with_method(provider: &str, api_method: &str) -> PickerOption {
         available: true,
         detail: String::new(),
         estimated_reference_cost_micros: None,
+        icon: None,
     }
 }
 
@@ -248,6 +249,27 @@ fn model_picker_fuzzy_filter_prefers_previously_selected_route() {
     App::apply_inline_interactive_filter(&mut picker);
 
     assert_eq!(picker.filtered, vec![1, 0]);
+}
+
+#[test]
+fn model_picker_literal_multi_word_match_outranks_heavily_used_loose_match() {
+    let mut picker = InlineInteractiveState {
+        kind: PickerKind::Model,
+        filtered: vec![0, 1, 2],
+        entries: vec![
+            picker_entry("gemini-2.5-pro", "OpenRouter", 5000),
+            picker_entry("gpt-5.4", "OpenAI", 9000),
+            picker_entry("gemini-3-neon", "Google", 0),
+        ],
+        selected: 0,
+        column: 0,
+        filter: "gemini neon".to_string(),
+        preview: false,
+    };
+
+    App::apply_inline_interactive_filter(&mut picker);
+
+    assert_eq!(picker.filtered.first(), Some(&2));
 }
 
 #[test]
@@ -655,6 +677,8 @@ fn remote_model_catalog_cache_rejects_forged_or_oversized_routes() {
 
 fn model_route(model: &str, provider: &str, api_method: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model.to_string(),
         provider: provider.to_string(),
         api_method: api_method.to_string(),
@@ -662,6 +686,8 @@ fn model_route(model: &str, provider: &str, api_method: &str) -> crate::provider
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     }
 }
 

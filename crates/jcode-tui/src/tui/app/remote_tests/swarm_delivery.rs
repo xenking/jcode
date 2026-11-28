@@ -22,6 +22,36 @@ fn soft_interrupt_injected(content: &str, display_role: Option<&str>) -> ServerE
 }
 
 #[test]
+fn file_activity_delivery_uses_metadata_not_a_text_prefix() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let content = "moss edited src/parser.rs +3-1: fix parser";
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(content, Some("file_activity")),
+        &mut remote,
+    );
+    let message = app.display_messages().last().unwrap();
+    assert_eq!(message.role, "swarm");
+    assert_eq!(message.title.as_deref(), Some("File activity · moss"));
+
+    // Identical prose with ordinary system metadata must not be classified
+    // as file activity, either live or when history is restored.
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(content, Some("system")),
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().last().unwrap().role, "system");
+    let mut messages = vec![crate::tui::DisplayMessage::system(content)];
+    super::super::remote_notifications::normalize_swarm_delivery_messages(&mut messages);
+    assert_eq!(messages[0].role, "system");
+}
+
+#[test]
 fn every_system_and_background_delivery_adds_an_entry() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -189,6 +219,110 @@ fn injected_swarm_dm_adds_delivery_entry_after_its_notification_card() {
 }
 
 #[test]
+fn cross_swarm_dm_receipt_and_injection_show_one_card_per_swarm() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    let body = "Preserved full report. ".repeat(12) + "\n\nLiteral '): marker in the body.";
+    let receipt = format!("Cross-swarm DM from fox (swarm 'repo: parser'): {body}");
+    let mut event = swarm_dm_notification("fox", &body, Some("parser report"));
+    if let ServerEvent::Notification { message, .. } = &mut event {
+        *message = receipt.clone();
+    }
+    let start = app.display_messages().len();
+    handle_server_event(&mut app, event, &mut remote);
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(&receipt, Some("system")),
+        &mut remote,
+    );
+    let other = format!("Cross-swarm DM from fox (swarm 'repo: lexer'): {body}");
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(&other, Some("system")),
+        &mut remote,
+    );
+
+    let rows = &app.display_messages()[start..];
+    assert_eq!(rows.len(), 2, "the receipt and delivery duplicated a DM");
+    assert_eq!(
+        rows[0].title.as_deref(),
+        Some("DM from fox (swarm 'repo: parser')")
+    );
+    assert_eq!(
+        rows[1].title.as_deref(),
+        Some("DM from fox (swarm 'repo: lexer')")
+    );
+    for row in rows {
+        let full = jcode_tui_messages::parse_collapsible_swarm_content(&row.content).unwrap();
+        assert_eq!(full.body, body);
+        let lines =
+            crate::tui::ui::render_swarm_message(row, 100, crate::config::DiffDisplayMode::Off);
+        let icon = crate::id::session_icon("fox");
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains(icon))
+        );
+    }
+    assert_eq!(
+        jcode_tui_messages::parse_collapsible_swarm_content(&rows[0].content)
+            .unwrap()
+            .tldr,
+        "parser report"
+    );
+    let mut history = [crate::tui::DisplayMessage::system(other)];
+    crate::tui::app::remote_notifications::normalize_swarm_delivery_messages(&mut history);
+    assert_eq!(history[0].title, rows[1].title);
+    assert_eq!(history[0].content, rows[1].content);
+}
+
+#[test]
+fn injected_system_reminder_never_shows_raw_tags() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    // The reply-routing reminder after a swarm delivery adds no row.
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected("Cross-swarm DM from fox (swarm 'a'): done", Some("system")),
+        &mut remote,
+    );
+    let before = app.display_messages().len();
+    assert_eq!(app.display_messages().last().unwrap().role, "swarm");
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(
+            "<system-reminder>\nYou just received a cross-swarm direct message from fox in swarm 'a'. To reply, use swarm action=dm with to_swarm='a' and to_session='session_fox'.\n</system-reminder>",
+            Some("system"),
+        ),
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().len(), before);
+
+    // Any other reminder keeps its own row, minus the tags.
+    app.push_display_message(crate::tui::DisplayMessage::system("unrelated notice"));
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(
+            "<system-reminder>\nContinue the mission.\n</system-reminder>",
+            Some("system"),
+        ),
+        &mut remote,
+    );
+    let last = app.display_messages().last().unwrap();
+    assert_eq!(last.role, "system");
+    assert_eq!(last.content, "Continue the mission.");
+}
+
+#[test]
 fn injected_swarm_dm_without_card_renders_one_collapsed_row() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -254,7 +388,11 @@ fn history_restore_renders_swarm_deliveries_as_one_row() {
             ("assistant", format!("DM from fox: {long}")),
         ] {
             messages.push(crate::protocol::HistoryMessage {
-                response_stats: None,
+                codemode: None,
+                ask: None,
+                tool_duration_ms: None,
+                attachments: Vec::new(),
+                response_stats: None, timestamp_ms: None,
                 role: role.to_string(),
                 content,
                 tool_calls: None,

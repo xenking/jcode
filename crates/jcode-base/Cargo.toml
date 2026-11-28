@@ -16,23 +16,21 @@ name = "jcode_base"
 path = "src/lib.rs"
 
 [dependencies]
-# Memory allocator (reduces fragmentation for long-running server)
-tikv-jemalloc-ctl = { version = "0.6", optional = true }
-tikv-jemalloc-sys = { version = "0.6", optional = true }
-
 # Async runtime
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 futures = "0.3"
 async-trait = "0.1"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "blocking", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
+bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "blocking", "charset", "http2", "socks", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_yaml = "0.9"
+shlex = "1.3"
 toml = "0.8"
 toml_edit = "0.20"
 
@@ -44,6 +42,8 @@ anyhow = "1"
 libc = "0.2"             # Unix system calls (flock)
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
+aho-corasick = "1"
+memchr = "2"
 rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 urlencoding = "2"        # URL encoding for web search
 uuid = { version = "1", features = ["v4", "v5"] }
@@ -52,6 +52,7 @@ proctitle = "0.1"
 # Embeddings (local inference) - behind feature flag (163 crates, slow to compile)
 jcode-embedding = { path = "../jcode-embedding", optional = true }
 jcode-gateway-types = { path = "../jcode-gateway-types" }
+jcode-harness-api-server = { path = "../jcode-harness-api-server" }
 jcode-import-core = { path = "../jcode-import-core" }
 jcode-logging = { path = "../jcode-logging" }
 
@@ -68,7 +69,7 @@ jcode-azure-auth = { path = "../jcode-azure-auth" }
 jcode-agent-runtime = { path = "../jcode-agent-runtime" }
 jcode-provider-metadata = { path = "../jcode-provider-metadata" }
 jcode-provider-env = { path = "../jcode-provider-env" }
-jcode-provider-core = { path = "../jcode-provider-core" }
+jcode-provider-core = { path = "../jcode-provider-core", features = ["blocking-http"] }
 # default-features=false so this crate's `bedrock` feature (below) controls the
 # AWS SDK stack; the pure model-metadata/credential-detection layer is always on.
 jcode-provider-bedrock = { path = "../jcode-provider-bedrock", default-features = false }
@@ -87,6 +88,8 @@ jcode-terminal-launch = { path = "../jcode-terminal-launch" }
 jcode-terminal-image = { path = "../jcode-terminal-image" }
 jcode-telemetry-core = { path = "../jcode-telemetry-core" }
 jcode-usage-types = { path = "../jcode-usage-types" }
+jcode-routing-policy = { path = "../jcode-routing-policy" }
+jcode-routing-meters = { path = "../jcode-routing-meters" }
 
 # NOTE: microphone capture and transcription live in `jcode-voice`, a
 # client-only crate. The shared runtime never opens a microphone.
@@ -96,7 +99,7 @@ jcode-usage-types = { path = "../jcode-usage-types" }
 # NOTE: no terminal crates (crossterm, ratatui, qrcode). Interactive login
 # prompts and QR rendering are client concerns: the CLI installs a presenter
 # from `jcode-terminal-prompt` into `auth::login_ui`.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "ico", "tiff"] }  # PNG/JPEG plus BMP/ICO/TIFF decoding so they can be re-encoded to PNG for providers (#1712). Skip avif/rav1e, exr, etc.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }  # Provider formats and mobile GIF/WebP thumbnails. Skip avif/rav1e, exr, etc.
 
 # NOTE: PDF text extraction (jcode-pdf) lives in the upper jcode-app-core crate
 # (tool/read.rs), not here.
@@ -131,7 +134,12 @@ default = ["bedrock"]
 # `pub` so downstream crates' test targets can reach them. Enabled as a
 # dev-dependency feature by jcode-app-core / jcode / etc.; never in normal
 # (non-test) builds.
-test-support = []
+test-support = ["test-isolated-hooks", "jcode-storage/test-support"]
+# Suppress the machine's hooks in test builds unless a test opts in with
+# `hooks::TestHooksGuard::allow`. Enabled as a dev-dependency feature by
+# jcode-app-core, so it applies to test/bench/example builds only: unit tests must
+# not inherit the developer's ~/.jcode/config.toml hooks (see hooks::hooks_suppressed).
+test-isolated-hooks = []
 jemalloc = [
     "dep:tikv-jemalloc-ctl",
     "dep:tikv-jemalloc-sys",
@@ -150,10 +158,17 @@ bedrock = ["jcode-provider-bedrock/aws-sdk"]
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+tikv-jemalloc-ctl = { version = "0.6", optional = true }
+tikv-jemalloc-sys = { version = "0.6", optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
 
 [dev-dependencies]
+# base's own tests resolve storage-level homes (active_pids, sessions) the same
+# way as downstream tests: never the developer's ~/.jcode.
+jcode-storage = { path = "../jcode-storage", features = ["test-support"] }
 # The browserless login integration test installs the real terminal presenter.
 jcode-terminal-prompt = { path = "../jcode-terminal-prompt" }
 # Dev-only cycle (cargo permits dev-dependencies on dependents): base's
@@ -162,4 +177,3 @@ jcode-terminal-prompt = { path = "../jcode-terminal-prompt" }
 jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
 # Paused-time (auto-advancing virtual clock) tests for the background stall watchdog.
 tokio = { version = "1", features = ["test-util"] }
-

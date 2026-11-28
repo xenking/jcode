@@ -18,19 +18,33 @@ use std::{fmt, time::Duration};
 
 mod backend;
 #[cfg(feature = "desktop-config")]
+pub mod continuous;
+#[cfg(feature = "desktop-config")]
 pub mod dictation;
+#[cfg(feature = "desktop-config")]
+mod upload;
+#[cfg(feature = "desktop-config")]
+pub use upload::{UploadRoute, transcribe_upload, upload_route, upload_supported};
+mod elevenlabs;
 #[cfg(feature = "desktop-config")]
 pub mod global;
 mod nari;
+#[cfg(feature = "desktop-config")]
+mod recovery;
 mod soniox;
 pub use backend::StreamingBackend;
 #[cfg(feature = "desktop-config")]
-pub use backend::configured_backend;
+pub use backend::{
+    StreamingPlan, TriggerRoute, configured_backend, configured_label, plan_streaming,
+    trigger_route,
+};
+pub use elevenlabs::ElevenLabsSession;
 #[cfg(feature = "desktop-config")]
 pub use jcode_base::config::DictationBackend;
+pub mod speech;
 pub mod timing;
 pub use nari::{
-    NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession, correct_transcript,
+    NARI_MODEL, NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession, correct_transcript,
     estimated_transcription_usd, nari_api_key, nari_pcm_channel, recognition_prompt,
 };
 pub use soniox::{
@@ -53,6 +67,9 @@ pub use streaming_capture::{NariRecording, PcmRecording};
 pub const NATIVE_CAPTURE: bool = cfg!(feature = "voice-capture");
 pub const MAX_AUDIO_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_RECORDING_DURATION: Duration = Duration::from_secs(5 * 60);
+/// Longest live (streaming) dictation. Provider sessions are renewed under the
+/// hood, so this is only a runaway guard, not a provider limit.
+pub const MAX_STREAMING_DURATION: Duration = Duration::from_secs(60 * 60);
 pub const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
@@ -76,6 +93,20 @@ pub enum VoiceError {
     Cancelled,
     SonioxNotConfigured,
     SonioxRejected,
+    ElevenLabsNotConfigured,
+    ElevenLabsRejected,
+    /// `[dictation] model` is not a usable model name for the backend.
+    InvalidModel,
+    /// The selected `[dictation] backend` (named here) has no live capture.
+    NotStreaming(&'static str),
+    /// The selected `[dictation] backend` (named here) records on its own, so it
+    /// cannot take audio recorded elsewhere.
+    UploadUnsupported(&'static str),
+    /// `cause` ended a dictation whose audio was kept on disk at `path`.
+    AudioKept {
+        cause: Box<VoiceError>,
+        path: std::path::PathBuf,
+    },
 }
 impl fmt::Display for VoiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -115,6 +146,26 @@ impl fmt::Display for VoiceError {
             Self::SonioxRejected => f.write_str(
                 "Soniox rejected the voice session. Check your key, balance, and settings",
             ),
+            Self::ElevenLabsNotConfigured => f.write_str(
+                "Configure a valid ElevenLabs API key (ELEVENLABS_API_KEY or <jcode config dir>/elevenlabs.env)",
+            ),
+            Self::ElevenLabsRejected => f.write_str(
+                "ElevenLabs rejected the voice session. Check your Scribe access and balance",
+            ),
+            Self::InvalidModel => f.write_str(
+                "The configured speech model name is not valid for this backend. Check [dictation] model",
+            ),
+            Self::UploadUnsupported(backend) => write!(
+                f,
+                "The {backend} dictation backend cannot transcribe audio sent from another device. Pick Nari, Soniox, ElevenLabs or Jcode subscription in [dictation] backend",
+            ),
+            Self::NotStreaming(backend) => write!(
+                f,
+                "The {backend} dictation backend has no live microphone capture. Pick Nari, Soniox or ElevenLabs in Settings",
+            ),
+            Self::AudioKept { cause, path } => {
+                write!(f, "{cause}. Your recording is kept at {}", path.display())
+            }
         }
     }
 }
@@ -267,8 +318,9 @@ async fn transcribe_with(
 }
 
 /// Validate the PCM16 mono WAV format emitted by capture, including duration.
+/// Returns the sample rate and the byte range of the PCM data.
 #[cfg(feature = "desktop-config")]
-fn validate_wav(bytes: &[u8]) -> Result<(), VoiceError> {
+fn validate_wav(bytes: &[u8]) -> Result<(u32, std::ops::Range<usize>), VoiceError> {
     let invalid = || VoiceError::InvalidAudio;
     if bytes.len() < 44
         || bytes.len() > MAX_AUDIO_BYTES
@@ -285,6 +337,7 @@ fn validate_wav(bytes: &[u8]) -> Result<(), VoiceError> {
     let mut pos = 12;
     let mut rate = None;
     let mut data_len = None;
+    let mut data_start = 0;
     while pos + 8 <= bytes.len() {
         let len = u32_at(pos + 4) as usize;
         let start = pos + 8;
@@ -312,18 +365,17 @@ fn validate_wav(bytes: &[u8]) -> Result<(), VoiceError> {
                     return Err(invalid());
                 }
                 data_len = Some(len);
+                data_start = start;
             }
             _ => {}
         }
         pos = end + len % 2;
     }
-    if pos != bytes.len()
-        || data_len.ok_or_else(invalid)? as u64
-            > rate.ok_or_else(invalid)? as u64 * 2 * MAX_RECORDING_DURATION.as_secs()
-    {
+    let (rate, data_len) = (rate.ok_or_else(invalid)?, data_len.ok_or_else(invalid)?);
+    if pos != bytes.len() || data_len as u64 > rate as u64 * 2 * MAX_RECORDING_DURATION.as_secs() {
         return Err(invalid());
     }
-    Ok(())
+    Ok((rate, data_start..data_start + data_len))
 }
 
 #[cfg(all(feature = "desktop-config", any(feature = "voice-capture", test)))]
@@ -908,19 +960,17 @@ mod tests {
 
     #[tokio::test]
     async fn requests_time_out_and_redirects_are_not_followed() {
-        let (base, worker) = mock(
-            200,
-            "",
-            br#"{"text":"late"}"#.to_vec(),
-            Duration::from_millis(100),
-        );
+        // A listening socket that never serves HTTP guarantees a timeout without
+        // a worker that could block in accept if the request expires first.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
         assert_eq!(
             upload(&base, None, Duration::from_millis(20))
                 .await
                 .unwrap_err(),
             VoiceError::Timeout
         );
-        worker.join().unwrap();
+        drop(listener);
         let (base, worker) = mock(
             307,
             "Location: http://127.0.0.1:1/secret\r\n",

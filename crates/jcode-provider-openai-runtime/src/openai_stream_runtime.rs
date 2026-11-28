@@ -3,6 +3,7 @@ use super::openai_stream_diagnostics::{
     StreamProgress, add_cache_comparison, reqwest_header_fields, tungstenite_header_fields,
 };
 use super::*;
+use jcode_provider_openai::websocket_health::WebsocketEventClassification;
 
 #[path = "openai_ws_cancel_recovery.rs"]
 mod openai_ws_cancel_recovery;
@@ -10,8 +11,16 @@ use openai_ws_cancel_recovery::{RecoverableAttempt, RecoveryPhase, has_unanswere
 
 // Inspect the wire error, not the parser's lossy message. Envelope metadata
 // must not hide an otherwise opaque rejection, but substantive details do.
+#[cfg(test)]
 fn opaque_ws_rejection(text: &str, response_started: &mut bool) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
+    opaque_ws_rejection_event(&WebsocketEventClassification::parse(text), response_started)
+}
+
+fn opaque_ws_rejection_event(
+    event: &WebsocketEventClassification,
+    response_started: &mut bool,
+) -> bool {
+    let Some(value) = event.value() else {
         return false;
     };
     if value
@@ -67,54 +76,20 @@ fn opaque_ws_rejection(text: &str, response_started: &mut bool) -> bool {
     recoverable
 }
 
-#[test]
-fn opaque_rejection_requires_exact_shape_and_no_response_activity() {
-    let generic = serde_json::json!({"type":"error","error":{"type":"invalid_request_error","message":"Invalid request"}});
-    assert!(opaque_ws_rejection(&generic.to_string(), &mut false));
-    for key in ["code", "param", "detail"] {
-        let mut detailed = generic.clone();
-        detailed["error"][key] = Value::String("specific validation failure".into());
-        assert!(!opaque_ws_rejection(&detailed.to_string(), &mut false));
-    }
-    let mut metadata = generic.clone();
-    metadata["sequence_number"] = serde_json::json!(0);
-    metadata["event_id"] = serde_json::json!("event_fixture");
-    metadata["request_id"] = serde_json::json!("request_fixture");
-    metadata["response"] = Value::Null;
-    metadata["error"]["code"] = Value::Null;
-    assert!(opaque_ws_rejection(&metadata.to_string(), &mut false));
-    metadata["status"] = serde_json::json!(400);
-    assert!(opaque_ws_rejection(&metadata.to_string(), &mut false));
-    metadata["status"] = serde_json::json!(429);
-    assert!(!opaque_ws_rejection(&metadata.to_string(), &mut false));
-    metadata["status"] = serde_json::json!(400);
-    metadata["response"] = serde_json::json!({"id":"resp_started"});
-    assert!(!opaque_ws_rejection(&metadata.to_string(), &mut false));
-    metadata["response"] = Value::Null;
-    metadata["detail"] = serde_json::json!("specific validation failure");
-    assert!(!opaque_ws_rejection(&metadata.to_string(), &mut false));
-    for kind in [
-        "response.created",
-        "response.output_text.delta",
-        "response.reasoning_summary_text.delta",
-        "response.function_call_arguments.delta",
-    ] {
-        let mut started = false;
-        assert!(!opaque_ws_rejection(
-            &serde_json::json!({"type":kind}).to_string(),
-            &mut started
-        ));
-        assert!(!opaque_ws_rejection(&generic.to_string(), &mut started));
-    }
-}
+#[cfg(test)]
+#[path = "opaque_rejection_tests.rs"]
+mod opaque_rejection_tests;
 
 /// This is intentionally outside the generic retry loop. Even a transient
 /// failure of this single HTTPS attempt must not schedule another replay.
 pub(super) async fn recover_opaque_ws_rejection(
+    recovery_client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
     account_label: Option<String>,
-    request: Value,
+    request: &Value,
+    turn_state: Arc<StdMutex<Option<String>>>,
     tx: &mpsc::Sender<Result<StreamEvent>>,
+    premium_route: Option<&str>,
 ) {
     emit_status_detail(tx, "opaque websocket rejection: trying HTTPS once").await;
     jcode_base::logging::warn(
@@ -122,12 +97,14 @@ pub(super) async fn recover_opaque_ws_rejection(
     );
     let (recovery_tx, mut recovery_rx) = mpsc::channel(100);
     let recovery = stream_response(
-        jcode_provider_core::fresh_transport_client(),
+        recovery_client,
         credentials,
         account_label,
         request,
+        turn_state,
         "https recovery: opaque websocket rejection".into(),
         recovery_tx,
+        premium_route,
     );
     tokio::pin!(recovery);
     let mut failed = false;
@@ -428,11 +405,13 @@ fn response_http_request(
             builder = builder.header("chatgpt-account-id", account_id);
         }
     }
-    if let Some(built) = builder.try_clone().and_then(|builder| builder.build().ok()) {
+    if jcode_base::logging::LogLevel::Debug.is_enabled()
+        && let Some(built) = builder.try_clone().and_then(|builder| builder.build().ok())
+    {
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "https_request_routing_headers",
-            routing_header_log_fields(built.headers()),
+            || routing_header_log_fields(built.headers()),
         );
     }
     builder
@@ -479,6 +458,82 @@ pub(super) enum PersistentWsResult {
     Failed(String),
 }
 
+fn persistent_ws_delta_request(
+    request: &Value,
+    incremental_items: &[Value],
+    previous_response_id: &str,
+) -> Value {
+    let mut continuation_request = serde_json::json!({
+        "type": "response.create",
+        "previous_response_id": previous_response_id,
+        "input": incremental_items,
+    });
+    if let Some(model) = request.get("model") {
+        continuation_request["model"] = model.clone();
+    }
+    if let Some(tools) = request.get("tools") {
+        continuation_request["tools"] = tools.clone();
+    }
+    if let Some(tool_choice) = request.get("tool_choice") {
+        continuation_request["tool_choice"] = tool_choice.clone();
+    }
+    if let Some(instructions) = request.get("instructions") {
+        continuation_request["instructions"] = instructions.clone();
+    }
+    if let Some(max_output_tokens) = request.get("max_output_tokens") {
+        continuation_request["max_output_tokens"] = max_output_tokens.clone();
+    }
+    if let Some(reasoning) = request.get("reasoning") {
+        continuation_request["reasoning"] = reasoning.clone();
+    }
+    if let Some(text) = request.get("text") {
+        continuation_request["text"] = text.clone();
+    }
+    if let Some(context_management) = request.get("context_management") {
+        continuation_request["context_management"] = context_management.clone();
+    }
+    if let Some(include) = request.get("include") {
+        continuation_request["include"] = include.clone();
+    }
+    if let Some(service_tier) = request.get("service_tier") {
+        continuation_request["service_tier"] = service_tier.clone();
+    }
+    if let Some(prompt_cache_key) = request.get("prompt_cache_key") {
+        continuation_request["prompt_cache_key"] = prompt_cache_key.clone();
+    }
+    if let Some(prompt_cache_retention) = request.get("prompt_cache_retention") {
+        continuation_request["prompt_cache_retention"] = prompt_cache_retention.clone();
+    }
+    if let Some(options) = request.get("prompt_cache_options") {
+        continuation_request["prompt_cache_options"] = options.clone();
+    }
+    continuation_request
+}
+
+/// Clone a full replay once, without constructing a discarded delta request.
+fn persistent_ws_full_replay_request(request: &Value, input: &[Value]) -> Option<Value> {
+    let original = request.as_object()?;
+    // Clone only fields that survive on the wire. In particular, cloning the
+    // old input before replacing it duplicates the largest part of a replay.
+    let mut replay: serde_json::Map<String, Value> = original
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "input" | "type" | "previous_response_id" | "stream" | "background"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    replay.insert("type".into(), Value::String("response.create".into()));
+    replay.insert("input".into(), Value::Array(input.to_vec()));
+    Some(Value::Object(replay))
+}
+
+#[cfg(test)]
+#[path = "openai_full_replay_tests.rs"]
+mod full_replay_tests;
+
 /// Try to continue a conversation on an existing persistent WebSocket connection
 /// using `previous_response_id` to send only incremental input. A socket drained
 /// after cancellation has no response id and receives a full, independent replay.
@@ -487,10 +542,18 @@ pub(super) async fn try_persistent_ws_continuation(
     credentials: &Arc<RwLock<CodexCredentials>>,
     request: &Value,
     input: &[Value],
-    input_item_count: usize,
+    input_item_hashes: &[u64],
     tx: &mpsc::Sender<Result<StreamEvent>>,
+    premium_route: Option<&str>,
 ) -> PersistentWsResult {
     let mut guard = Arc::clone(persistent_ws).lock_owned().await;
+    if premium_route.is_some() {
+        let result = OpenAIProvider::verify_speed_route(&*credentials.read().await, premium_route);
+        if let Err(error) = result {
+            let _ = tx.send(Err(error)).await;
+            return PersistentWsResult::TerminalError;
+        }
+    }
     let mut attempt = RecoverableAttempt {
         state: guard.take(),
         phase: RecoveryPhase::Idle,
@@ -501,7 +564,7 @@ pub(super) async fn try_persistent_ws_continuation(
         credentials,
         request,
         input,
-        input_item_count,
+        input_item_hashes,
         tx,
         &mut attempt.phase,
     )
@@ -518,10 +581,12 @@ pub(super) async fn try_persistent_ws_continuation(
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
             "persistent_state_reset",
-            vec![
-                ("model", openai_request_model(request)),
-                ("reason", "persistent_reuse_failed".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", openai_request_model(request)),
+                    ("reason", "persistent_reuse_failed".to_string()),
+                ]
+            },
         );
         attempt.phase = RecoveryPhase::Idle;
     } else if attempt.phase == RecoveryPhase::Idle {
@@ -541,26 +606,32 @@ async fn continue_persistent_ws_locked(
     credentials: &Arc<RwLock<CodexCredentials>>,
     request: &Value,
     input: &[Value],
-    input_item_count: usize,
+    input_item_hashes: &[u64],
     tx: &mpsc::Sender<Result<StreamEvent>>,
     recovery_phase: &mut RecoveryPhase,
 ) -> PersistentWsResult {
+    let input_item_count = input.len();
+    debug_assert_eq!(input_item_hashes.len(), input_item_count);
     let request_model = openai_request_model(request);
     let state = match guard.as_mut() {
         Some(s) => s,
         None => {
             log_openai_stream_lifecycle(
-                jcode_base::logging::LogLevel::Info,
+                jcode_base::logging::LogLevel::Debug,
                 "persistent_reuse_unavailable_detail",
-                vec![
-                    ("model", request_model.clone()),
-                    ("reason", "no_state".to_string()),
-                ],
+                || {
+                    vec![
+                        ("model", request_model.clone()),
+                        ("reason", "no_state".to_string()),
+                    ]
+                },
             );
             return PersistentWsResult::NotAvailable;
         }
     };
 
+    // Settings can change without a request. Compare the actual handshake,
+    // cache key and request options with the last response before reusing it.
     if state.identity
         != openai_websocket_prewarm::prewarm_identity(
             &*credentials.read().await,
@@ -570,12 +641,14 @@ async fn continue_persistent_ws_locked(
     {
         *guard = None;
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "handshake_identity_changed".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "handshake_identity_changed".to_string()),
+                ]
+            },
         );
         return PersistentWsResult::NotAvailable;
     }
@@ -583,12 +656,35 @@ async fn continue_persistent_ws_locked(
     if state.cache_key.as_deref() != request.get("prompt_cache_key").and_then(Value::as_str) {
         *guard = None;
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "cache_session_changed".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "cache_session_changed".to_string()),
+                ]
+            },
+        );
+        return PersistentWsResult::NotAvailable;
+    }
+
+    let request_options = persistent_request_options(request);
+    if state.message_count > 0
+        && state
+            .last_request_options
+            .as_ref()
+            .is_some_and(|last| last != &request_options)
+    {
+        *guard = None;
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Debug,
+            "persistent_state_reset",
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "request_options_changed".to_string()),
+                ]
+            },
         );
         return PersistentWsResult::NotAvailable;
     }
@@ -598,16 +694,18 @@ async fn continue_persistent_ws_locked(
         jcode_base::logging::info("Persistent WS connection too old; forcing reconnect");
         *guard = None;
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "max_age".to_string()),
-                (
-                    "max_age_secs",
-                    WEBSOCKET_PERSISTENT_MAX_AGE_SECS.to_string(),
-                ),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "max_age".to_string()),
+                    (
+                        "max_age_secs",
+                        WEBSOCKET_PERSISTENT_MAX_AGE_SECS.to_string(),
+                    ),
+                ]
+            },
         );
         return PersistentWsResult::NotAvailable;
     }
@@ -628,14 +726,16 @@ async fn continue_persistent_ws_locked(
             ));
             *guard = None;
             log_openai_stream_lifecycle(
-                jcode_base::logging::LogLevel::Info,
+                jcode_base::logging::LogLevel::Debug,
                 "persistent_state_reset",
-                vec![
-                    ("model", request_model.clone()),
-                    ("reason", reset_reason.to_string()),
-                    ("source", "request_reuse".to_string()),
-                    ("detail", detail),
-                ],
+                || {
+                    vec![
+                        ("model", request_model.clone()),
+                        ("reason", reset_reason.to_string()),
+                        ("source", "request_reuse".to_string()),
+                        ("detail", detail),
+                    ]
+                },
             );
             return PersistentWsResult::NotAvailable;
         }
@@ -648,12 +748,14 @@ async fn continue_persistent_ws_locked(
             log_openai_stream_lifecycle(
                 jcode_base::logging::LogLevel::Warn,
                 "persistent_state_reset",
-                vec![
-                    ("model", request_model.clone()),
-                    ("reason", "healthcheck_failed".to_string()),
-                    ("source", "request_reuse".to_string()),
-                    ("error", err.to_string()),
-                ],
+                || {
+                    vec![
+                        ("model", request_model.clone()),
+                        ("reason", "healthcheck_failed".to_string()),
+                        ("source", "request_reuse".to_string()),
+                        ("error", err.to_string()),
+                    ]
+                },
             );
             return PersistentWsResult::NotAvailable;
         }
@@ -671,14 +773,16 @@ async fn continue_persistent_ws_locked(
             input_item_count, last_input_item_count
         ));
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "input_not_growing".to_string()),
-                ("input_item_count", input_item_count.to_string()),
-                ("last_input_item_count", last_input_item_count.to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "input_not_growing".to_string()),
+                    ("input_item_count", input_item_count.to_string()),
+                    ("last_input_item_count", last_input_item_count.to_string()),
+                ]
+            },
         );
         *guard = None;
         return PersistentWsResult::NotAvailable;
@@ -687,7 +791,6 @@ async fn continue_persistent_ws_locked(
     // Canonicalization can move a new tool output before the old cursor, even
     // when the input grows. Slicing by count would silently omit that output.
     // Replay the full normalized history unless the prior input is unchanged.
-    let input_item_hashes = persistent_ws_input_item_hashes(input);
     if !full_replay
         && (state.last_input_item_hashes.len() != state.last_input_item_count
             || !input_item_hashes.starts_with(&state.last_input_item_hashes))
@@ -695,19 +798,70 @@ async fn continue_persistent_ws_locked(
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Info,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "input_prefix_changed".to_string()),
-                ("input_item_count", input_item_count.to_string()),
-                (
-                    "last_input_item_count",
-                    state.last_input_item_count.to_string(),
-                ),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "input_prefix_changed".to_string()),
+                    ("input_item_count", input_item_count.to_string()),
+                    (
+                        "last_input_item_count",
+                        state.last_input_item_count.to_string(),
+                    ),
+                ]
+            },
         );
         *guard = None;
         return PersistentWsResult::NotAvailable;
     }
+
+    // Match only the server-owned items at the replay cursor. An identical
+    // client item later in the history must not disappear from the delta.
+    let replay_positions = if full_replay || state.message_count == 0 {
+        Vec::new()
+    } else {
+        match persistent_ws_replay_positions(
+            input,
+            state.last_input_item_count,
+            &state.last_response_output,
+        ) {
+            Ok(positions) => positions,
+            Err(diff) => {
+                use jcode_provider_core::fingerprint::stable_hash_json;
+                log_openai_stream_lifecycle(
+                    jcode_base::logging::LogLevel::Info,
+                    "persistent_state_reset",
+                    || {
+                        vec![
+                            ("model", request_model.clone()),
+                            ("reason", "response_output_changed".to_string()),
+                            ("first_changed_input_index", diff.input_index.to_string()),
+                            ("first_changed_output_index", diff.output_index.to_string()),
+                            (
+                                "previous_output_item_type",
+                                replay_item_type(Some(diff.previous)).to_string(),
+                            ),
+                            (
+                                "replay_item_type",
+                                replay_item_type(diff.current).to_string(),
+                            ),
+                            (
+                                "previous_output_item_hash",
+                                stable_hash_json(diff.previous).to_string(),
+                            ),
+                            (
+                                "replay_item_hash",
+                                diff.current
+                                    .map(stable_hash_json)
+                                    .map_or_else(|| "none".to_string(), |hash| hash.to_string()),
+                            ),
+                        ]
+                    },
+                );
+                *guard = None;
+                return PersistentWsResult::NotAvailable;
+            }
+        }
+    };
 
     // Compute incremental items: everything after the last_input_item_count.
     //
@@ -718,33 +872,42 @@ async fn continue_persistent_ws_locked(
     // rs_...". The full input still needs reasoning items for fresh requests,
     // but deltas must only contain genuinely new client-side input/tool
     // callbacks.
-    let (incremental_items, skipped_output_items) = if full_replay || state.message_count == 0 {
+    let (incremental_items, skipped_output_items) = if full_replay {
+        (std::borrow::Cow::Borrowed(input), 0)
+    } else if state.message_count == 0 {
         // A generate:false warmup has no model output in its context. Preserve
         // all history (including encrypted reasoning) for its first generation.
-        (input.to_vec(), 0)
+        (std::borrow::Cow::Owned(input.to_vec()), 0)
     } else {
-        persistent_ws_incremental_items(
-            input,
-            state.last_input_item_count,
-            &state.last_response_output,
-        )
+        let (items, skipped) =
+            persistent_ws_incremental_items(input, state.last_input_item_count, replay_positions);
+        (std::borrow::Cow::Owned(items), skipped)
     };
     if skipped_output_items > 0 {
-        jcode_base::logging::info(&format!(
-            "Skipped {} prior response output item(s) in persistent WS continuation delta",
-            skipped_output_items
-        ));
+        jcode_base::logging::debug_lazy(|| {
+            format!(
+                "Skipped {} prior response output item(s) in persistent WS continuation delta",
+                skipped_output_items
+            )
+        });
     }
-    if incremental_items.is_empty() {
+    // Codex permits an empty suffix. Require positive evidence that the
+    // caller replayed the entire completed output, not just the old input.
+    let output_only = skipped_output_items > 0
+        && skipped_output_items == state.last_response_output.len()
+        && state.last_request_options.is_some();
+    if incremental_items.is_empty() && !output_only {
         jcode_base::logging::info("No incremental items to send; need fresh request");
         *guard = None;
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model.clone()),
-                ("reason", "empty_incremental_items".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model.clone()),
+                    ("reason", "empty_incremental_items".to_string()),
+                ]
+            },
         );
         return PersistentWsResult::NotAvailable;
     }
@@ -766,159 +929,128 @@ async fn continue_persistent_ws_locked(
         .get("prompt_cache_key")
         .map(jcode_provider_core::fingerprint::stable_hash_json);
     let (usage_diag, usage_exhausted) = serving_account_diag(&*credentials.read().await);
-    jcode_base::logging::info(&format!(
-        "OpenAI limit diag: attempting persistent WS reuse previous_response_id_present={} usage=({}) state=({})",
-        !previous_response_id.is_empty(),
-        usage_diag,
-        state.diag_snapshot().log_fields()
-    ));
-    jcode_base::logging::info(&format!(
-        "Persistent WS continuation: previous_response_id={} {} tool_callback={} (was {} now {})",
-        previous_response_id,
-        incremental_stats.log_fields(),
-        incremental_stats.tool_callback_count() > 0,
-        state.last_input_item_count,
-        input_item_count,
-    ));
+    jcode_base::logging::debug_lazy(|| {
+        format!(
+            "OpenAI limit diag: attempting persistent WS reuse previous_response_id_present={} usage=({}) state=({})",
+            !previous_response_id.is_empty(),
+            usage_diag,
+            state.diag_snapshot().log_fields()
+        )
+    });
+    jcode_base::logging::debug_lazy(|| {
+        format!(
+            "Persistent WS continuation: previous_response_id={} {} tool_callback={} (was {} now {})",
+            previous_response_id,
+            incremental_stats.log_fields(),
+            incremental_stats.tool_callback_count() > 0,
+            state.last_input_item_count,
+            input_item_count,
+        )
+    });
     log_openai_stream_lifecycle(
-        jcode_base::logging::LogLevel::Info,
+        jcode_base::logging::LogLevel::Debug,
         "persistent_reuse_start",
-        vec![
-            ("model", request_model.clone()),
-            ("transport", "websocket".to_string()),
-            ("input_item_count", input_item_count.to_string()),
-            (
-                "last_input_item_count",
-                state.last_input_item_count.to_string(),
-            ),
-            (
-                "incremental_item_count",
-                incremental_items.len().to_string(),
-            ),
-            (
-                "previous_response_id_present",
-                (!previous_response_id.is_empty()).to_string(),
-            ),
-            (
-                "tool_callback",
-                (incremental_stats.tool_callback_count() > 0).to_string(),
-            ),
-            (
-                "request_kind",
-                if full_replay {
-                    "ws_cancel_full_replay"
-                } else {
-                    "ws_delta"
-                }
-                .to_string(),
-            ),
-            (
-                "cache_namespace",
-                if full_replay {
-                    "full_request"
-                } else {
-                    "previous_response_delta"
-                }
-                .to_string(),
-            ),
-            (
-                "prompt_cache_key_present",
-                request.get("prompt_cache_key").is_some().to_string(),
-            ),
-            (
-                "prompt_cache_key_hash",
-                format!("{:?}", request_prompt_cache_key_hash),
-            ),
-            (
-                "prompt_cache_retention",
-                request
-                    .get("prompt_cache_retention")
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "null".to_string()),
-            ),
-            (
-                "service_tier",
-                request
-                    .get("service_tier")
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "null".to_string()),
-            ),
-        ],
+        || {
+            vec![
+                ("model", request_model.clone()),
+                ("transport", "websocket".to_string()),
+                ("input_item_count", input_item_count.to_string()),
+                (
+                    "last_input_item_count",
+                    state.last_input_item_count.to_string(),
+                ),
+                (
+                    "incremental_item_count",
+                    incremental_items.len().to_string(),
+                ),
+                (
+                    "previous_response_id_present",
+                    (!previous_response_id.is_empty()).to_string(),
+                ),
+                (
+                    "tool_callback",
+                    (incremental_stats.tool_callback_count() > 0).to_string(),
+                ),
+                (
+                    "request_kind",
+                    if full_replay {
+                        "ws_cancel_full_replay"
+                    } else {
+                        "ws_delta"
+                    }
+                    .to_string(),
+                ),
+                (
+                    "cache_namespace",
+                    if full_replay {
+                        "full_request"
+                    } else {
+                        "previous_response_delta"
+                    }
+                    .to_string(),
+                ),
+                (
+                    "prompt_cache_key_present",
+                    request.get("prompt_cache_key").is_some().to_string(),
+                ),
+                (
+                    "prompt_cache_key_hash",
+                    format!("{:?}", request_prompt_cache_key_hash),
+                ),
+                (
+                    "prompt_cache_retention",
+                    request
+                        .get("prompt_cache_retention")
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "null".to_string()),
+                ),
+                (
+                    "service_tier",
+                    request
+                        .get("service_tier")
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "null".to_string()),
+                ),
+            ]
+        },
     );
 
-    // Build the incremental request - only include new items + previous_response_id
-    let mut continuation_request = serde_json::json!({
-        "type": "response.create",
-        "previous_response_id": previous_response_id,
-        "input": incremental_items,
-    });
-
-    // Copy over model, tools, and other settings from the original request
-    if let Some(model) = request.get("model") {
-        continuation_request["model"] = model.clone();
-    }
-    if let Some(tools) = request.get("tools") {
-        continuation_request["tools"] = tools.clone();
-    }
-    if let Some(tool_choice) = request.get("tool_choice") {
-        continuation_request["tool_choice"] = tool_choice.clone();
-    }
-    if let Some(instructions) = request.get("instructions") {
-        continuation_request["instructions"] = instructions.clone();
-    }
-    if let Some(max_output_tokens) = request.get("max_output_tokens") {
-        continuation_request["max_output_tokens"] = max_output_tokens.clone();
-    }
-    if let Some(reasoning) = request.get("reasoning") {
-        continuation_request["reasoning"] = reasoning.clone();
-    }
-    if let Some(context_management) = request.get("context_management") {
-        continuation_request["context_management"] = context_management.clone();
-    }
-    if let Some(include) = request.get("include") {
-        continuation_request["include"] = include.clone();
-    }
-    if let Some(service_tier) = request.get("service_tier") {
-        continuation_request["service_tier"] = service_tier.clone();
-    }
-    if let Some(prompt_cache_key) = request.get("prompt_cache_key") {
-        continuation_request["prompt_cache_key"] = prompt_cache_key.clone();
-    }
-    if let Some(prompt_cache_retention) = request.get("prompt_cache_retention") {
-        continuation_request["prompt_cache_retention"] = prompt_cache_retention.clone();
-    }
-    if let Some(options) = request.get("prompt_cache_options") {
-        continuation_request["prompt_cache_options"] = options.clone();
-    }
-    if !full_replay && state.message_count > 0 {
-        add_cache_comparison(
-            &mut continuation_request,
-            OpenAIProvider::is_chatgpt_mode(&*credentials.read().await),
-            &previous_response_id,
-        );
-    }
-    continuation_request["store"] = serde_json::json!(false);
-    continuation_request["parallel_tool_calls"] = serde_json::json!(false);
-
-    if full_replay {
+    let mut continuation_request = if full_replay {
         // A drained cancelled response may contain unseen tool calls. Reuse
         // only its transport, never its server-side conversation context.
-        continuation_request = request.clone();
-        let Some(object) = continuation_request.as_object_mut() else {
+        let Some(replay) = persistent_ws_full_replay_request(request, input) else {
             return PersistentWsResult::Failed("invalid full replay request".into());
         };
-        object.insert("type".into(), serde_json::json!("response.create"));
-        object.insert("input".into(), Value::Array(input.to_vec()));
-        object.remove("previous_response_id");
-        object.remove("stream");
-        object.remove("background");
+        replay
+    } else {
+        let mut continuation_request =
+            persistent_ws_delta_request(request, &incremental_items, &previous_response_id);
+        if !full_replay && state.message_count > 0 {
+            add_cache_comparison(
+                &mut continuation_request,
+                OpenAIProvider::is_chatgpt_mode(&*credentials.read().await),
+                &previous_response_id,
+            );
+        }
+        continuation_request["store"] = serde_json::json!(false);
+        continuation_request["parallel_tool_calls"] = serde_json::json!(false);
+
+        continuation_request
+    };
+
+    if let Some(turn_state) = state
+        .turn_state
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+    {
+        continuation_request["client_metadata"]["x-codex-turn-state"] =
+            Value::String(turn_state.clone());
     }
 
-    let continuation_tools = continuation_request
-        .get("tools")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    let continuation_instructions = continuation_request.get("instructions").cloned();
+    let empty_tools = serde_json::json!([]);
+    let continuation_tools = continuation_request.get("tools").unwrap_or(&empty_tools);
+    let continuation_instructions = continuation_request.get("instructions");
     let continuation_tool_count = continuation_tools
         .as_array()
         .map(|tools| tools.len())
@@ -956,8 +1088,8 @@ async fn continue_persistent_ws_locked(
         },
         &continuation_payload,
         &incremental_items,
-        continuation_instructions.as_ref(),
-        Some(&continuation_tools),
+        continuation_instructions,
+        Some(continuation_tools),
         Some(continuation_tool_count),
         &[
             (
@@ -1011,6 +1143,11 @@ async fn continue_persistent_ws_locked(
                     .unwrap_or_else(|| "null".to_string()),
             ),
             (
+                "request_options_hash",
+                cache_request_options_hash(&continuation_request).to_string(),
+            ),
+            ("store", continuation_request["store"].to_string()),
+            (
                 "service_tier",
                 continuation_request
                     .get("service_tier")
@@ -1020,6 +1157,11 @@ async fn continue_persistent_ws_locked(
         ],
     );
 
+    // These duplicate JSON trees exist only for synchronous fingerprinting.
+    // The actual continuation request owns the input needed for serialization.
+    drop(continuation_payload);
+    drop(incremental_items);
+
     let request_text = match serde_json::to_string(&continuation_request) {
         Ok(t) => t,
         Err(e) => return PersistentWsResult::Failed(format!("serialize error: {}", e)),
@@ -1027,7 +1169,12 @@ async fn continue_persistent_ws_locked(
 
     let _ = tx
         .send(Ok(StreamEvent::ConnectionType {
-            connection: "websocket/persistent-reuse".to_string(),
+            connection: if full_replay || state.message_count == 0 {
+                "websocket/persistent-replay"
+            } else {
+                "websocket/persistent-reuse"
+            }
+            .to_string(),
         }))
         .await;
 
@@ -1063,11 +1210,13 @@ async fn continue_persistent_ws_locked(
     *recovery_phase = RecoveryPhase::InFlight;
     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await;
     state.last_activity_at = Instant::now();
-    jcode_base::logging::info(&format!(
-        "Persistent WS continuation request sent in {}ms ({})",
-        send_started_at.elapsed().as_millis(),
-        incremental_stats.log_fields(),
-    ));
+    jcode_base::logging::debug_lazy(|| {
+        format!(
+            "Persistent WS continuation request sent in {}ms ({})",
+            send_started_at.elapsed().as_millis(),
+            incremental_stats.log_fields(),
+        )
+    });
 
     // Stream the response, extracting the new response_id
     let mut saw_text_delta = false;
@@ -1085,6 +1234,10 @@ async fn continue_persistent_ws_locked(
     let mut logged_first_server_event = false;
     let mut response_started = false;
     let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(&continuation_request);
+    // The frame has been sent and timeout policy is now owned. Keep the retry
+    // owner's original request, not these transformed wire-only copies, while
+    // waiting for a potentially long response.
+    drop(continuation_request);
 
     loop {
         // Only inactivity ends the stream. A wall-clock cap here used to kill
@@ -1145,41 +1298,43 @@ async fn continue_persistent_ws_locked(
         match result {
             Ok(WsMessage::Text(text)) => {
                 let text = text.to_string();
-                if text.contains("response.completed")
-                    && serde_json::from_str::<Value>(&text).is_ok_and(|event| {
-                        event.get("type").and_then(Value::as_str) == Some("response.completed")
-                    })
-                {
+                let classification = WebsocketEventClassification::parse(&text);
+                if classification.kind() == Some("response.completed") {
                     *recovery_phase = RecoveryPhase::Completed;
                 }
-                if opaque_ws_rejection(&text, &mut response_started) {
+                if opaque_ws_rejection_event(&classification, &mut response_started) {
                     return PersistentWsResult::OpaqueWsRejection;
                 }
                 if !logged_first_server_event {
                     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::Streaming)
                         .await;
-                    jcode_base::logging::info(&format!(
-                        "Persistent WS first server event after {}ms ({})",
-                        stream_started.elapsed().as_millis(),
-                        incremental_stats.log_fields(),
-                    ));
+                    jcode_base::logging::debug_lazy(|| {
+                        format!(
+                            "Persistent WS first server event after {}ms ({})",
+                            stream_started.elapsed().as_millis(),
+                            incremental_stats.log_fields(),
+                        )
+                    });
                     logged_first_server_event = true;
                 }
-                if is_websocket_fallback_notice(&text) {
+                if classification.is_fallback_notice(&text) {
                     return PersistentWsResult::Failed("server requested fallback".to_string());
                 }
 
                 let mut made_api_activity = if saw_api_activity {
-                    is_websocket_activity_payload(&text)
+                    classification.is_activity()
                 } else {
-                    is_websocket_first_activity_payload(&text)
+                    classification.is_first_activity()
                 };
 
-                observe_ws_response_output(&text, &mut response_output);
+                if let Some(value) = classification.value() {
+                    observe_ws_response_output_event(value, &mut response_output);
+                    observe_turn_state(value, &state.turn_state);
+                }
 
                 // Extract response_id from response.created event
                 if new_response_id.is_none()
-                    && let Ok(val) = serde_json::from_str::<Value>(&text)
+                    && let Some(val) = classification.value()
                     && val.get("type").and_then(|t| t.as_str()) == Some("response.created")
                     && let Some(id) = val
                         .get("response")
@@ -1187,12 +1342,14 @@ async fn continue_persistent_ws_locked(
                         .and_then(|id| id.as_str())
                 {
                     new_response_id = Some(id.to_string());
-                    jcode_base::logging::info(&format!(
-                        "Persistent WS got new response_id after {}ms: {} ({})",
-                        stream_started.elapsed().as_millis(),
-                        id,
-                        incremental_stats.log_fields(),
-                    ));
+                    jcode_base::logging::debug_lazy(|| {
+                        format!(
+                            "Persistent WS got new response_id after {}ms: {} ({})",
+                            stream_started.elapsed().as_millis(),
+                            id,
+                            incremental_stats.log_fields(),
+                        )
+                    });
                     if usage_exhausted {
                         jcode_base::logging::warn(&format!(
                             "OpenAI limit diag: persistent WS reuse accepted request while the serving account's usage indicates exhausted usage=({}) state=({})",
@@ -1314,16 +1471,18 @@ async fn continue_persistent_ws_locked(
             "Persistent WS consumer dropped; recovering transport without response chain",
         );
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_state_reset",
-            vec![
-                ("model", request_model),
-                (
-                    "reason",
-                    "consumer_dropped_response_chain_discarded".to_string(),
-                ),
-                ("consumer_dropped", consumer_dropped.to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model),
+                    (
+                        "reason",
+                        "consumer_dropped_response_chain_discarded".to_string(),
+                    ),
+                    ("consumer_dropped", consumer_dropped.to_string()),
+                ]
+            },
         );
         return PersistentWsResult::Success;
     }
@@ -1332,29 +1491,34 @@ async fn continue_persistent_ws_locked(
     if let Some(resp_id) = new_response_id {
         state.last_response_id = resp_id;
         state.last_input_item_count = input_item_count;
-        state.last_input_item_hashes = input_item_hashes;
+        state.last_input_item_hashes = input_item_hashes.to_vec();
+        state.last_request_options = Some(request_options);
         state.last_response_output = response_output;
         state.message_count += 1;
         state.last_activity_at = Instant::now();
         state.last_response_completed_at = Instant::now();
-        jcode_base::logging::info(&format!(
-            "Persistent WS continuation success after {}ms (chain length: {}, {})",
-            stream_started.elapsed().as_millis(),
-            state.message_count,
-            incremental_stats.log_fields(),
-        ));
+        jcode_base::logging::debug_lazy(|| {
+            format!(
+                "Persistent WS continuation success after {}ms (chain length: {}, {})",
+                stream_started.elapsed().as_millis(),
+                state.message_count,
+                incremental_stats.log_fields(),
+            )
+        });
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "persistent_reuse_stream_complete",
-            vec![
-                ("model", request_model),
-                ("transport", "websocket".to_string()),
-                ("chain_length", state.message_count.to_string()),
-                (
-                    "elapsed_ms",
-                    stream_started.elapsed().as_millis().to_string(),
-                ),
-            ],
+            || {
+                vec![
+                    ("model", request_model),
+                    ("transport", "websocket".to_string()),
+                    ("chain_length", state.message_count.to_string()),
+                    (
+                        "elapsed_ms",
+                        stream_started.elapsed().as_millis().to_string(),
+                    ),
+                ]
+            },
         );
         *recovery_phase = RecoveryPhase::Idle;
         PersistentWsResult::Success
@@ -1365,28 +1529,64 @@ async fn continue_persistent_ws_locked(
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
             "persistent_state_reset",
-            vec![
-                ("model", request_model),
-                ("reason", "missing_response_id".to_string()),
-                (
-                    "elapsed_ms",
-                    stream_started.elapsed().as_millis().to_string(),
-                ),
-            ],
+            || {
+                vec![
+                    ("model", request_model),
+                    ("reason", "missing_response_id".to_string()),
+                    (
+                        "elapsed_ms",
+                        stream_started.elapsed().as_millis().to_string(),
+                    ),
+                ]
+            },
         );
         PersistentWsResult::Success
     }
 }
 
+// Build only a shallow, sorted view of the wire envelope. The caller retains
+// the original request for retries and HTTPS fallback, without cloning input,
+// tools, images, or encrypted reasoning. BTreeMap preserves serde_json's sorted
+// object-key wire order, including the replacement response.create type.
+fn serialize_fresh_ws_request(
+    object: &serde_json::Map<String, Value>,
+    turn_state: Option<String>,
+) -> serde_json::Result<String> {
+    let metadata = turn_state.map(|state| {
+        let mut metadata = object.get("client_metadata").cloned().unwrap_or_default();
+        metadata["x-codex-turn-state"] = Value::String(state);
+        metadata
+    });
+    let response_type = Value::String("response.create".to_owned());
+    let mut fields = std::collections::BTreeMap::new();
+    for (key, value) in object {
+        if !matches!(key.as_str(), "stream" | "background" | "type") {
+            fields.insert(key.as_str(), value);
+        }
+    }
+    if let Some(metadata) = &metadata {
+        fields.insert("client_metadata", metadata);
+    }
+    fields.insert("type", &response_type);
+    serde_json::to_string(&fields)
+}
+
+#[cfg(test)]
+#[path = "openai_fresh_ws_wire_tests.rs"]
+mod fresh_ws_wire_tests;
+
 /// Stream response via WebSocket, saving the connection for reuse.
 /// This replaces the old `stream_response_websocket` for the fresh-connection path.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn stream_response_websocket_persistent(
     credentials: Arc<RwLock<CodexCredentials>>,
     account_label: Option<String>,
-    request: Value,
+    request: &Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
-    input_item_count: usize,
+    turn_state: Arc<StdMutex<Option<String>>>,
+    input_item_hashes: &[u64],
+    premium_route: Option<&str>,
 ) -> Result<(), OpenAIStreamFailure> {
     let request_credentials = Arc::clone(&credentials);
     let result = after_authentication(
@@ -1398,9 +1598,11 @@ pub(super) async fn stream_response_websocket_persistent(
                 request,
                 tx.clone(),
                 persistent_ws,
-                input_item_count,
+                turn_state,
+                input_item_hashes,
                 access_token,
                 account_label,
+                premium_route,
             )
         },
     )
@@ -1408,16 +1610,20 @@ pub(super) async fn stream_response_websocket_persistent(
     result.unwrap_or(Ok(()))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_response_websocket_authenticated(
     credentials: Arc<RwLock<CodexCredentials>>,
-    request: Value,
+    request: &Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
-    input_item_count: usize,
+    turn_state: Arc<StdMutex<Option<String>>>,
+    input_item_hashes: &[u64],
     access_token: String,
     account_label: Option<String>,
+    premium_route: Option<&str>,
 ) -> Result<(), OpenAIStreamFailure> {
     use jcode_message_types::ConnectionPhase;
+    let input_item_count = input_item_hashes.len();
     let requested_tier = request
         .get("service_tier")
         .and_then(Value::as_str)
@@ -1431,21 +1637,24 @@ async fn stream_response_websocket_authenticated(
         .unwrap_or_else(|| "unknown".to_string());
     let stream_started_at = Instant::now();
     log_openai_stream_lifecycle(
-        jcode_base::logging::LogLevel::Info,
+        jcode_base::logging::LogLevel::Debug,
         "fresh_ws_request_start",
-        vec![
-            ("model", request_model_label.clone()),
-            ("transport", "websocket".to_string()),
-            ("input_item_count", input_item_count.to_string()),
-        ],
+        || {
+            vec![
+                ("model", request_model_label.clone()),
+                ("transport", "websocket".to_string()),
+                ("input_item_count", input_item_count.to_string()),
+            ]
+        },
     );
 
     let (usage_diag, usage_exhausted) = serving_account_diag(&*credentials.read().await);
-    jcode_base::logging::info(&format!(
-        "OpenAI limit diag: opening fresh persistent WS request usage=({usage_diag})"
-    ));
+    jcode_base::logging::debug_lazy(|| {
+        format!("OpenAI limit diag: opening fresh persistent WS request usage=({usage_diag})")
+    });
     emit_status_detail(&tx, "opening websocket").await;
     let creds = credentials.read().await;
+    OpenAIProvider::verify_speed_route(&creds, premium_route)?;
     // Account switching can race token refresh. Never combine an old bearer
     // with a new account header or attribute that request to the new account.
     if access_token != creds.access_token {
@@ -1453,7 +1662,7 @@ async fn stream_response_websocket_authenticated(
             "OpenAI credentials changed before request, retrying"
         )));
     }
-    let mut usage_recorder = OAuthUsageRecorder::capture(&creds, &request);
+    let mut usage_recorder = OAuthUsageRecorder::capture(&creds, request);
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
     let catalog_scope = OpenAIProvider::catalog_scope_for(&creds);
     let ws_request = openai_websocket_prewarm::websocket_request(
@@ -1470,11 +1679,13 @@ async fn stream_response_websocket_authenticated(
         request.get("service_tier").and_then(Value::as_str),
     );
     log_openai_stream_lifecycle(
-        jcode_base::logging::LogLevel::Info,
+        jcode_base::logging::LogLevel::Debug,
         "fresh_ws_request_routing_headers",
-        routing_header_log_fields(ws_request.headers()),
+        || routing_header_log_fields(ws_request.headers()),
     );
     identity.0 = access_token.clone();
+    let egress_label =
+        OpenAIProvider::egress_label(&creds, account_label.as_deref()).map(str::to_owned);
     drop(creds);
 
     let usage_generation = jcode_base::usage::openai_response_generation();
@@ -1482,9 +1693,13 @@ async fn stream_response_websocket_authenticated(
     emit_connection_phase(&tx, ConnectionPhase::Connecting).await;
     let connect_start = std::time::Instant::now();
 
+    // Fail closed: a credential with a required egress never dials directly.
+    let egress = jcode_base::egress::transport("openai", egress_label.as_deref())
+        .await
+        .map_err(OpenAIStreamFailure::Other)?;
     let connect_result = tokio::time::timeout(
         Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS),
-        connect_ws(ws_request),
+        connect_ws_via(ws_request, &egress),
     )
     .await
     .map_err(|_| {
@@ -1494,7 +1709,7 @@ async fn stream_response_websocket_authenticated(
         ))
     })?;
 
-    let (mut ws_stream, _response) = match connect_result {
+    let (mut ws_stream, response) = match connect_result {
         Ok((stream, response)) => {
             if is_chatgpt_mode {
                 jcode_base::usage::record_openai_response_limits(
@@ -1505,20 +1720,23 @@ async fn stream_response_websocket_authenticated(
                 );
             }
             let connect_ms = connect_start.elapsed().as_millis();
-            jcode_base::logging::info(&format!(
-                "WebSocket connection established in {}ms (persistent mode)",
-                connect_ms
-            ));
-            let mut fields = vec![
-                ("model", request_model_label.clone()),
-                ("connect_ms", connect_ms.to_string()),
-            ];
-            // Handshake correlation ids identify the socket provider-side.
-            fields.extend(tungstenite_header_fields(&response));
+            jcode_base::logging::debug_lazy(|| {
+                format!(
+                    "WebSocket connection established in {}ms (persistent mode)",
+                    connect_ms
+                )
+            });
             log_openai_stream_lifecycle(
-                jcode_base::logging::LogLevel::Info,
+                jcode_base::logging::LogLevel::Debug,
                 "fresh_ws_connected",
-                fields,
+                || {
+                    let mut fields = vec![
+                        ("model", request_model_label.clone()),
+                        ("connect_ms", connect_ms.to_string()),
+                    ];
+                    fields.extend(tungstenite_header_fields(&response));
+                    fields
+                },
             );
             (stream, response)
         }
@@ -1535,58 +1753,48 @@ async fn stream_response_websocket_authenticated(
         }
     };
 
+    capture_turn_state(
+        &turn_state,
+        response
+            .headers()
+            .get("x-codex-turn-state")
+            .and_then(|value| value.to_str().ok()),
+    );
+
     let _ = tx
         .send(Ok(StreamEvent::ConnectionType {
             connection: "websocket/persistent-fresh".to_string(),
         }))
         .await;
 
-    let input_item_hashes = persistent_ws_input_item_hashes(
-        request
-            .get("input")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]),
-    );
     let cache_key = request
         .get("prompt_cache_key")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let mut request_event = request;
-    if !request_event.is_object() {
+    let request_options = persistent_request_options(request);
+    let Some(request_object) = request.as_object() else {
         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
             "Invalid websocket request payload shape; expected an object"
         )));
-    }
-    {
-        let Some(obj) = request_event.as_object_mut() else {
-            return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
-                "Invalid websocket request payload shape; expected an object"
-            )));
-        };
-        obj.insert(
-            "type".to_string(),
-            serde_json::Value::String("response.create".to_string()),
-        );
-        obj.remove("stream");
-        obj.remove("background");
-    }
+    };
 
-    let request_input_stats = request_event
+    let request_input_stats = request
         .get("input")
         .and_then(|value| value.as_array())
         .map(|items| summarize_ws_input(items))
         .unwrap_or_default();
 
-    let request_text = serde_json::to_string(&request_event).map_err(|err| {
-        OpenAIStreamFailure::Other(anyhow::anyhow!(
-            "Failed to serialize OpenAI websocket request: {}",
-            err
-        ))
-    })?;
+    let request_turn_state = turn_state.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let request_text =
+        serialize_fresh_ws_request(request_object, request_turn_state).map_err(|err| {
+            OpenAIStreamFailure::Other(anyhow::anyhow!(
+                "Failed to serialize OpenAI websocket request: {}",
+                err
+            ))
+        })?;
     let request_send_started_at = Instant::now();
     emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
-    let ws_send_timeout = effective_https_idle_timeout(&request_event);
+    let ws_send_timeout = effective_https_idle_timeout(request);
     send_websocket_frame(
         &mut ws_stream,
         WsMessage::Text(request_text),
@@ -1615,7 +1823,7 @@ async fn stream_response_websocket_authenticated(
     let connected_at = Instant::now();
     let mut logged_first_server_event = false;
     let mut response_started = false;
-    let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(&request_event);
+    let ws_completion_timeout_secs = effective_ws_completion_timeout_secs(request);
 
     loop {
         // Only inactivity ends the stream (see the persistent path above):
@@ -1675,7 +1883,8 @@ async fn stream_response_websocket_authenticated(
             Ok(message) => match message {
                 WsMessage::Text(text) => {
                     let text = text.to_string();
-                    if opaque_ws_rejection(&text, &mut response_started) {
+                    let classification = WebsocketEventClassification::parse(&text);
+                    if opaque_ws_rejection_event(&classification, &mut response_started) {
                         return Err(OpenAIStreamFailure::OpaqueWsRejection);
                     }
                     if !logged_first_server_event {
@@ -1687,18 +1896,21 @@ async fn stream_response_websocket_authenticated(
                         ));
                         logged_first_server_event = true;
                     }
-                    if is_websocket_fallback_notice(&text) {
+                    if classification.is_fallback_notice(&text) {
                         return Err(OpenAIStreamFailure::FallbackToHttps(anyhow::anyhow!(
                             "{} reported by websocket stream",
                             WEBSOCKET_FALLBACK_NOTICE
                         )));
                     }
 
-                    observe_ws_response_output(&text, &mut response_output);
+                    if let Some(value) = classification.value() {
+                        observe_ws_response_output_event(value, &mut response_output);
+                        observe_turn_state(value, &turn_state);
+                    }
 
                     // Extract response_id from response.created event
                     if response_id.is_none()
-                        && let Ok(val) = serde_json::from_str::<Value>(&text)
+                        && let Some(val) = classification.value()
                         && val.get("type").and_then(|t| t.as_str()) == Some("response.created")
                         && let Some(id) = val
                             .get("response")
@@ -1720,9 +1932,9 @@ async fn stream_response_websocket_authenticated(
                     }
 
                     let mut made_api_activity = if saw_api_activity {
-                        is_websocket_activity_payload(&text)
+                        classification.is_activity()
                     } else {
-                        is_websocket_first_activity_payload(&text)
+                        classification.is_first_activity()
                     };
                     if let Some(mut event) = parse_openai_response_event(
                         &text,
@@ -1764,14 +1976,16 @@ async fn stream_response_websocket_authenticated(
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Warn,
                                 "consumer_dropped",
-                                vec![
-                                    ("model", request_model_label.clone()),
-                                    ("transport", "websocket".to_string()),
-                                    (
-                                        "elapsed_ms",
-                                        stream_started_at.elapsed().as_millis().to_string(),
-                                    ),
-                                ],
+                                || {
+                                    vec![
+                                        ("model", request_model_label.clone()),
+                                        ("transport", "websocket".to_string()),
+                                        (
+                                            "elapsed_ms",
+                                            stream_started_at.elapsed().as_millis().to_string(),
+                                        ),
+                                    ]
+                                },
                             );
                             return Ok(());
                         }
@@ -1806,14 +2020,16 @@ async fn stream_response_websocket_authenticated(
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Warn,
                                 "consumer_dropped",
-                                vec![
-                                    ("model", request_model_label.clone()),
-                                    ("transport", "websocket".to_string()),
-                                    (
-                                        "elapsed_ms",
-                                        stream_started_at.elapsed().as_millis().to_string(),
-                                    ),
-                                ],
+                                || {
+                                    vec![
+                                        ("model", request_model_label.clone()),
+                                        ("transport", "websocket".to_string()),
+                                        (
+                                            "elapsed_ms",
+                                            stream_started_at.elapsed().as_millis().to_string(),
+                                        ),
+                                    ]
+                                },
                             );
                             return Ok(());
                         }
@@ -1870,17 +2086,19 @@ async fn stream_response_websocket_authenticated(
             request_input_stats.log_fields(),
         ));
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             "fresh_ws_stream_complete_saved",
-            vec![
-                ("model", request_model_label.clone()),
-                ("transport", "websocket".to_string()),
-                (
-                    "elapsed_ms",
-                    stream_started_at.elapsed().as_millis().to_string(),
-                ),
-                ("response_id_present", "true".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model_label.clone()),
+                    ("transport", "websocket".to_string()),
+                    (
+                        "elapsed_ms",
+                        stream_started_at.elapsed().as_millis().to_string(),
+                    ),
+                    ("response_id_present", "true".to_string()),
+                ]
+            },
         );
         *guard = Some(PersistentWsState {
             cache_key,
@@ -1892,7 +2110,9 @@ async fn stream_response_websocket_authenticated(
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: input_item_count,
-            last_input_item_hashes: input_item_hashes,
+            last_input_item_hashes: input_item_hashes.to_vec(),
+            last_request_options: Some(request_options),
+            turn_state,
             last_response_output: response_output,
         });
         drop(guard);
@@ -1908,130 +2128,27 @@ async fn stream_response_websocket_authenticated(
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
             "fresh_ws_stream_complete_not_saved",
-            vec![
-                ("model", request_model_label),
-                ("transport", "websocket".to_string()),
-                (
-                    "elapsed_ms",
-                    stream_started_at.elapsed().as_millis().to_string(),
-                ),
-                ("reason", "missing_response_id".to_string()),
-            ],
+            || {
+                vec![
+                    ("model", request_model_label),
+                    ("transport", "websocket".to_string()),
+                    (
+                        "elapsed_ms",
+                        stream_started_at.elapsed().as_millis().to_string(),
+                    ),
+                    ("reason", "missing_response_id".to_string()),
+                ]
+            },
         );
     }
 
     Ok(())
 }
 
-fn should_refresh_token(status: StatusCode, body: &str) -> bool {
-    if status == StatusCode::UNAUTHORIZED {
-        return true;
-    }
-    if status == StatusCode::FORBIDDEN {
-        let lower = body.to_lowercase();
-        return lower.contains("token")
-            || lower.contains("expired")
-            || lower.contains("unauthorized");
-    }
-    false
-}
-
-fn maybe_record_runtime_model_unavailable_from_stream_error(
-    catalog_scope: &str,
-    model: &str,
-    message: &str,
-) {
-    let reason = classify_unavailable_model_error(StatusCode::BAD_REQUEST, message)
-        .or_else(|| classify_unavailable_model_error(StatusCode::FORBIDDEN, message));
-
-    if let Some(reason) = reason {
-        jcode_base::provider::record_model_unavailable_for_scope(catalog_scope, model, &reason);
-        jcode_base::logging::warn(&format!(
-            "Recorded OpenAI model '{}' as unavailable from stream error: {}",
-            model, reason
-        ));
-    }
-}
-
-fn classify_unavailable_model_error(status: StatusCode, body: &str) -> Option<String> {
-    let lower = body.to_ascii_lowercase();
-
-    let mentions_model = lower.contains("model")
-        || lower.contains("slug")
-        || lower.contains("engine")
-        || lower.contains("deployment");
-    let unavailable = lower.contains("not available")
-        || lower.contains("unavailable")
-        || lower.contains("does not have access")
-        || lower.contains("not enabled")
-        || lower.contains("not found")
-        || lower.contains("unknown model")
-        || lower.contains("unsupported model")
-        || lower.contains("invalid model");
-
-    if !mentions_model || !unavailable {
-        return None;
-    }
-
-    if status == StatusCode::NOT_FOUND
-        || status == StatusCode::FORBIDDEN
-        || status == StatusCode::BAD_REQUEST
-        || status == StatusCode::UNPROCESSABLE_ENTITY
-    {
-        let trimmed = body.trim();
-        let reason = if trimmed.is_empty() {
-            format!("model denied by OpenAI API (status {})", status)
-        } else {
-            format!(
-                "model denied by OpenAI API (status {}): {}",
-                status, trimmed
-            )
-        };
-        return Some(reason);
-    }
-
-    None
-}
-
-/// Check if an error is transient and should be retried
-pub(super) fn is_retryable_error(error_str: &str) -> bool {
-    // Shared transport-layer classifier used by every other provider. This
-    // covers transient TLS/network faults (connection reset/closed/refused/
-    // aborted, broken pipe, timeouts, unexpected EOF, error decoding/reading,
-    // TLS BadRecordMac / fatal-alert, TLS handshake EOF, DNS/route failures,
-    // and HTTP/2 stream/protocol faults). Keeping the OpenAI path delegated
-    // here ensures retry behavior is unified across providers (issue #338).
-    jcode_provider_core::is_transient_transport_error(error_str)
-        // OpenAI-specific transport wrapper.
-        || error_str.contains("failed to send request to openai api")
-        // Stream/decode errors specific to the OpenAI streaming runtime.
-        || error_str.contains("incomplete message")
-        || error_str.contains("stream disconnected before completion")
-        || error_str.contains("ended before message completion marker")
-        || error_str.contains("falling back from websockets to https transport")
-        // Server errors (5xx)
-        || error_str.contains("500 internal server error")
-        || error_str.contains("502 bad gateway")
-        || error_str.contains("503 service unavailable")
-        || error_str.contains("504 gateway timeout")
-        || error_str.contains("overloaded")
-        // Rate limiting (429): transient, recovers on retry. Unified with the
-        // other providers (Anthropic/Copilot) which already retry these.
-        || error_str.contains("429 too many requests")
-        || error_str.contains("rate limit")
-        || error_str.contains("rate_limit")
-        // API-level server errors
-        || error_str.contains("api_error")
-        || error_str.contains("server_error")
-        || error_str.contains("internal server error")
-        || error_str.contains("an error occurred while processing your request")
-        || error_str.contains("please include the request id")
-        // Auth: we just force-refreshed the OpenAI token in place and want the
-        // retry loop to reconnect with the fresh credentials.
-        || error_str.contains("openai token refreshed, retrying")
-        || error_str.contains("openai credentials changed before request, retrying")
-}
-
+#[path = "openai_stream_runtime_model_errors.rs"]
+mod model_errors;
+pub(super) use model_errors::is_retryable_error;
+use model_errors::*;
 #[cfg(test)]
 #[path = "openai_stream_runtime/stream_runtime_tests.rs"]
 mod stream_runtime_tests;

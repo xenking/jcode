@@ -141,14 +141,36 @@ Actions:
 
 1. Capture `server:memory` and the runtime log analysis.
 2. Add counters for any obvious missing owner.
-3. If ownership is still unclear, use a `jemalloc-prof` build:
+3. If ownership is still unclear, take a sampled heap profile. macOS and Linux
+   fork builds use `jemalloc-prof` by default. Windows and source builds with
+   `--no-default-features --features pdf,bedrock` use the system allocator.
 
 ```bash
-jcode debug 'allocator:profile:on'
-jcode debug 'allocator:profile:dump /tmp/jcode-server.heap'
+jcode debug list
+socket=/path/to/jcode.sock  # Main socket, not the -debug.sock companion.
+bin=/absolute/path/to/the-running-daemon-binary
+profile_dir=$(mktemp -d)
+
+jcode --socket "$socket" debug 'server:memory'
+jcode --socket "$socket" debug 'allocator:profile:on'
+# Reproduce the allocation growth before dumping.
+jcode --socket "$socket" debug "allocator:profile:dump $profile_dir/server.heap"
+jcode --socket "$socket" debug 'allocator:profile:off'
+jeprof --text --inuse_space --show_bytes "$bin" "$profile_dir/server.heap"
 ```
 
-The normal system-allocator build cannot produce allocation-stack profiles. Do not claim heap ownership from RSS alone.
+Set `[display] debug_socket = true` in the daemon's config if debug control is
+not already enabled. Check `process.allocator` in `server:memory`: `enabled`
+means the profiler was initialized at startup, while `active` is the current
+sampling state. Sampling starts off and cannot attribute allocations made before
+you turned it on. Turn it off after the capture, even if the dump fails.
+
+Use `jeprof` from jemalloc with the exact daemon executable (not a newer
+client or launcher). On macOS the dump includes the main executable's ASLR
+mapping. The estimate covers live sampled Rust allocations, not C allocations,
+all mapped bytes, or RSS. Do not infer heap ownership from RSS alone.
+If a separate test daemon needs startup overrides such as a smaller sampling
+interval, set `_RJEM_MALLOC_CONF` for the prefixed allocator, not `MALLOC_CONF`.
 
 ### 5. `non_heap_or_mapping_growth`
 

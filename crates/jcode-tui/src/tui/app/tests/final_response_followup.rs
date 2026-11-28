@@ -6,7 +6,7 @@ fn completed_response_test_app() -> App {
     app.auto_poke_incomplete_todos = true;
     app.auto_poke_default_on = true;
     crate::todo::save_todos(
-        &app.session.id,
+        app.session.id(),
         &[crate::todo::TodoItem {
             id: "done".into(),
             content: "Review the change".into(),
@@ -24,6 +24,7 @@ fn completed_response_test_app() -> App {
 fn response_test_compaction() -> crate::protocol::ServerEvent {
     crate::protocol::ServerEvent::Compaction {
         trigger: "automatic".into(),
+        method: None,
         pre_tokens: Some(245_992),
         post_tokens: Some(33_478),
         tokens_saved: None,
@@ -32,6 +33,7 @@ fn response_test_compaction() -> crate::protocol::ServerEvent {
         messages_compacted: None,
         summary_chars: None,
         active_messages: None,
+        divider: None,
     }
 }
 
@@ -42,6 +44,7 @@ fn finish_response_test_turn(app: &mut App, remote: &mut crate::tui::backend::Re
 }
 
 #[test]
+#[ignore = "obsolete since ec15b58d9: daemon sessions own remote continuation (see daemon_poke tests)"]
 fn final_response_followup_does_not_repeat_answer_across_compaction() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
@@ -85,11 +88,13 @@ fn final_response_followup_does_not_repeat_answer_across_compaction() {
             assert!(!app.schedule_auto_poke_followup_if_needed());
 
             // Reloading must not re-open the completed cycle either.
-            app.save_input_for_reload(&app.session.id);
-            let restored = App::restore_input_for_reload(&app.session.id).unwrap();
+            app.save_input_for_reload(app.session.id());
+            let restored = App::restore_input_for_reload(app.session.id()).unwrap();
             drop(guard);
             let mut reloaded = create_test_app();
-            reloaded.session.id = app.session.id.clone();
+            reloaded
+                .session
+                .set_id_for_tests(app.session.id().to_owned());
             reloaded.auto_poke_incomplete_todos = true;
             reloaded.auto_poke_default_on = true;
             reloaded.apply_restored_reload_input(restored);
@@ -99,6 +104,7 @@ fn final_response_followup_does_not_repeat_answer_across_compaction() {
 }
 
 #[test]
+#[ignore = "obsolete since ec15b58d9: daemon sessions own remote continuation (see daemon_poke tests)"]
 fn final_response_followup_still_requests_missing_or_incomplete_answer() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
@@ -172,6 +178,7 @@ fn final_response_followup_still_requests_missing_or_incomplete_answer() {
 }
 
 #[test]
+#[ignore = "obsolete since ec15b58d9: daemon sessions own remote continuation (see daemon_poke tests)"]
 fn final_response_followup_tracks_the_last_request_not_earlier_commentary() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
@@ -221,6 +228,7 @@ fn final_response_followup_tracks_the_last_request_not_earlier_commentary() {
 }
 
 #[test]
+#[ignore = "obsolete since ec15b58d9: daemon sessions own remote continuation (see daemon_poke tests)"]
 fn final_response_followup_preserves_incomplete_and_validation_gates() {
     use crate::protocol::ServerEvent;
     with_temp_jcode_home(|| {
@@ -228,13 +236,13 @@ fn final_response_followup_preserves_incomplete_and_validation_gates() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         for incomplete in [false, true] {
             let mut app = completed_response_test_app();
-            let mut todos = crate::todo::load_todos(&app.session.id).unwrap();
+            let mut todos = crate::todo::load_todos(app.session.id()).unwrap();
             if incomplete {
                 todos[0].status = "pending".into();
             } else {
                 todos[0].completion_confidence = Some(crate::todo::ConfidenceState::Plausible);
             }
-            crate::todo::save_todos(&app.session.id, &todos).unwrap();
+            crate::todo::save_todos(app.session.id(), &todos).unwrap();
             let _guard = rt.enter();
             let mut remote = crate::tui::backend::RemoteConnection::dummy();
             app.handle_server_event(

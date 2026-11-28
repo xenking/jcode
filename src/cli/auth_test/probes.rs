@@ -32,8 +32,7 @@ fn generic_credential_paths_for_provider(
             {
                 vec![config_dir.join(env_file)]
             } else {
-                let resolved =
-                    crate::provider_catalog::resolve_openai_compatible_profile(profile);
+                let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
                 vec![config_dir.join(resolved.env_file)]
             }
         }
@@ -94,8 +93,8 @@ fn probe_generic_provider_auth(
     );
 }
 
-async fn probe_claude_auth(report: &mut AuthTestProviderReport) {
-    if let Some(creds) = push_result_step(
+fn probe_claude_auth(report: &mut AuthTestProviderReport) {
+    if push_result_step(
         report,
         "credential_probe",
         crate::auth::claude::load_credentials(),
@@ -105,17 +104,13 @@ async fn probe_claude_auth(report: &mut AuthTestProviderReport) {
                 creds.expires_at
             )
         },
-    ) {
-        push_result_step(
-            report,
+    )
+    .is_some()
+    {
+        report.push_step(
             "refresh_probe",
-            crate::auth::oauth::refresh_claude_tokens(&creds.refresh_token).await,
-            |tokens| {
-                format!(
-                    "Claude token refresh succeeded (new_expires_at={}).",
-                    tokens.expires_at
-                )
-            },
+            true,
+            "Skipped: the Claude login is refreshed by its daemon.".to_string(),
         );
     }
 }
@@ -284,9 +279,8 @@ async fn probe_copilot_auth(report: &mut AuthTestProviderReport) {
 }
 
 async fn probe_cursor_auth(report: &mut AuthTestProviderReport) {
-    let has_api_key = crate::auth::cursor::has_cursor_api_key();
-    let has_auth_file = crate::auth::cursor::has_cursor_auth_file_token();
-    let has_vscdb = crate::auth::cursor::has_cursor_vscdb_token();
+    let has_api_key = crate::auth::cursor::load_api_key().is_ok();
+    let (has_auth_file, has_vscdb) = crate::auth::cursor::trusted_external_token_sources();
     let ok = has_api_key || has_auth_file || has_vscdb;
     report.push_step(
         "credential_probe",

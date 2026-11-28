@@ -9,6 +9,47 @@ pub enum BackgroundTaskStatus {
     Completed,
     Superseded,
     Failed,
+    Interrupted,
+}
+
+pub const BACKGROUND_TASKS_CAPABILITY: &str = "background_tasks_v1";
+pub const PERSISTENT_BACKGROUND_TASKS_CAPABILITY: &str = "persistent_background_tasks_v1";
+
+/// User-facing task state. A stalled task is still running and can recover.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BackgroundTaskSummary {
+    pub task_id: String,
+    pub label: String,
+    pub status: BackgroundTaskStatus,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    pub stalled: bool,
+    pub can_cancel: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<BackgroundTaskProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_line: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackgroundTaskOutput {
+    pub task_id: String,
+    pub tail: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BackgroundTasksSnapshot {
+    pub tasks: Vec<BackgroundTaskSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<BackgroundTaskOutput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,6 +163,8 @@ pub struct BackgroundTaskCompleted {
 /// silence episode; new output or progress re-arms it.
 #[derive(Debug, Clone)]
 pub struct BackgroundTaskStalled {
+    /// True for a runtime checkpoint independent of output or progress.
+    pub elapsed_review: bool,
     pub task_id: String,
     pub tool_name: String,
     pub display_name: Option<String>,

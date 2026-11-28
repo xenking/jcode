@@ -11,7 +11,7 @@
 use crate::mobile_sync;
 use crate::subscription_api;
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -79,12 +79,48 @@ pub struct MobileCommand {
     pub session_id: Option<String>,
     pub text: String,
     #[serde(default)]
+    pub images: Vec<MobileImage>,
+    #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
     pub claimed_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct MobileImage {
+    pub media_type: String,
+    pub data: String,
+}
+
 impl MobileCommand {
+    fn validated_images(&self) -> Result<Vec<(String, String)>> {
+        use base64::Engine;
+        anyhow::ensure!(self.images.len() <= 4, "at most 4 images are allowed");
+        let mut bytes = 0usize;
+        self.images
+            .iter()
+            .map(|image| {
+                anyhow::ensure!(
+                    matches!(
+                        image.media_type.as_str(),
+                        "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+                    ),
+                    "unsupported image media type"
+                );
+                anyhow::ensure!(
+                    !image.data.is_empty() && image.data.len() <= 1_398_104,
+                    "invalid image size"
+                );
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&image.data)
+                    .context("invalid image base64")?;
+                bytes += decoded.len();
+                anyhow::ensure!(bytes <= 1024 * 1024, "images exceed 1 MiB decoded total");
+                Ok((image.media_type.clone(), image.data.clone()))
+            })
+            .collect()
+    }
+
     // Both timestamps originate at the queue API, avoiding client clock skew.
     // This includes wake/backlog/poll delay, not claim response transport time.
     fn queue_wait_ms(&self) -> Option<u64> {
@@ -141,8 +177,14 @@ fn transfer_session(
     );
     let mut session =
         crate::session::Session::create(Some(metadata.session_id.clone()), metadata.title.clone());
-    session.working_dir = Some(workspace.to_string_lossy().into_owned());
-    session.original_working_dir = metadata.cwd.clone();
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: Some(workspace.to_string_lossy().into_owned()),
+        ..session.workspace()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        original_working_dir: metadata.cwd.clone(),
+        ..session.workspace()
+    });
     for message in messages {
         // Imported tool entries are historical text, not executable tool calls
         // or unmatched tool results. Never elevate synced system text into the
@@ -259,7 +301,7 @@ async fn import_local_session(
         let (metadata, messages) = fetch_local_transcript(client, base, key, id).await?;
         let mut session = transfer_session(&metadata, messages, &workspace_dir())?;
         session.save()?;
-        Ok(session.id)
+        Ok(session.id().to_owned())
     })
     .await
 }
@@ -278,7 +320,7 @@ pub fn touch_cloud_activity_marker() {
         return;
     }
     if let Some(path) = busy_marker()
-        && let Err(error) = std::fs::write(&path, b"")
+        && let Err(error) = jcode_storage::touch_stamp(&path)
     {
         crate::logging::warn(&format!("cloud activity marker update failed: {error}"));
     }
@@ -334,18 +376,75 @@ pub fn session_id_from_ndjson_line(line: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn claim(client: &reqwest::Client, base: &str, key: &str) -> Result<Option<MobileCommand>> {
-    let response = client
+fn claim_request(
+    client: &reqwest::Client,
+    base: &str,
+    key: &str,
+    machine: &str,
+) -> reqwest::RequestBuilder {
+    #[derive(Serialize)]
+    struct ClaimPayload<'a> {
+        machine: &'a str,
+    }
+    client
         .post(format!("{base}/mobile/commands/claim"))
         .bearer_auth(key)
-        .json(&serde_json::json!({ "machine": std::env::var_os("HOSTNAME").map_or_else(String::new, |name| name.to_string_lossy().into_owned()) }))
+        .json(&ClaimPayload { machine })
         .timeout(Duration::from_secs(30))
-        .send()
-        .await?;
+}
+
+async fn claim(client: &reqwest::Client, base: &str, key: &str) -> Result<Option<MobileCommand>> {
+    let request = claim_request(
+        client,
+        base,
+        key,
+        &std::env::var_os("HOSTNAME")
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+    );
+    let response = request.send().await?;
     if !response.status().is_success() {
         anyhow::bail!("claim returned {}", response.status());
     }
     Ok(response.json::<ClaimResponse>().await?.command)
+}
+
+// Field order matches the legacy serde_json::Value map's sorted wire keys.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum CompletionPayload<'a> {
+    Done {
+        session_id: &'a str,
+        status: &'static str,
+    },
+    Failed {
+        error: &'a str,
+        status: &'static str,
+    },
+}
+
+fn completion_request(
+    client: &reqwest::Client,
+    base: &str,
+    key: &str,
+    id: &str,
+    outcome: &Result<String>,
+) -> reqwest::RequestBuilder {
+    let request = client
+        .post(format!("{base}/mobile/commands/{id}/complete"))
+        .bearer_auth(key);
+    // json() serializes synchronously into the request body. Neither the
+    // borrowed payload nor the formatted error survives into the network await.
+    let request = match outcome {
+        Ok(session) => request.json(&CompletionPayload::Done {
+            session_id: session,
+            status: "done",
+        }),
+        Err(err) => request.json(&CompletionPayload::Failed {
+            error: &format!("{err:#}"),
+            status: "failed",
+        }),
+    };
+    request.timeout(Duration::from_secs(30))
 }
 
 async fn complete(
@@ -355,15 +454,7 @@ async fn complete(
     id: &str,
     outcome: &Result<String>,
 ) -> Result<()> {
-    let body = match outcome {
-        Ok(session) => serde_json::json!({ "status": "done", "session_id": session }),
-        Err(err) => serde_json::json!({ "status": "failed", "error": format!("{err:#}") }),
-    };
-    client
-        .post(format!("{base}/mobile/commands/{id}/complete"))
-        .bearer_auth(key)
-        .json(&body)
-        .timeout(Duration::from_secs(30))
+    completion_request(client, base, key, id, outcome)
         .send()
         .await?
         .error_for_status()?;
@@ -371,6 +462,10 @@ async fn complete(
 }
 
 async fn run_turn(command: &MobileCommand, session_id: Option<&str>) -> Result<String> {
+    anyhow::ensure!(
+        command.images.is_empty(),
+        "photo commands require a live computer session"
+    );
     let exe = std::env::current_exe().context("locating jcode executable")?;
     let mut cmd = tokio::process::Command::new(exe);
     // The cloud daemon runs as `jcode --provider jcode serve` until the user
@@ -523,7 +618,9 @@ pub fn spawn_cloud_runner() {
     }
     ensure_sync_enabled();
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = jcode_provider_core::reqwest_builder()
+            .build()
+            .expect("mobile runner HTTP client should build");
         poll_commands_with_wait(|| run_one(&client), events::spawn()).await;
     });
 }
@@ -531,6 +628,103 @@ pub fn spawn_cloud_runner() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_request_preserves_legacy_bytes_after_hostname_release() {
+        let client = reqwest::Client::new();
+        for machine in ["", "laptop", "quoted\"\\\n雪"] {
+            let source = machine.to_owned();
+            let expected = serde_json::to_vec(&serde_json::json!({ "machine": source })).unwrap();
+            let builder =
+                claim_request(&client, "https://example.invalid/v1", "dummy-key", &source);
+            drop(source);
+            let request = builder.build().unwrap();
+            assert_eq!(request.method(), reqwest::Method::POST);
+            assert_eq!(request.url().path(), "/v1/mobile/commands/claim");
+            assert_eq!(request.headers()["authorization"], "Bearer dummy-key");
+            assert_eq!(request.headers()["content-type"], "application/json");
+            assert_eq!(request.timeout(), Some(&Duration::from_secs(30)));
+            assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn completion_request_preserves_legacy_wire_contract() {
+        let client = reqwest::Client::new();
+        for outcome in [
+            Ok(String::new()),
+            Ok("session \"quoted\"\\\n雪".to_owned()),
+            Err(anyhow::anyhow!("root \"quoted\"\\\n雪").context("outer context")),
+        ] {
+            let legacy = match &outcome {
+                Ok(session) => serde_json::json!({ "status": "done", "session_id": session }),
+                Err(err) => serde_json::json!({ "status": "failed", "error": format!("{err:#}") }),
+            };
+            let expected = serde_json::to_vec(&legacy).unwrap();
+            let request = completion_request(
+                &client,
+                "https://example.invalid/v1",
+                "dummy-key",
+                "command-123",
+                &outcome,
+            )
+            .build()
+            .unwrap();
+            drop(outcome);
+            assert_eq!(request.method(), reqwest::Method::POST);
+            assert_eq!(
+                request.url().as_str(),
+                "https://example.invalid/v1/mobile/commands/command-123/complete"
+            );
+            assert_eq!(request.headers()["authorization"], "Bearer dummy-key");
+            assert_eq!(request.headers()["content-type"], "application/json");
+            assert_eq!(request.timeout(), Some(&Duration::from_secs(30)));
+            assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn photo_wire_contract_validates_types_base64_and_total_budget() {
+        use base64::Engine;
+        let wire = |images| {
+            serde_json::from_value::<MobileCommand>(serde_json::json!({
+            "command_id":"photo", "kind":"message", "session_id":"local", "text":"", "images":images
+        })).unwrap()
+        };
+        let valid = serde_json::json!({"media_type":"image/png", "data":"aGk="});
+        assert_eq!(
+            wire(serde_json::json!([valid.clone()]))
+                .validated_images()
+                .unwrap(),
+            vec![("image/png".into(), "aGk=".into())]
+        );
+        for image in [
+            serde_json::json!({"media_type":"image/svg+xml", "data":"aGk="}),
+            serde_json::json!({"media_type":"image/png", "data":""}),
+            serde_json::json!({"media_type":"image/png", "data":"aGk"}),
+            serde_json::json!({"media_type":"image/png", "data":"aGl="}),
+            serde_json::json!({"media_type":"image/png", "data":"a Gk="}),
+        ] {
+            assert!(wire(serde_json::json!([image])).validated_images().is_err());
+        }
+        assert!(
+            wire(serde_json::json!(vec![valid; 5]))
+                .validated_images()
+                .is_err()
+        );
+        let full = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 1024 * 1024]);
+        let image = serde_json::json!({"media_type":"image/jpeg", "data":full});
+        assert!(
+            wire(serde_json::json!([image.clone()]))
+                .validated_images()
+                .is_ok()
+        );
+        assert!(
+            wire(serde_json::json!([image, {"media_type":"image/gif", "data":"aGk="}]))
+                .validated_images()
+                .is_err()
+        );
+    }
 
     #[test]
     fn queue_wait_uses_server_timestamps_and_accepts_legacy_commands() {
@@ -750,20 +944,17 @@ mod tests {
             std::path::Path::new("/cloud/workspaces"),
         )
         .unwrap();
-        assert_ne!(session.id, metadata.session_id);
-        assert_eq!(session.parent_id.as_deref(), Some("local-source"));
-        assert_eq!(session.working_dir.as_deref(), Some("/cloud/workspaces"));
-        assert_eq!(
-            session.original_working_dir.as_deref(),
-            Some("/home/local/project")
-        );
-        assert_eq!(session.title, metadata.title);
-        assert!(session.provider_session_id.is_none());
-        assert!(session.system_prompt.is_none());
-        assert!(session.compaction.is_none());
-        assert_eq!(session.messages.len(), 5);
-        assert_eq!(session.messages[1].role, Role::Assistant);
-        for message in &session.messages {
+        assert_ne!(session.id(), metadata.session_id);
+        assert_eq!(session.parent_id(), Some("local-source"));
+        assert_eq!(session.working_dir(), Some("/cloud/workspaces"));
+        assert_eq!(session.original_working_dir(), Some("/home/local/project"));
+        assert_eq!(session.title(), metadata.title.as_deref());
+        assert!(session.provider_session_id().is_none());
+        assert!(session.system_prompt().is_none());
+        assert!(session.compaction().is_none());
+        assert_eq!(session.message_count(), 5);
+        assert_eq!(session.message_at(1).expect("transcript message").role, Role::Assistant);
+        for message in session.iter_messages() {
             assert!(
                 message
                     .content
@@ -771,7 +962,7 @@ mod tests {
                     .all(|b| matches!(b, ContentBlock::Text { .. }))
             );
         }
-        let ContentBlock::Text { text, .. } = &session.messages.last().unwrap().content[0] else {
+        let ContentBlock::Text { text, .. } = &session.last_message().unwrap().content[0] else {
             panic!()
         };
         assert!(text.starts_with("[Session transferred to Jcode Cloud]"));

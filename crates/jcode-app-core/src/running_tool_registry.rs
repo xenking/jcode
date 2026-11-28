@@ -23,6 +23,7 @@ static RUNNING: LazyLock<Mutex<HashMap<String, (u64, RunningTool)>>> =
 /// RAII registration for one backgroundable tool wait. Dropping it clears the
 /// entry unless a newer registration for the same session replaced it.
 pub struct RunningToolGuard {
+    _activity: crate::turn_activity::AdmissionGuard,
     session_id: String,
     token: u64,
 }
@@ -42,6 +43,7 @@ pub fn register(session_id: &str, call_id: &str, name: &str) -> RunningToolGuard
         );
     }
     RunningToolGuard {
+        _activity: crate::turn_activity::global().awaiting_tool(session_id, name, call_id),
         session_id: session_id.to_string(),
         token,
     }

@@ -145,8 +145,11 @@ async fn run_unix(args: Args) -> Result<()> {
             super::cloud_ephemeral::ssh_config_path(id)?,
         );
     } else if super::cloud_managed::is_managed(host) {
-        let _ = super::cloud_managed::ssh_args()?;
-        crate::env::set_var("JCODE_SSH_CONFIG", super::cloud_managed::ssh_config_path()?);
+        let _ = super::cloud_managed::ssh_args(host)?;
+        crate::env::set_var(
+            "JCODE_SSH_CONFIG",
+            super::cloud_managed::ssh_config_path(host)?,
+        );
     } else {
         crate::env::remove_var("JCODE_SSH_CONFIG");
     }
@@ -197,7 +200,7 @@ async fn run_unix(args: Args) -> Result<()> {
     let mut quit = signal(SignalKind::quit())?;
     let result = tokio::select! {
         result = super::tui_launch::run_tui_client(
-            args.resume.clone(), None, false, true, Some(working_dir.clone()), false, false,
+            args.resume.clone(), None, false, true, Some(working_dir.clone()), false, false, None,
         ) => result,
         _ = hup.recv() => Ok(()),
         _ = term.recv() => Ok(()),

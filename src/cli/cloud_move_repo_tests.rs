@@ -1,8 +1,199 @@
 use super::*;
 
-pub(super) fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifest) {
-    let root = tempfile::tempdir().unwrap();
+#[test]
+fn cloud_move_restores_working_content_but_not_source_index() {
+    let (root, _stage, _) = repository();
+    std::fs::write(root.path().join("file.txt"), "staged\n").unwrap();
+    git(root.path(), &["add", "file.txt"]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "unstaged\n").unwrap();
     let stage = tempfile::tempdir().unwrap();
+    let repo = snapshot_repo(root.path(), "index-semantics", stage.path())
+        .unwrap()
+        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mapped = portable_repo(&repo, "source", home.path()).unwrap();
+    reserve_portable_repo(&mapped).unwrap();
+    restore_repo(
+        &mapped,
+        &stage.path().join("repo.bundle"),
+        &stage.path().join("ignored.tar"),
+        "index-semantics",
+    )
+    .unwrap();
+    let destination = Path::new(&mapped.root);
+    assert_eq!(
+        git(destination, &["show", ":file.txt"]).unwrap(),
+        "original"
+    );
+    assert_eq!(
+        std::fs::read_to_string(destination.join("file.txt")).unwrap(),
+        "unstaged\n"
+    );
+    assert_eq!(git(root.path(), &["show", ":file.txt"]).unwrap(), "staged");
+}
+
+#[test]
+fn cloud_return_refuses_fast_forward_over_conflicting_staged_index() {
+    let (root, _stage, _) = repository();
+    let old_head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "cloud\n").unwrap();
+    git(root.path(), &["add", "file.txt"]).unwrap();
+    git(root.path(), &["commit", "--quiet", "-m", "cloud"]).unwrap();
+    let new_head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+    git(root.path(), &["reset", "--quiet", "--hard", &old_head]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "staged\n").unwrap();
+    git(root.path(), &["add", "file.txt"]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "unstaged\n").unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let ours = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    let plan = CheckoutMerge {
+        local_head: old_head.clone(),
+        new_head,
+        branch: git(root.path(), &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok(),
+        ours: ours.clone(),
+        tree: ours,
+    };
+    assert!(apply_checkout_merge(root.path(), &plan).is_err());
+    assert_eq!(git(root.path(), &["rev-parse", "HEAD"]).unwrap(), old_head);
+    assert_eq!(git(root.path(), &["show", ":file.txt"]).unwrap(), "staged");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
+        "unstaged\n"
+    );
+}
+
+#[test]
+fn cloud_return_preserves_staged_and_unstaged_on_fast_forward() {
+    let (root, _stage, _) = repository();
+    let old_head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+    std::fs::write(root.path().join("cloud-commit.txt"), "cloud commit\n").unwrap();
+    git(root.path(), &["add", "cloud-commit.txt"]).unwrap();
+    git(root.path(), &["commit", "--quiet", "-m", "cloud"]).unwrap();
+    let new_head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+    git(root.path(), &["reset", "--quiet", "--hard", &old_head]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "staged\n").unwrap();
+    git(root.path(), &["add", "file.txt"]).unwrap();
+    std::fs::write(root.path().join("file.txt"), "unstaged\n").unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let ours = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    std::fs::write(root.path().join("cloud-commit.txt"), "cloud commit\n").unwrap();
+    let tree = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    std::fs::remove_file(root.path().join("cloud-commit.txt")).unwrap();
+    let plan = CheckoutMerge {
+        local_head: old_head,
+        new_head: new_head.clone(),
+        branch: git(root.path(), &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok(),
+        ours,
+        tree,
+    };
+    apply_checkout_merge(root.path(), &plan).unwrap();
+    apply_checkout_merge(root.path(), &plan).unwrap();
+    assert_eq!(git(root.path(), &["rev-parse", "HEAD"]).unwrap(), new_head);
+    assert_eq!(git(root.path(), &["show", ":file.txt"]).unwrap(), "staged");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
+        "unstaged\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("cloud-commit.txt")).unwrap(),
+        "cloud commit\n"
+    );
+}
+
+#[test]
+fn cloud_return_preserves_local_staged_changes_without_head_move() {
+    let (root, _stage, _) = repository();
+    std::fs::write(root.path().join("file.txt"), "staged\n").unwrap();
+    git(root.path(), &["add", "file.txt"]).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let ours = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    std::fs::write(root.path().join("remote.txt"), "cloud\n").unwrap();
+    let tree = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    std::fs::remove_file(root.path().join("remote.txt")).unwrap();
+    let head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+    let plan = CheckoutMerge {
+        local_head: head.clone(),
+        new_head: head,
+        branch: git(root.path(), &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok(),
+        ours,
+        tree,
+    };
+    apply_checkout_merge(root.path(), &plan).unwrap();
+    assert_eq!(git(root.path(), &["show", ":file.txt"]).unwrap(), "staged");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("remote.txt")).unwrap(),
+        "cloud\n"
+    );
+}
+
+#[test]
+fn portable_workspace_preserves_subdirectory_and_is_stable() {
+    let (_root, _stage, mut repo) = repository();
+    repo.root = "/private/tmp/project".into();
+    repo.working_dir = "/private/tmp/project/nested".into();
+    let home = tempfile::tempdir().unwrap();
+    let mapped = portable_repo(&repo, "source", home.path()).unwrap();
+    assert!(Path::new(&mapped.root).starts_with(home.path()));
+    assert_eq!(
+        Path::new(&mapped.working_dir),
+        Path::new(&mapped.root).join("nested")
+    );
+    assert_eq!(
+        mapped.root,
+        portable_repo(&repo, "source", home.path()).unwrap().root
+    );
+    assert_ne!(
+        mapped.root,
+        portable_repo(&repo, "other", home.path()).unwrap().root
+    );
+    repo.working_dir = "/private/tmp/project/../other".into();
+    assert!(portable_repo(&repo, "source", home.path()).is_err());
+}
+
+#[test]
+fn portable_workspace_restores_bundle_and_refuses_foreign_checkout() {
+    let (_root, stage, repo) = repository();
+    let home = tempfile::tempdir().unwrap();
+    let mapped = portable_repo(&repo, "source", home.path()).unwrap();
+    reserve_portable_repo(&mapped).unwrap();
+    restore_repo(
+        &mapped,
+        &stage.path().join("repo.bundle"),
+        &stage.path().join("ignored.tar"),
+        "earlier-session",
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&mapped.root).join("file.txt")).unwrap(),
+        "original\n"
+    );
+    validate_staged_workspace(&mapped, &["earlier-session".into()]).unwrap();
+    std::fs::write(Path::new(&mapped.root).join("file.txt"), "other transfer\n").unwrap();
+    assert!(validate_staged_workspace(&mapped, &["earlier-session".into()]).is_err());
+    std::fs::write(Path::new(&mapped.root).join("file.txt"), "original\n").unwrap();
+    reserve_portable_repo(&mapped).unwrap();
+    restore_repo(
+        &mapped,
+        &stage.path().join("repo.bundle"),
+        &stage.path().join("ignored.tar"),
+        "earlier-session",
+    )
+    .unwrap();
+    let other = portable_repo(&repo, "other", home.path()).unwrap();
+    std::fs::create_dir_all(&other.root).unwrap();
+    std::fs::write(Path::new(&other.root).join("valuable"), b"keep").unwrap();
+    assert!(reserve_portable_repo(&other).is_err());
+    assert_eq!(
+        std::fs::read(Path::new(&other.root).join("valuable")).unwrap(),
+        b"keep"
+    );
+}
+
+pub(super) fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifest) {
+    // Session cwds and git report canonical paths; macOS TMPDIR is under the /var symlink.
+    let canonical = std::env::temp_dir().canonicalize().unwrap();
+    let root = tempfile::tempdir_in(&canonical).unwrap();
+    let stage = tempfile::tempdir_in(&canonical).unwrap();
     git(root.path(), &["init", "--quiet"]).unwrap();
     git(root.path(), &["config", "user.name", "Cloud Test"]).unwrap();
     git(
@@ -10,6 +201,7 @@ pub(super) fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifes
         &["config", "user.email", "cloud@example.invalid"],
     )
     .unwrap();
+    git(root.path(), &["config", "commit.gpgsign", "false"]).unwrap();
     std::fs::write(root.path().join("file.txt"), "original\n").unwrap();
     git(root.path(), &["add", "."]).unwrap();
     git(root.path(), &["commit", "--quiet", "-m", "initial"]).unwrap();

@@ -1,5 +1,6 @@
 mod anchor;
 mod cache;
+pub mod jarvis;
 mod message;
 mod prepared;
 mod swarm_collapse;
@@ -11,12 +12,12 @@ pub use anchor::{
 };
 pub use cache::{
     MessageCacheContext, centered_wrap_width, clear_message_cache, get_cached_message_lines,
-    left_pad_lines_for_centered_mode,
+    left_pad_lines_for_centered_mode, project_cached_message_lines,
 };
 pub use message::{
     DisplayMessage, TranscriptPreviewLabels, display_messages_from_rendered_messages,
-    latest_user_transcript_preview, normalize_transcript_preview_text, transcript_preview_line,
-    transcript_preview_lines, truncate_transcript_preview,
+    format_attachment_chips, latest_user_transcript_preview, normalize_transcript_preview_text,
+    transcript_preview_line, transcript_preview_lines, truncate_transcript_preview,
 };
 pub use prepared::{
     CopyTarget, EditToolRange, ImageRegion, ImageRegionRender, MessageBoundary, PreparedChatFrame,

@@ -11,6 +11,8 @@ pub fn remote_model_routes_fallback(
             .iter()
             .filter(|model| is_listable_model_name(model))
             .map(|model| ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: model.clone(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
@@ -18,6 +20,8 @@ pub fn remote_model_routes_fallback(
                 detail: "jcode subscription routing · managed server-side".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect();
     }
@@ -38,6 +42,8 @@ pub fn remote_model_routes_fallback(
             let available = auth.bedrock != AuthState::NotConfigured
                 || crate::provider::bedrock::BedrockProvider::has_credentials();
             routes.push(ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: model.clone(),
                 provider: "AWS Bedrock".to_string(),
                 api_method: "bedrock".to_string(),
@@ -49,6 +55,8 @@ pub fn remote_model_routes_fallback(
                 },
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
             continue;
         }
@@ -99,7 +107,9 @@ pub fn remote_model_routes_fallback(
             added_any = true;
         }
 
-        if jcode_provider_core::model_id::matches_known_model(model, ALL_OPENAI_MODELS) {
+        // Names-only broadcasts contain live discoveries, not a release
+        // allowlist. Recognize future OpenAI IDs just as full catalog routes do.
+        if provider_for_model(model) == Some("openai") {
             let availability = model_availability_for_account(model);
             let (available, detail) = if auth.openai == AuthState::NotConfigured {
                 (false, "no credentials".to_string())
@@ -179,6 +189,8 @@ pub fn remote_model_routes_fallback(
 
         if crate::provider::gemini::is_gemini_model_id(model) {
             routes.push(ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: model.clone(),
                 provider: "Gemini".to_string(),
                 api_method: "code-assist-oauth".to_string(),
@@ -186,12 +198,16 @@ pub fn remote_model_routes_fallback(
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
             added_any = true;
         }
 
         if !added_any {
             routes.push(ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: model.clone(),
                 provider: "unknown".to_string(),
                 api_method: "unknown".to_string(),
@@ -199,6 +215,8 @@ pub fn remote_model_routes_fallback(
                 detail: "no matching configured provider route".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
     }
@@ -222,6 +240,8 @@ pub fn remote_model_routes_lightweight_fallback(
             continue;
         }
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.clone(),
             provider: provider.clone(),
             api_method: if is_jcode_subscription {
@@ -237,11 +257,15 @@ pub fn remote_model_routes_lightweight_fallback(
             },
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 
     if routes.is_empty() && !current_model.is_empty() && current_model != "unknown" {
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: current_model.to_string(),
             provider,
             api_method: "current".to_string(),
@@ -249,6 +273,8 @@ pub fn remote_model_routes_lightweight_fallback(
             detail: "refreshing model catalog…".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 
@@ -280,6 +306,8 @@ pub fn remote_current_openai_compatible_route_for_model(
     }
 
     Some(ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model.to_string(),
         provider: resolved.display_name,
         api_method: format!("openai-compatible:{}", resolved.id),
@@ -287,6 +315,8 @@ pub fn remote_current_openai_compatible_route_for_model(
         detail: resolved.api_base,
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     })
 }
 
@@ -322,6 +352,8 @@ pub fn remote_openai_compatible_route_for_model(model: &str) -> Option<ModelRout
             )
         };
         return Some(ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.to_string(),
             provider: resolved.display_name,
             api_method: format!("openai-compatible:{}", resolved.id),
@@ -329,6 +361,8 @@ pub fn remote_openai_compatible_route_for_model(model: &str) -> Option<ModelRout
             detail,
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
     named_provider_profile_route_for_model(model)
@@ -367,6 +401,8 @@ pub(super) fn named_provider_profile_route_for_model_in(
             profile_config.base_url.trim().to_string()
         };
         return Some(ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.to_string(),
             provider: profile_name.clone(),
             api_method: format!("openai-compatible:{}", profile_name),
@@ -374,6 +410,8 @@ pub(super) fn named_provider_profile_route_for_model_in(
             detail,
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
     None

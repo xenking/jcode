@@ -18,7 +18,17 @@ pub fn load_openai_compatible_profile_api_key(
             .ok()
             .map(|credentials| credentials.api_key);
     }
-    load_api_key_from_env_or_config(&profile.api_key_env, &profile.env_file)
+    // The active labelled key wins. Without one this is the unlabelled key,
+    // read exactly as before. A failing `key_command` yields no key rather
+    // than silently serving another account.
+    match active_api_key_credential(&profile.id) {
+        Ok(Some(credential)) => Some(credential.api_key),
+        Ok(None) => load_api_key_from_env_or_config(&profile.api_key_env, &profile.env_file),
+        Err(error) => {
+            crate::logging::warn(&format!("{error:#}"));
+            None
+        }
+    }
 }
 
 /// Resolve the shared compatible-transport key from its configured env name and
@@ -26,6 +36,17 @@ pub fn load_openai_compatible_profile_api_key(
 /// credential file rather than an env file, so credential presence checks must
 /// consult that store too or a signed-in Muse account looks unconfigured.
 pub fn load_runtime_api_key(key_name: &str, env_file: &str) -> Option<String> {
+    if let Some(profile_id) = api_key_profile_id_for_env(key_name, env_file)
+        && active_api_key_account(profile_id).is_some_and(|account| account.label().is_some())
+    {
+        return match active_api_key_credential(profile_id) {
+            Ok(credential) => credential.map(|credential| credential.api_key),
+            Err(error) => {
+                crate::logging::warn(&format!("{error:#}"));
+                None
+            }
+        };
+    }
     if let Some(key) = load_api_key_from_env_or_config(key_name, env_file) {
         return Some(key);
     }
@@ -58,6 +79,10 @@ pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile)
 
     let resolved = resolve_openai_compatible_profile_endpoint(profile, None);
     if load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file).is_some() {
+        return true;
+    }
+
+    if api_key_provider_has_labelled_accounts(profile.id) {
         return true;
     }
 

@@ -226,6 +226,7 @@ pub fn set_gateway_enabled(enabled: bool) -> Result<ToggleOutcome> {
 ///
 /// Returns the removed device names, or an empty vec when nothing matched.
 pub fn revoke_device(target: &str) -> Result<Vec<String>> {
+    let _lock = DeviceRegistry::lock_for_update()?;
     let mut registry = DeviceRegistry::load();
     let mut removed = Vec::new();
     registry.devices.retain(|device| {
@@ -268,6 +269,7 @@ impl PairingInvite {
 /// Mint a pairing code valid for five minutes.
 pub fn create_pairing_invite() -> Result<PairingInvite> {
     let status = RemoteStatus::load();
+    let _lock = DeviceRegistry::lock_for_update()?;
     let mut registry = DeviceRegistry::load();
     let code = registry.generate_pairing_code();
     registry.save()?;
@@ -290,6 +292,7 @@ mod tests {
 
     fn device(id: &str, name: &str) -> PairedDevice {
         PairedDevice {
+            scope: jcode_gateway_types::DeviceScope::Phone,
             id: id.to_string(),
             name: name.to_string(),
             token_hash: "hash".to_string(),

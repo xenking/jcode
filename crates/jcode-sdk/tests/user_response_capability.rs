@@ -22,6 +22,8 @@ impl Transport for PairTransport {
 fn user_response_capability_is_sent_only_when_client_opts_in() {
     assert!(!ConnectOptions::default().supports_user_response);
     assert!(!SshConnectOptions::new("test-host").supports_user_response);
+    assert!(!ConnectOptions::default().supports_applets);
+    assert!(!SshConnectOptions::new("test-host").supports_applets);
     for enabled in [false, true] {
         let (ours, theirs) = UnixStream::pair().unwrap();
         let server = std::thread::spawn(move || {
@@ -30,17 +32,20 @@ fn user_response_capability_is_sent_only_when_client_opts_in() {
             let frame: ClientFrame = read_frame(&mut reader).unwrap();
             let ApiRequest::Hello {
                 supports_user_response,
+                supports_applets,
                 ..
             } = frame.request
             else {
                 panic!("first frame must be Hello")
             };
             assert_eq!(supports_user_response, enabled);
+            assert_eq!(supports_applets, Some(!enabled));
             write_frame(
                 &mut writer,
                 &ServerFrame::reply(
                     frame.id,
                     ApiEvent::HelloOk {
+                        runtime_identity: None,
                         version: API_VERSION_MAJOR,
                         server: "capability-test".into(),
                         capabilities: vec![],
@@ -53,6 +58,7 @@ fn user_response_capability_is_sent_only_when_client_opts_in() {
             Box::new(PairTransport(ours)),
             ConnectOptions {
                 supports_user_response: enabled,
+                supports_applets: !enabled,
                 ensure_runtime: false,
                 request_timeout: Some(Duration::from_secs(5)),
                 ..Default::default()

@@ -8,8 +8,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::sync::Mutex;
+
+mod reconnect;
+use reconnect::DaemonTransport;
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
 
@@ -19,6 +22,56 @@ const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const JSONRPC_INVALID_PARAMS: i64 = -32602;
 const JSONRPC_INTERNAL_ERROR: i64 = -32603;
 const JSONRPC_SERVER_ERROR: i64 = -32000;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum SessionEnvMode {
+    #[default]
+    None,
+    Inherit,
+}
+
+impl SessionEnvMode {
+    fn resolve(flag: Option<Self>, env: Option<std::ffi::OsString>) -> Result<Self> {
+        use clap::ValueEnum;
+
+        if let Some(mode) = flag {
+            return Ok(mode);
+        }
+        let Some(value) = env else {
+            return Ok(Self::default());
+        };
+        value
+            .into_string()
+            .ok()
+            .and_then(|value| Self::from_str(&value, false).ok())
+            .ok_or_else(|| anyhow::anyhow!("JCODE_ACP_SESSION_ENV must be 'none' or 'inherit'"))
+    }
+}
+
+fn inherited_session_env(
+    env: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<HashMap<String, String>> {
+    let mut overrides = HashMap::new();
+    for (key, value) in env {
+        let key = key
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("cannot inherit a non-UTF-8 environment variable name"))?;
+        if key.is_empty()
+            || key.contains(['=', '\0'])
+            || key.to_ascii_uppercase().starts_with("JCODE_")
+        {
+            continue;
+        }
+        let value = value.into_string().map_err(|_| {
+            anyhow::anyhow!("cannot inherit a non-UTF-8 environment variable value")
+        })?;
+        if value.contains('\0') {
+            anyhow::bail!("cannot inherit an environment variable value containing NUL");
+        }
+        overrides.insert(key, value);
+    }
+    Ok(overrides)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AcpProfile {
@@ -85,14 +138,15 @@ impl JsonRpcMessage {
 
 struct DaemonSession {
     session_id: String,
-    reader: Mutex<BufReader<ReadHalf>>,
-    writer: Mutex<WriteHalf>,
+    transport: DaemonTransport,
     next_request_id: AtomicU64,
     active_prompt_id: Mutex<Option<u64>>,
     prompt_running: AtomicBool,
     /// Set by `session/cancel` while a prompt is running; scoped to that prompt.
     cancel_requested: AtomicBool,
-    ui_state: Mutex<SessionUiState>,
+    ui_state: Arc<Mutex<SessionUiState>>,
+    session_env: Option<HashMap<String, String>>,
+    selected_model: Arc<Mutex<Option<String>>>,
     /// Workspace root reported by the ACP client, used to compose the
     /// project-local skill overlay for slash-skill resolution.
     working_dir: Option<PathBuf>,
@@ -320,13 +374,17 @@ impl DaemonSession {
     fn new(session_id: String, reader: ReadHalf, writer: WriteHalf, next_request_id: u64) -> Self {
         Self {
             session_id,
-            reader: Mutex::new(BufReader::new(reader)),
-            writer: Mutex::new(writer),
+            transport: DaemonTransport::Direct {
+                reader: Mutex::new(BufReader::new(reader).lines()),
+                writer: Mutex::new(writer),
+            },
             next_request_id: AtomicU64::new(next_request_id),
             active_prompt_id: Mutex::new(None),
             prompt_running: AtomicBool::new(false),
             cancel_requested: AtomicBool::new(false),
-            ui_state: Mutex::new(SessionUiState::default()),
+            ui_state: Arc::new(Mutex::new(SessionUiState::default())),
+            session_env: None,
+            selected_model: Arc::new(Mutex::new(None)),
             working_dir: None,
             active_skill: Mutex::new(None),
         }
@@ -348,7 +406,7 @@ impl DaemonSession {
 
     fn with_ui_state(self, state: SessionUiState) -> Self {
         Self {
-            ui_state: Mutex::new(state),
+            ui_state: Arc::new(Mutex::new(state)),
             ..self
         }
     }
@@ -358,35 +416,62 @@ impl DaemonSession {
     }
 
     async fn send(&self, request: &Request) -> Result<()> {
-        let mut json = serde_json::to_string(request)?;
-        json.push('\n');
-        let mut writer = self.writer.lock().await;
-        writer.write_all(json.as_bytes()).await?;
-        writer.flush().await?;
-        Ok(())
+        match &self.transport {
+            DaemonTransport::Managed(connection) => connection.send(request).await,
+            DaemonTransport::Direct { writer, .. } => {
+                let mut json = serde_json::to_string(request)?;
+                json.push('\n');
+                let mut writer = writer.lock().await;
+                writer.write_all(json.as_bytes()).await?;
+                writer.flush().await?;
+                Ok(())
+            }
+        }
     }
 
     async fn read_event(&self) -> Result<ServerEvent> {
-        let mut line = String::new();
-        let mut reader = self.reader.lock().await;
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            anyhow::bail!("Jcode daemon disconnected");
-        }
+        let reader = match &self.transport {
+            DaemonTransport::Managed(connection) => return connection.read_event().await,
+            DaemonTransport::Direct { reader, .. } => reader,
+        };
+        let line = reader
+            .lock()
+            .await
+            .next_line()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Jcode daemon disconnected"))?;
         let event = serde_json::from_str(&line)
             .with_context(|| format!("failed to decode Jcode daemon event: {}", line.trim_end()))?;
         Ok(super::commands::unwrap_turn_event(event))
+    }
+
+    async fn apply_session_env(&self) -> Result<()> {
+        let Some(env) = &self.session_env else {
+            return Ok(());
+        };
+        let id = self.next_id();
+        self.send(&Request::SetSessionEnv {
+            id,
+            env: env.clone(),
+        })
+        .await?;
+        wait_for_done(self, id)
+            .await
+            .context("failed to apply ACP session environment (--session-env inherit)")
     }
 }
 
 #[derive(Clone)]
 struct AcpRuntime {
-    stdout: Arc<Mutex<tokio::io::Stdout>>,
+    stdout: Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
     sessions: Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     profile: AcpProfile,
     provider_choice: ProviderChoice,
     model: Option<String>,
     provider_profile: Option<String>,
+    session_env: SessionEnvMode,
+    socket_path: PathBuf,
+    reconnect_timeout: std::time::Duration,
 }
 
 impl AcpRuntime {
@@ -395,14 +480,18 @@ impl AcpRuntime {
         provider_choice: ProviderChoice,
         model: Option<String>,
         provider_profile: Option<String>,
+        session_env: SessionEnvMode,
     ) -> Self {
         Self {
-            stdout: Arc::new(Mutex::new(tokio::io::stdout())),
+            stdout: Arc::new(Mutex::new(Box::new(tokio::io::stdout()))),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             profile,
             provider_choice,
             model,
             provider_profile,
+            session_env,
+            socket_path: crate::server::socket_path(),
+            reconnect_timeout: reconnect::RECONNECT_TIMEOUT,
         }
     }
 
@@ -699,7 +788,11 @@ impl AcpRuntime {
             if session.prompt_running.load(Ordering::SeqCst) {
                 session.cancel_requested.store(true, Ordering::SeqCst);
                 let cancel_id = session.next_id();
-                let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+                if let Err(error) = session.send(&Request::Cancel { id: cancel_id }).await {
+                    crate::logging::warn(&format!(
+                        "ACP cancel for session {session_id} failed: {error:#}"
+                    ));
+                }
             }
         }
         if let Some(id) = message.id {
@@ -722,7 +815,11 @@ impl AcpRuntime {
         };
         if let Some(session) = self.sessions.lock().await.remove(&session_id) {
             let cancel_id = session.next_id();
-            let _ = session.send(&Request::Cancel { id: cancel_id }).await;
+            if let Err(error) = session.send(&Request::Cancel { id: cancel_id }).await {
+                crate::logging::warn(&format!(
+                    "ACP close cancel for session {session_id} failed: {error:#}"
+                ));
+            }
         }
         self.write_result(id, json!({})).await?;
         Ok(())
@@ -784,28 +881,33 @@ impl AcpRuntime {
         }
 
         let request_id = session.next_id();
-        let apply_result = match config_id.as_str() {
-            CONFIG_ID_MODEL => {
-                session
-                    .send(&Request::SetModel {
-                        id: request_id,
-                        model: value.clone(),
-                    })
-                    .await?;
-                wait_for_model_changed(&session, request_id).await
+        let apply_result = async {
+            match config_id.as_str() {
+                CONFIG_ID_MODEL => {
+                    session
+                        .send(&Request::SetModel {
+                            id: request_id,
+                            model: value.clone(),
+                        })
+                        .await?;
+                    wait_for_model_changed(&session, request_id).await?;
+                    *session.selected_model.lock().await = Some(value.clone());
+                    Ok(())
+                }
+                CONFIG_ID_EFFORT => {
+                    session
+                        .send(&Request::SetReasoningEffort {
+                            id: request_id,
+                            effort: value.clone(),
+                            target_session_id: None,
+                        })
+                        .await?;
+                    wait_for_effort_changed(&session, request_id).await
+                }
+                other => Err(anyhow::anyhow!("Unknown config option id: {other}")),
             }
-            CONFIG_ID_EFFORT => {
-                session
-                    .send(&Request::SetReasoningEffort {
-                        id: request_id,
-                        effort: value.clone(),
-                        target_session_id: None,
-                    })
-                    .await?;
-                wait_for_effort_changed(&session, request_id).await
-            }
-            other => Err(anyhow::anyhow!("Unknown config option id: {other}")),
-        };
+        }
+        .await;
 
         match apply_result {
             Ok(()) => {
@@ -895,26 +997,64 @@ impl AcpRuntime {
     }
 
     async fn ensure_daemon(&self) -> Result<()> {
-        if dispatch::server_is_running().await {
-            return Ok(());
+        let model = self.model.as_deref();
+        let profile = self.provider_profile.as_deref();
+        if crate::server::is_shared_socket(&self.socket_path) {
+            dispatch::spawn_server(&self.provider_choice, model, profile).await
+        } else {
+            dispatch::spawn_owned_server(&self.provider_choice, model, profile).await
         }
-        dispatch::spawn_server(
-            &self.provider_choice,
-            self.model.as_deref(),
-            self.provider_profile.as_deref(),
-        )
-        .await
     }
 
     async fn connect_daemon(&self) -> Result<(ReadHalf, WriteHalf)> {
-        self.ensure_daemon().await?;
-        let stream = crate::server::connect_socket(&crate::server::socket_path()).await?;
+        let stream = match crate::server::connect_socket(&self.socket_path).await {
+            Ok(stream) => stream,
+            Err(_) => {
+                self.ensure_daemon().await?;
+                crate::server::connect_socket(&self.socket_path).await?
+            }
+        };
         Ok(stream.into_split())
+    }
+
+    fn session_environment(&self) -> Result<Option<HashMap<String, String>>> {
+        match self.session_env {
+            SessionEnvMode::None => Ok(None),
+            SessionEnvMode::Inherit => inherited_session_env(std::env::vars_os()).map(Some),
+        }
+    }
+
+    fn new_session_model(&self) -> Option<String> {
+        use clap::ValueEnum;
+
+        let model = self.model.as_deref()?.trim();
+        let explicit_route = model.split_once(':').is_some_and(|(prefix, _)| {
+            ProviderChoice::from_str(prefix, true).is_ok()
+                || crate::provider::oauth_account_label(prefix).is_some()
+                || crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
+                    .is_some()
+                || crate::config::config().providers.contains_key(prefix)
+                || self.provider_profile.as_deref() == Some(prefix)
+        });
+        if explicit_route {
+            return Some(model.to_string());
+        }
+        let route = self.provider_profile.as_deref().or_else(|| {
+            (self.provider_choice != ProviderChoice::Auto)
+                .then(|| self.provider_choice.as_arg_value())
+        });
+        Some(match route {
+            Some(route) => format!("{route}:{model}"),
+            None => model.to_string(),
+        })
     }
 
     async fn create_new_session(&self, cwd: PathBuf) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
-        self.create_new_session_connected(cwd, reader, writer).await
+        let session = self
+            .create_new_session_connected(cwd, reader, writer)
+            .await?;
+        session.maintain_connection(self.clone())
     }
 
     async fn create_new_session_connected(
@@ -923,13 +1063,15 @@ impl AcpRuntime {
         reader: ReadHalf,
         writer: WriteHalf,
     ) -> Result<DaemonSession> {
-        let session = DaemonSession::new(String::new(), reader, writer, 2);
+        let mut session = DaemonSession::new(String::new(), reader, writer, 2);
+        session.session_env = self.session_environment()?;
         let subscribe_id = 1;
         session
             .send(&Request::Subscribe {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
+                supports_applets: None,
                 supports_server_failover: true,
                 supports_turn_identity: false,
                 crash_on_disconnect: false,
@@ -947,6 +1089,23 @@ impl AcpRuntime {
             })
             .await?;
         wait_for_done(&session, subscribe_id).await?;
+        session.apply_session_env().await?;
+        if let Some(model) = self.new_session_model() {
+            async {
+                let id = session.next_id();
+                session
+                    .send(&Request::SetModel {
+                        id,
+                        model: model.clone(),
+                    })
+                    .await?;
+                wait_for_model_changed(&session, id).await?;
+                *session.selected_model.lock().await = Some(model);
+                Ok::<_, anyhow::Error>(())
+            }
+            .await
+            .context("failed to select ACP session model (--model)")?;
+        }
         let history = request_history(&session).await?;
         let (session_id, ui_state) = match history {
             ServerEvent::History {
@@ -967,14 +1126,8 @@ impl AcpRuntime {
             ),
             other => anyhow::bail!("expected history after session creation, got {other:?}"),
         };
-        Ok(DaemonSession::new(
-            session_id,
-            session.reader.into_inner().into_inner(),
-            session.writer.into_inner(),
-            session.next_request_id.load(Ordering::Relaxed),
-        )
-        .with_ui_state(ui_state)
-        .with_working_dir(cwd))
+        session.session_id = session_id;
+        Ok(session.with_ui_state(ui_state).with_working_dir(cwd))
     }
 
     async fn attach_existing_session(
@@ -984,14 +1137,16 @@ impl AcpRuntime {
         replay_history: bool,
     ) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
-        self.attach_existing_session_connected(
-            target_session_id,
-            cwd,
-            replay_history,
-            reader,
-            writer,
-        )
-        .await
+        let session = self
+            .attach_existing_session_connected(
+                target_session_id,
+                cwd,
+                replay_history,
+                reader,
+                writer,
+            )
+            .await?;
+        session.maintain_connection(self.clone())
     }
 
     async fn attach_existing_session_connected(
@@ -1002,13 +1157,15 @@ impl AcpRuntime {
         reader: ReadHalf,
         writer: WriteHalf,
     ) -> Result<DaemonSession> {
-        let session = DaemonSession::new(String::new(), reader, writer, 2);
+        let mut session = DaemonSession::new(String::new(), reader, writer, 2);
+        session.session_env = self.session_environment()?;
         let resume_id = 1;
         session
             .send(&Request::Subscribe {
                 system_prompt: None,
                 supports_pdf_panels: false,
                 supports_user_response: false,
+                supports_applets: None,
                 supports_server_failover: true,
                 supports_turn_identity: false,
                 crash_on_disconnect: false,
@@ -1065,14 +1222,9 @@ impl AcpRuntime {
             }
         }
 
-        Ok(DaemonSession::new(
-            attached_id,
-            session.reader.into_inner().into_inner(),
-            session.writer.into_inner(),
-            session.next_request_id.load(Ordering::Relaxed),
-        )
-        .with_ui_state(ui_state)
-        .with_working_dir(cwd))
+        session.apply_session_env().await?;
+        session.session_id = attached_id;
+        Ok(session.with_ui_state(ui_state).with_working_dir(cwd))
     }
 
     async fn replay_history(
@@ -1137,11 +1289,20 @@ impl AcpRuntime {
         // against the session's registry. Unknown or path-like slash text is
         // passed through to the model unchanged.
         let mut text = text;
+        let mut skill_arguments = None;
         let skills = session.skills();
         let selected_skill = match explicit_skill {
             Some(name) => Some(name),
             None => match resolve_acp_skill_invocation(&skills, &text) {
                 Some((name, prompt)) => {
+                    skill_arguments = Some(
+                        text.trim()
+                            .trim_start_matches(['/', '$'])
+                            .strip_prefix(&name)
+                            .unwrap_or("")
+                            .trim()
+                            .to_owned(),
+                    );
                     text = prompt.unwrap_or_default();
                     Some(name)
                 }
@@ -1159,6 +1320,13 @@ impl AcpRuntime {
                 .await?;
                 return Ok(());
             };
+            if let Some(arguments) = skill_arguments
+                && skill.content.contains('$')
+                && let Err(error) = invoke_acp_skill(&session, &name, arguments).await
+            {
+                cleanup_prompt_state(&session).await;
+                return Err(error);
+            }
             let notice = format!("Activated skill: {} - {}", skill.name, skill.description);
             *session.active_skill.lock().await = Some(name);
             self.write_notification(
@@ -1181,14 +1349,13 @@ impl AcpRuntime {
 
         let prompt_id = session.next_id();
         session.cancel_requested.store(false, Ordering::SeqCst);
-        {
-            let mut active = session.active_prompt_id.lock().await;
-            *active = Some(prompt_id);
-        }
+        *session.active_prompt_id.lock().await = Some(prompt_id);
 
         let send_result = session
             .send(&Request::Message {
+                attachments: Vec::new(),
                 id: prompt_id,
+                jarvis_voice: false,
                 content: text,
                 images,
                 system_reminder: None,
@@ -1219,6 +1386,12 @@ impl AcpRuntime {
             outcome.observe(&event, prompt_id);
             match event {
                 ServerEvent::Ack { .. } => {}
+                ServerEvent::Reloading { .. } => {
+                    cleanup_prompt_state(&session).await;
+                    anyhow::bail!(
+                        "Jcode daemon reload interrupted the prompt; retry after reconnecting"
+                    );
+                }
                 ServerEvent::Done { id } if id == prompt_id => break,
                 ServerEvent::Interrupted
                 | ServerEvent::TurnStopped { .. }
@@ -1354,6 +1527,7 @@ impl AcpRuntime {
                     })
                     .await?;
                 wait_for_model_changed(session, id).await?;
+                *session.selected_model.lock().await = Some(model.clone());
                 self.write_config_option_update(session).await?;
                 let selected = session.ui_state.lock().await.model.clone().unwrap_or(model);
                 Ok(format!("Switched model to `{selected}`."))
@@ -1595,12 +1769,20 @@ async fn wait_for_effort_changed(session: &DaemonSession, request_id: u64) -> Re
     loop {
         match session.read_event().await? {
             ServerEvent::Ack { .. } => {}
-            ServerEvent::ReasoningEffortChanged { id, effort, error } if id == request_id => {
+            ServerEvent::ReasoningEffortChanged {
+                id,
+                effort,
+                model,
+                error,
+            } if id == request_id => {
                 if let Some(error) = error {
                     anyhow::bail!(error);
                 }
                 let mut state = session.ui_state.lock().await;
                 state.reasoning_effort = effort;
+                if let Some(model) = model {
+                    state.model = Some(model);
+                }
                 return Ok(());
             }
             ServerEvent::Error { id, message, .. } if id == request_id => {
@@ -1689,6 +1871,7 @@ impl EventMapper {
                 name,
                 output,
                 error,
+                ..
             } => vec![json!({
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": id,
@@ -1831,99 +2014,11 @@ fn initialize_result(params: &Value, profile: AcpProfile) -> Value {
     })
 }
 
-fn cwd_from_params(params: &Value) -> std::result::Result<PathBuf, String> {
-    let cwd = match params.get("cwd").and_then(Value::as_str) {
-        Some(cwd) if !cwd.trim().is_empty() => PathBuf::from(cwd),
-        _ => std::env::current_dir().map_err(|err| err.to_string())?,
-    };
-    if !cwd.is_absolute() {
-        return Err(format!("ACP cwd must be absolute: {}", cwd.display()));
-    }
-    Ok(cwd)
-}
-
-fn required_session_id(params: &Value) -> std::result::Result<String, String> {
-    params
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| "Missing required sessionId".to_string())
-}
-
-fn validate_acp_mcp_servers(params: &Value) -> std::result::Result<(), String> {
-    match params.get("mcpServers") {
-        None | Some(Value::Null) => Ok(()),
-        // Session-scoped MCP is not supported yet, but rejecting this required
-        // ACP field prevents hosts with MCP servers from creating a session.
-        Some(Value::Array(_)) => Ok(()),
-        Some(_) => Err("ACP mcpServers must be an array".to_string()),
-    }
-}
-
-/// Read an explicit skill selection from ACP prompt metadata. Accepts
-/// `_meta.jcode.skill`, `_meta.jcode.activeSkill`, `_meta.skill`, and
-/// `_meta.activeSkill`.
-fn explicit_skill_from_params(params: &Value) -> Option<String> {
-    let meta = params.get("_meta")?;
-    [meta.get("jcode"), Some(meta)]
-        .into_iter()
-        .flatten()
-        .flat_map(|object| ["skill", "activeSkill", "active_skill"].map(|key| object.get(key)))
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(|name| name.trim().trim_start_matches(['/', '$']).trim())
-        .find(|name| !name.is_empty())
-        .map(str::to_string)
-}
-
-/// Resolve `/name [prompt]` or `$name [prompt]` to a registered skill. Returns
-/// `None` for unknown names and path-like text so it reaches the model as-is.
-fn resolve_acp_skill_invocation(
-    skills: &crate::skill::SkillRegistry,
-    text: &str,
-) -> Option<(String, Option<String>)> {
-    let trimmed = text.trim_end();
-    // Like built-in commands, a leading space escapes skill interpretation.
-    let normalized = if let Some(rest) = trimmed.strip_prefix('$') {
-        format!("/{rest}")
-    } else if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        return None;
-    };
-    let invocation = skills.resolve_invocation(&normalized)?;
-    skills.get(invocation.name)?;
-    Some((
-        invocation.name.to_string(),
-        invocation.prompt.map(str::to_string),
-    ))
-}
-
-/// ACP `availableCommands` entries for installed skills. Skills whose names
-/// contain whitespace or shadow built-in commands are not advertised (they can
-/// still be invoked by typing the slash command).
-fn acp_skill_commands(skills: &crate::skill::SkillRegistry) -> Vec<Value> {
-    const BUILTIN: [&str; 3] = ["model", "models", "effort"];
-    skills
-        .list()
-        .into_iter()
-        .filter(|skill| {
-            !skill.name.is_empty()
-                && !skill.name.contains(char::is_whitespace)
-                && !BUILTIN.contains(&skill.name.as_str())
-        })
-        .map(|skill| {
-            json!({
-                "name": skill.name,
-                "description": skill.description,
-                "input": { "hint": "request for this skill (optional)" },
-            })
-        })
-        .collect()
-}
-
+#[path = "acp_parameter_validation.rs"]
+mod parameter_validation;
+mod skills;
+use parameter_validation::*;
+use skills::{acp_skill_commands, invoke_acp_skill, resolve_acp_skill_invocation};
 #[derive(Debug, PartialEq, Eq)]
 enum AcpSlashCommand {
     Model(Option<String>),
@@ -1952,109 +2047,9 @@ fn parse_acp_slash_command(text: &str) -> Option<Result<AcpSlashCommand>> {
     }
 }
 
-fn format_model_catalog(current: Option<&str>, models: &[String]) -> String {
-    if models.is_empty() {
-        return match current {
-            Some(current) => format!("Current model: `{current}`. No model catalog was reported."),
-            None => "The active provider did not report a model catalog.".to_string(),
-        };
-    }
-    let mut output = String::from("Available models:\n");
-    for model in models {
-        let selected = if Some(model.as_str()) == current {
-            " (current)"
-        } else {
-            ""
-        };
-        output.push_str(&format!("- `{model}`{selected}\n"));
-    }
-    output.pop();
-    output
-}
-
-fn prompt_from_params(
-    params: &Value,
-) -> std::result::Result<(String, Vec<(String, String)>), String> {
-    let prompt = params
-        .get("prompt")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "Missing required prompt array".to_string())?;
-    let mut text_parts = Vec::new();
-    let mut images = Vec::new();
-
-    for block in prompt {
-        match block.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    text_parts.push(text.to_string());
-                }
-            }
-            Some("image") => {
-                let mime_type = block
-                    .get("mimeType")
-                    .or_else(|| block.get("mime_type"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "Image content block missing mimeType".to_string())?;
-                let data = block
-                    .get("data")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "Image content block missing data".to_string())?;
-                images.push((mime_type.to_string(), data.to_string()));
-            }
-            Some("resource") => {
-                if let Some(resource) = block.get("resource") {
-                    text_parts.push(format_resource_block(resource));
-                }
-            }
-            Some("resource_link") => {
-                let uri = block.get("uri").and_then(Value::as_str).unwrap_or("");
-                let name = block.get("name").and_then(Value::as_str).unwrap_or(uri);
-                text_parts.push(format!("[Resource link: {name} <{uri}>]"));
-            }
-            Some(other) => {
-                return Err(format!(
-                    "Unsupported ACP prompt content block type: {other}"
-                ));
-            }
-            None => return Err("Prompt content block missing type".to_string()),
-        }
-    }
-
-    Ok((text_parts.join("\n\n"), images))
-}
-
-fn format_resource_block(resource: &Value) -> String {
-    let uri = resource
-        .get("uri")
-        .and_then(Value::as_str)
-        .unwrap_or("resource");
-    if let Some(text) = resource.get("text").and_then(Value::as_str) {
-        format!("[Embedded resource: {uri}]\n{text}")
-    } else if let Some(blob) = resource.get("blob").and_then(Value::as_str) {
-        let mime = resource
-            .get("mimeType")
-            .or_else(|| resource.get("mime_type"))
-            .and_then(Value::as_str)
-            .unwrap_or("application/octet-stream");
-        format!(
-            "[Embedded binary resource: {uri} ({mime}, {} base64 bytes)]",
-            blob.len()
-        )
-    } else {
-        format!("[Embedded resource: {uri}]")
-    }
-}
-
-fn agent_message_chunk(text: String) -> Value {
-    json!({
-        "sessionUpdate": "agent_message_chunk",
-        "content": {
-            "type": "text",
-            "text": text,
-        }
-    })
-}
-
+#[path = "acp_prompt_content.rs"]
+mod prompt_content;
+use prompt_content::*;
 fn tool_title(name: &str) -> String {
     match name {
         "bash" => "Running shell command".to_string(),
@@ -2063,6 +2058,11 @@ fn tool_title(name: &str) -> String {
         "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => "Editing files".to_string(),
         "agentgrep" | "grep" | "glob" | "ls" => "Searching workspace".to_string(),
         "webfetch" | "websearch" => "Fetching web content".to_string(),
+        "todo" => "Updating plan".to_string(),
+        "bg" => "Managing background tasks".to_string(),
+        "skill_manage" => "Loading skill".to_string(),
+        "swarm" => "Coordinating agents".to_string(),
+        "codemode" => "Running script".to_string(),
         other => other.replace('_', " "),
     }
 }
@@ -2071,9 +2071,11 @@ pub(crate) fn tool_kind(name: &str) -> &'static str {
     match name {
         "read" => "read",
         "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => "edit",
-        "bash" | "bg" | "selfdev" => "execute",
+        "bash" | "bg" | "selfdev" | "codemode" => "execute",
         "agentgrep" | "grep" | "glob" | "ls" | "session_search" | "conversation_search" => "search",
-        "webfetch" | "websearch" | "codesearch" => "fetch",
+        "webfetch" | "websearch" | "codesearch" | "browser" => "fetch",
+        "skill_manage" => "read",
+        "todo" => "think",
         _ => "other",
     }
 }
@@ -2083,7 +2085,10 @@ pub(crate) async fn run_acp_command(
     model: Option<String>,
     provider_profile: Option<String>,
     explicit_tool_profile: bool,
+    session_env: Option<SessionEnvMode>,
 ) -> Result<()> {
+    let session_env =
+        SessionEnvMode::resolve(session_env, std::env::var_os("JCODE_ACP_SESSION_ENV"))?;
     crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
     let acp_config = crate::config::config().acp.clone();
     if !explicit_tool_profile {
@@ -2091,65 +2096,19 @@ pub(crate) async fn run_acp_command(
         crate::config::invalidate_config_cache();
     }
     let profile = AcpProfile::parse(&acp_config.profile);
-    AcpRuntime::new(profile, provider_choice, model, provider_profile)
-        .run()
-        .await
+    AcpRuntime::new(
+        profile,
+        provider_choice,
+        model,
+        provider_profile,
+        session_env,
+    )
+    .run()
+    .await
 }
 
 #[cfg(test)]
-mod turn_envelope_tests {
-    use super::*;
-    use crate::protocol::TurnIdentity;
-
-    fn envelope(event: ServerEvent) -> ServerEvent {
-        ServerEvent::TurnEvent {
-            identity: TurnIdentity {
-                runtime_generation: "runtime-test".into(),
-                turn_id: 7,
-            },
-            event: Box::new(event),
-        }
-    }
-
-    #[test]
-    fn mapper_preserves_explicit_wrapped_text_and_tool_events() {
-        for event in [
-            ServerEvent::TextDelta {
-                text: "hello".into(),
-            },
-            ServerEvent::ToolStart {
-                id: "tool-1".into(),
-                name: "read".into(),
-            },
-        ] {
-            let plain =
-                EventMapper::new("session".into(), AcpProfile::Standard).map_event(event.clone());
-            let wrapped = EventMapper::new("session".into(), AcpProfile::Standard)
-                .map_event(envelope(envelope(event)));
-            assert!(!plain.is_empty());
-            assert_eq!(wrapped, plain);
-        }
-    }
-
-    #[tokio::test]
-    async fn reader_unwraps_terminal_events_before_request_waiters() {
-        let (client, peer) = crate::transport::stream_pair().unwrap();
-        let (reader, writer) = client.into_split();
-        let session = DaemonSession::new("session".into(), reader, writer, 1);
-        let (_, mut peer_writer) = peer.into_split();
-        let event = envelope(envelope(ServerEvent::Done { id: 42 }));
-        let mut json = serde_json::to_string(&event).unwrap();
-        json.push('\n');
-        peer_writer.write_all(json.as_bytes()).await.unwrap();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            wait_for_done(&session, 42),
-        )
-        .await
-        .expect("wrapped Done must terminate request waiter")
-        .unwrap();
-    }
-}
+mod turn_envelope_tests;
 
 #[cfg(test)]
 mod tests;

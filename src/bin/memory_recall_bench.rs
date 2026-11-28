@@ -506,7 +506,7 @@ fn cmd_queries(args: &[String]) -> Result<()> {
             Err(_) => continue,
         };
         if let Some(filter) = &working_dir_filter
-            && session.working_dir.as_deref() != Some(filter.as_str())
+            && session.working_dir() != Some(filter.as_str())
         {
             continue;
         }
@@ -517,7 +517,7 @@ fn cmd_queries(args: &[String]) -> Result<()> {
             .to_string();
         let origin_ids = by_source.get(&sid).cloned().unwrap_or_default();
 
-        let messages: Vec<_> = session.messages.iter().map(|m| m.to_message()).collect();
+        let messages: Vec<_> = session.iter_messages().map(|m| m.to_message()).collect();
         // Sample turns: user messages spread through the session.
         let user_turns: Vec<usize> = messages
             .iter()
@@ -2289,11 +2289,11 @@ fn cmd_gate(args: &[String]) -> Result<()> {
             Err(_) => continue,
         };
         if let Some(filter) = &working_dir_filter
-            && session.working_dir.as_deref() != Some(filter.as_str())
+            && session.working_dir() != Some(filter.as_str())
         {
             continue;
         }
-        let messages: Vec<_> = session.messages.iter().map(|m| m.to_message()).collect();
+        let messages: Vec<_> = session.iter_messages().map(|m| m.to_message()).collect();
         // Every user turn is a relevance-check opportunity (production runs the
         // check after each user message). Skip the first two bootstrap turns to
         // match the query-sampling convention.

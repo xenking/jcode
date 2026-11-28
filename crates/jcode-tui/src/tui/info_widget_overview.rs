@@ -1,6 +1,5 @@
-use super::info_widget::{
-    AuthMethod, InfoWidgetData, changes_section_height, compact_usage_rows,
-    is_traceworthy_memory_event, model_info_height,
+use super::{
+    AuthMethod, InfoWidgetData, changes_section_height, compact_usage_rows, model_info_height,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,23 +100,25 @@ fn compact_background_height(data: &InfoWidgetData) -> u16 {
     0
 }
 
-/// Only a genuine pending first snapshot reserves space. An absent snapshot
-/// after initialization is not evidence that this account supports quota data.
-pub(super) fn startup_usage_pending(data: &InfoWidgetData) -> bool {
-    data.startup_usage_pending
-        && matches!(data.auth_method, AuthMethod::OpenAIOAuth)
-        && !data
-            .usage_info
-            .as_ref()
-            .is_some_and(|info| info.available || info.limit_reached)
+impl InfoWidgetData {
+    /// Only a genuine pending first snapshot reserves space. An absent snapshot
+    /// after initialization is not evidence that this account supports quota data.
+    pub(super) fn usage_pending_at_startup(&self) -> bool {
+        self.startup_usage_pending
+            && matches!(self.auth_method, AuthMethod::OpenAIOAuth)
+            && !self
+                .usage_info
+                .as_ref()
+                .is_some_and(|info| info.available || info.limit_reached)
+    }
 }
 
 pub(super) fn render_overview_usage(
     data: &InfoWidgetData,
     width: u16,
 ) -> Vec<ratatui::text::Line<'static>> {
-    if startup_usage_pending(data) {
-        return super::info_widget::startup_usage_lines(width);
+    if data.usage_pending_at_startup() {
+        return super::startup_usage_lines(width);
     }
     data.usage_info
         .as_ref()
@@ -127,7 +128,7 @@ pub(super) fn render_overview_usage(
 }
 
 fn compact_usage_height(data: &InfoWidgetData) -> u16 {
-    if startup_usage_pending(data) {
+    if data.usage_pending_at_startup() {
         return 2;
     }
     let Some(info) = data.usage_info.as_ref() else {
@@ -139,7 +140,7 @@ fn compact_usage_height(data: &InfoWidgetData) -> u16 {
     if !info.available {
         return 0;
     }
-    if matches!(info.provider, super::info_widget::UsageProvider::CostBased) {
+    if matches!(info.provider, super::UsageProvider::CostBased) {
         return 1;
     }
     // Mirror render_usage_compact without formatting bars during measurement.
@@ -167,12 +168,7 @@ fn expanded_memory_height(data: &InfoWidgetData) -> u16 {
         let mut height = 1u16;
         if info.should_show_activity() {
             height += 1 + 4;
-            if let Some(activity) = &info.activity
-                && activity
-                    .recent_events
-                    .iter()
-                    .any(is_traceworthy_memory_event)
-            {
+            if info.has_traceworthy_event() {
                 height += 1;
             }
         }

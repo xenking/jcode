@@ -5,8 +5,7 @@ Owner: onboarding
 Related code: `crates/jcode-tui/src/tui/app/onboarding_flow.rs`,
 `onboarding_flow_control.rs`, `onboarding_graph.rs`, `onboarding_repair.rs`,
 `onboarding_sim.rs`, `crates/jcode-tui/src/tui/app/tests/onboarding_eval.rs`,
-`crates/jcode-base/src/auth/{env_facts,login_diagnostics,refresh_state,status_types}.rs`,
-`crates/jcode-telemetry-core/src/{lib,onboarding_trace}.rs`
+`crates/jcode-base/src/auth/{env_facts,login_diagnostics,refresh_state,status_types}.rs`
 
 ---
 
@@ -307,8 +306,8 @@ The existing code is in decent shape; this is mostly consolidation.
    data (including the `EnvBlocked`, `LoginFailed`, and `CredRejected` states the
    flow always had but never modelled) and `check_invariants` enforces the §2.4
    properties. Wired into `scripts/check_guardrails.sh`.
-6. **Trace telemetry.** *Landed as a library.*
-   `jcode_telemetry_core::onboarding_trace` records traversals with bucketed
+6. **Trace telemetry.** *Removed in this fork* (`jcode-telemetry-core` is now a
+   no-op facade; `onboarding_trace` is gone). Upstream design: it recorded traversals with bucketed
    timings, a hard step cap, and a closed vocabulary enforced by a test that
    walks the serialized payload and rejects any free text. Not yet emitted from
    the live flow: that waits on step 3, which is what produces the edge events.

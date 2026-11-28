@@ -46,6 +46,38 @@ pub(super) fn combine_shell_output(stdout: &[u8], stderr: &[u8]) -> (String, boo
     (output, truncated)
 }
 
+impl super::App {
+    pub(super) fn run_input_shell_line(&mut self, raw_input: String, command: &str) {
+        self.push_display_message(super::DisplayMessage::user(raw_input));
+
+        if command.is_empty() {
+            self.push_display_message(super::DisplayMessage::system(
+                "Shell command cannot be empty after !.",
+            ));
+            self.set_status_notice("Shell command is empty");
+            return;
+        }
+
+        if self.is_remote {
+            self.push_display_message(super::DisplayMessage::system(
+                "Input-line ! shell commands are only available in a local jcode TUI session.",
+            ));
+            self.set_status_notice("Local shell unavailable in remote mode");
+            return;
+        }
+
+        self.set_status_notice(format!(
+            "Running local shell: {}",
+            crate::util::truncate_str(command, 48)
+        ));
+        spawn_input_shell_command(
+            self.session.id().to_owned(),
+            command.to_string(),
+            self.session.working_dir().map(str::to_owned),
+        );
+    }
+}
+
 pub(super) fn spawn_input_shell_command(session_id: String, command: String, cwd: Option<String>) {
     std::thread::spawn(move || {
         let started = std::time::Instant::now();

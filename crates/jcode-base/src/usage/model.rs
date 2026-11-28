@@ -1,4 +1,4 @@
-use super::display::{format_reset_time, usage_reset_passed};
+use super::display::{format_reset_time, usage_reading, usage_reset_passed};
 use super::{
     ANTHROPIC_CACHE_DURATION, CACHE_DURATION, ERROR_BACKOFF, RATE_LIMIT_BACKOFF,
     TRANSPORT_ERROR_BACKOFF, TRANSPORT_ERROR_PREFIX,
@@ -6,7 +6,7 @@ use super::{
 use serde::Deserialize;
 use std::time::Instant;
 
-pub(super) fn mask_email(email: &str) -> String {
+pub fn mask_email(email: &str) -> String {
     let trimmed = email.trim();
     let Some((local, domain)) = trimmed.split_once('@') else {
         return trimmed.to_string();
@@ -66,8 +66,14 @@ pub(super) fn openai_provider_display_name(
     if account_count <= 1 {
         format!("OpenAI (ChatGPT){}", email_suffix)
     } else {
+        // The user's name, or the email, plus the plan. The internal label is
+        // the last resort, never the only thing shown.
+        let who = crate::auth::account_identity::oauth_identity("openai", label).map_or_else(
+            || format!("{label}{email_suffix}"),
+            |identity| identity.display_name,
+        );
         let active_marker = if is_active { " ✦" } else { "" };
-        format!("OpenAI - {}{}{}", label, email_suffix, active_marker)
+        format!("OpenAI - {who}{active_marker}")
     }
 }
 
@@ -88,6 +94,8 @@ pub struct UsageData {
     pub model_scoped: Vec<ModelScopedUsageWindow>,
     /// Whether extra usage (long context, etc.) is enabled
     pub extra_usage_enabled: bool,
+    /// Credit balance and spend, for accounts paid in credits or dollars.
+    pub credits: Option<jcode_usage_types::CreditsReport>,
     /// Last fetch time
     pub fetched_at: Option<Instant>,
     /// Last successful provider fetch, retained when a later fetch fails.
@@ -182,12 +190,31 @@ pub struct ModelScopedUsageWindow {
 pub(super) struct UsageResponse {
     /// Read reset eligibility with the quota response, never a second poll.
     pub juniper_tide: Option<serde_json::Value>,
+    /// Saved limit resets, evaluated only when `cedar_ember=1` is requested.
+    pub cedar_ember: Option<serde_json::Value>,
     pub(super) five_hour: Option<UsageWindow>,
     pub(super) seven_day: Option<UsageWindow>,
     pub(super) seven_day_opus: Option<UsageWindow>,
-    #[serde(default)]
+    pub(super) seven_day_sonnet: Option<UsageWindow>,
+    /// Structured limits. A `null` list is an empty list, not a parse failure.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub(super) limits: Vec<StructuredUsageLimit>,
     pub(super) extra_usage: Option<ExtraUsageResponse>,
+    /// Organization spend cap and amount spent. Kept as raw JSON: its shape
+    /// differs between plans, and an unreadable one must not fail the whole
+    /// usage response.
+    pub(super) spend: Option<serde_json::Value>,
+}
+
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(match Option::<T>::deserialize(deserializer)? {
+        Some(value) => value,
+        None => T::default(),
+    })
 }
 
 #[derive(Deserialize, Debug)]
@@ -217,6 +244,16 @@ pub(super) struct UsageWindow {
 #[derive(Deserialize, Debug)]
 pub(super) struct ExtraUsageResponse {
     pub(super) is_enabled: Option<bool>,
+    /// Monthly allowance in minor currency units.
+    #[serde(default)]
+    pub(super) monthly_limit: Option<f64>,
+    #[serde(default)]
+    pub(super) used_credits: Option<f64>,
+    #[serde(default)]
+    pub(super) currency: Option<String>,
+    /// Digits after the decimal point of the minor unit. Cents when absent.
+    #[serde(default)]
+    pub(super) decimal_places: Option<u32>,
 }
 
 // ─── Combined usage for /usage command ───────────────────────────────────────
@@ -238,7 +275,11 @@ pub struct OpenAIUsageData {
     pub seven_day: Option<OpenAIUsageWindow>,
     pub spark: Option<OpenAIUsageWindow>,
     pub hard_limit_reached: bool,
+    /// Paid credits keep serving after the plan window is spent.
+    pub credit_overage: bool,
     pub openai_reset_credits: Option<jcode_usage_types::OpenAiResetCredits>,
+    /// Credits the account is paid in, such as a workspace seat's monthly cap.
+    pub credits: Option<jcode_usage_types::CreditsReport>,
     pub fetched_at: Option<Instant>,
     pub last_error: Option<String>,
 }
@@ -284,8 +325,24 @@ impl OpenAIUsageData {
     }
 
     pub fn exhausted(&self) -> bool {
+        // A spent plan window funded by paid credits still serves requests
+        // (the Codex CLI keeps using it). Live usage_limit_reached errors
+        // stay authoritative for blocking.
+        if self.credit_overage {
+            return false;
+        }
         if self.hard_limit_reached {
             return true;
+        }
+        // OpenAI reports rounded 99-100% windows while still serving requests
+        // (e.g. from credits); its explicit allowed flag beats the heuristic.
+        if self
+            .openai_reset_credits
+            .as_ref()
+            .and_then(|credits| credits.ordinary_usage_allowed)
+            == Some(true)
+        {
+            return false;
         }
 
         if !self.has_limits() {
@@ -411,32 +468,34 @@ pub struct AccountUsageSnapshot {
 }
 
 impl AccountUsageSnapshot {
+    /// One-line reading of every window, worded like the info widget.
     pub fn summary(&self) -> String {
+        self.summary_with(crate::config::config().display.usage_display_used())
+    }
+
+    pub fn summary_with(&self, display_used: bool) -> String {
         if let Some(error) = &self.error {
             return error.clone();
         }
 
+        let reading = |ratio: f32| usage_reading(ratio * 100.0, display_used);
         let mut parts = Vec::new();
         if let Some(ratio) = self.five_hour_ratio {
             parts.push(format!(
-                "{} {:.0}%",
+                "{} {}",
                 self.primary_label.as_deref().unwrap_or("primary"),
-                ratio * 100.0
+                reading(ratio)
             ));
         }
         if let Some(ratio) = self.seven_day_ratio {
             parts.push(format!(
-                "{} {:.0}%",
+                "{} {}",
                 self.secondary_label.as_deref().unwrap_or("secondary"),
-                ratio * 100.0
+                reading(ratio)
             ));
         }
         for window in &self.additional_windows {
-            parts.push(format!(
-                "{} {:.0}%",
-                window.label,
-                window.usage_ratio * 100.0
-            ));
+            parts.push(format!("{} {}", window.label, reading(window.usage_ratio)));
         }
         if let Some(reset) = &self.resets_at {
             parts.push(format!("resets {}", format_reset_time(reset)));
@@ -447,6 +506,34 @@ impl AccountUsageSnapshot {
         } else {
             parts.join(", ")
         }
+    }
+
+    /// Windows as (utilization 0.0..=1.0, reset time) for reset policy.
+    ///
+    /// The snapshot carries one shared display deadline (the five-hour one
+    /// first), so a full weekly window can only borrow it when no five-hour
+    /// window exists. A full window without its own time is an unknown wait,
+    /// never a zero one. Callers that can read the raw cached report should
+    /// prefer [`crate::usage::cached_account_usage_windows`], which keeps each
+    /// window's own deadline.
+    pub fn window_ratios(&self) -> Vec<(f32, Option<String>)> {
+        let mut out = Vec::new();
+        if let Some(ratio) = self.five_hour_ratio {
+            out.push((ratio, self.resets_at.clone()));
+        }
+        if let Some(ratio) = self.seven_day_ratio {
+            let at = self
+                .five_hour_ratio
+                .is_none()
+                .then(|| self.resets_at.clone());
+            out.push((ratio, at.flatten()));
+        }
+        out.extend(
+            self.additional_windows
+                .iter()
+                .map(|window| (window.usage_ratio, window.resets_at.clone())),
+        );
+        out
     }
 
     fn preference_score(&self) -> f32 {

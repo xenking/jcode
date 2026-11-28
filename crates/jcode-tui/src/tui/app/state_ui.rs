@@ -1,17 +1,35 @@
+#[path = "state_ui_context_todos.rs"]
+mod context_todos;
 #[path = "state_ui_count_format.rs"]
 mod count_format;
 use super::state_ui_storage::infer_spawned_session_startup_hints;
+#[path = "state_ui_reload_input.rs"]
+mod reload_input;
+
 use super::*;
 use crate::tui::ui::tools_ui;
 use crate::tui::{TuiState, backend};
 use count_format::*;
 
+fn reload_field<T: serde::de::DeserializeOwned + Default>(
+    value: &serde_json::Value,
+    field: &str,
+) -> serde_json::Result<T> {
+    match value.get(field) {
+        // Older reload files predate these optional fields.
+        None | Some(serde_json::Value::Null) => Ok(T::default()),
+        Some(value) => serde_json::from_value(value.clone()),
+    }
+}
+
 pub(super) struct RestoredReloadInput {
     pub input: String,
+    pub stashed_input: Option<StashedInput>,
     pub cursor: usize,
     pub pending_images: Vec<(String, String)>,
     pub submit_on_restore: bool,
     pub queued_messages: Vec<String>,
+    pub queued_images: Vec<(String, String)>,
     pub queued_commands: Vec<String>,
     pub hidden_queued_system_messages: Vec<String>,
     pub startup_status_notice: Option<String>,
@@ -19,6 +37,7 @@ pub(super) struct RestoredReloadInput {
     pub interleave_message: Option<String>,
     pub pending_soft_interrupts: Vec<String>,
     pub pending_soft_interrupt_resend: Option<Vec<String>>,
+    pub uncertain_queue_prompts: Vec<crate::protocol::QueuedPrompt>,
     pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
     pub rate_limit_reset: Option<Instant>,
     pub observe_mode_enabled: bool,
@@ -67,6 +86,7 @@ impl App {
                 label: None,
                 source: crate::session::RenderedImageSource::UserInput,
                 anchor: anchor.clone(),
+                session_image: None,
                 history_message_index: None,
             })
             .collect();
@@ -94,7 +114,7 @@ impl App {
         self.display_user_message_count = self
             .display_messages
             .iter()
-            .filter(|message| message.effective_role() == "user")
+            .filter(|message| message.effective_role() == "user" || message.is_answered_ask())
             .count();
         self.display_edit_tool_message_count = self
             .display_messages
@@ -132,7 +152,7 @@ impl App {
             update(self.display_edit_line_counts.1, counts.1),
         );
         let delta: isize = if added { 1 } else { -1 };
-        if message.effective_role() == "user" {
+        if message.effective_role() == "user" || message.is_answered_ask() {
             self.display_user_message_count =
                 (self.display_user_message_count as isize + delta).max(0) as usize;
         }
@@ -146,7 +166,7 @@ impl App {
         if self.is_remote {
             self.remote_session_id.as_deref()
         } else {
-            Some(self.session.id.as_str())
+            Some(self.session.id())
         }
     }
 
@@ -176,6 +196,7 @@ impl App {
 
     pub(super) fn note_client_interaction(&mut self) {
         self.wake_idle_hibernation();
+        self.record_rex_turn_outcome(None);
         // Every key/mouse/paste event routes through here, which makes this the
         // one place that reliably knows the user is actively driving the UI.
         self.last_user_interaction = Some(std::time::Instant::now());
@@ -317,140 +338,6 @@ impl App {
         self.context_revision = self.context_revision.wrapping_add(1);
     }
 
-    pub(super) fn save_input_for_reload(&self, session_id: &str) {
-        let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
-            !pending.auto_retry
-                && !pending.is_system
-                && (!pending.content.trim().is_empty() || !pending.images.is_empty())
-        });
-        // A queued follow-up that was dequeued and is currently in flight lives
-        // only in `rate_limit_pending_message` (is_system). Without a scheduled
-        // retry reset, that shape has no dispatch path after a restore (the
-        // tick resend requires `rate_limit_reset`), so persist it back into
-        // the queued/hidden lists instead; the restored queue re-sends it once
-        // the turn is proven idle (issue #391).
-        let inflight_continuation = self.rate_limit_pending_message.as_ref().filter(|pending| {
-            pending.is_system
-                && self.rate_limit_reset.is_none()
-                && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
-        });
-        if self.input.is_empty()
-            && self.pending_images.is_empty()
-            && self.queued_messages.is_empty()
-            && self.queued_commands.is_empty()
-            && self.hidden_queued_system_messages.is_empty()
-            && self.interleave_message.is_none()
-            && self.pending_soft_interrupts.is_empty()
-            && self.pending_soft_interrupt_requests.is_empty()
-            && self.rate_limit_pending_message.is_none()
-            && resume_prompt.is_none()
-            && !self.observe_mode_enabled
-            && !self.split_view_enabled
-            && !self.todos_view_enabled
-            && !self.todo_confidence_spike_challenged
-            && self.last_todo_ownership_fingerprint.is_none()
-            && self.final_response_todo_fingerprint.is_none()
-            && self.last_auto_poke_fingerprint.is_none()
-        {
-            // Nothing to save, but a stale file from an earlier run could
-            // still hold old queued messages/input. Leaving it behind would
-            // resurrect that stale state on the next restore. Only remove
-            // clearly stale files: another client attached to the same session
-            // may have just saved ITS queued messages during the same reload
-            // handoff, and deleting a fresh file here would drop them.
-            if let Ok(jcode_dir) = crate::storage::jcode_dir() {
-                let path = jcode_dir.join(format!("client-input-{}", session_id));
-                let is_stale = std::fs::metadata(&path)
-                    .and_then(|meta| meta.modified())
-                    .ok()
-                    .and_then(|mtime| mtime.elapsed().ok())
-                    .is_some_and(|age| age > Duration::from_secs(300));
-                if is_stale {
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
-            return;
-        }
-        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
-            let path = jcode_dir.join(format!("client-input-{}", session_id));
-            let rate_limit_reset_in_ms =
-                if resume_prompt.is_some() || inflight_continuation.is_some() {
-                    None
-                } else {
-                    self.rate_limit_reset.map(|reset| {
-                        let now = Instant::now();
-                        if reset <= now {
-                            0
-                        } else {
-                            (reset - now).as_millis().min(u64::MAX as u128) as u64
-                        }
-                    })
-                };
-            let rate_limit_pending_message =
-                if resume_prompt.is_some() || inflight_continuation.is_some() {
-                    None
-                } else {
-                    self.rate_limit_pending_message.as_ref().map(|pending| {
-                        serde_json::json!({
-                            "content": pending.content,
-                            "images": pending.images,
-                            "is_system": pending.is_system,
-                            "system_reminder": pending.system_reminder,
-                            "auto_retry": pending.auto_retry,
-                            "retry_attempts": pending.retry_attempts,
-                        })
-                    })
-                };
-            let mut queued_messages = self.queued_messages.clone();
-            let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
-            if let Some(pending) = inflight_continuation {
-                if !pending.content.trim().is_empty() {
-                    queued_messages.insert(0, pending.content.clone());
-                }
-                if let Some(reminder) = pending.system_reminder.clone() {
-                    hidden_queued_system_messages.insert(0, reminder);
-                }
-            }
-            let resume_input = resume_prompt.map(|pending| pending.content.as_str());
-            let resume_images = resume_prompt.map(|pending| pending.images.as_slice());
-            let rate_limit_reset_in_ms =
-                rate_limit_reset_in_ms.or_else(|| resume_prompt.map(|_| 0));
-            let pending_soft_interrupt_resend = self
-                .pending_soft_interrupt_requests
-                .iter()
-                .map(|(_, content)| content.clone())
-                .collect::<Vec<_>>();
-            let data = serde_json::json!({
-                "cursor": resume_input.map(|input| input.len()).unwrap_or(self.cursor_pos),
-                "input": resume_input.unwrap_or(self.input.as_str()),
-                "pending_images": resume_images.unwrap_or(self.pending_images.as_slice()).iter().map(|(media_type, data)| serde_json::json!({
-                    "media_type": media_type,
-                    "data": data,
-                })).collect::<Vec<_>>(),
-                "submit_on_restore": resume_prompt.is_some(),
-                "queued_messages": queued_messages,
-                "queued_commands": self.queued_commands,
-                "hidden_queued_system_messages": hidden_queued_system_messages,
-                "interleave_message": self.interleave_message,
-                "pending_soft_interrupts": self.pending_soft_interrupts,
-                "pending_soft_interrupt_resend": pending_soft_interrupt_resend,
-                "rate_limit_pending_message": rate_limit_pending_message,
-                "rate_limit_reset_in_ms": rate_limit_reset_in_ms,
-                "observe_mode_enabled": self.observe_mode_enabled,
-                "observe_page_markdown": self.observe_page_markdown,
-                "observe_page_updated_at_ms": self.observe_page_updated_at_ms,
-                "split_view_enabled": self.split_view_enabled,
-                "todos_view_enabled": self.todos_view_enabled,
-                "todo_confidence_spike_challenged": self.todo_confidence_spike_challenged,
-                "last_todo_ownership_fingerprint": self.last_todo_ownership_fingerprint,
-                "final_response_todo_fingerprint": self.final_response_todo_fingerprint,
-                "last_auto_poke_fingerprint": self.last_auto_poke_fingerprint,
-                "auto_poke_attempts": self.auto_poke_attempts,
-            });
-            let _ = std::fs::write(&path, data.to_string());
-        }
-    }
-
     pub(crate) fn save_startup_message_for_session(session_id: &str, message: String) {
         if message.trim().is_empty() {
             return;
@@ -479,7 +366,9 @@ impl App {
                 "split_view_enabled": false,
                 "todos_view_enabled": false,
             });
-            let _ = std::fs::write(&path, data.to_string());
+            if let Err(error) = std::fs::write(&path, data.to_string()) {
+                crate::logging::warn(&format!("Could not save reload input: {error}"));
+            }
         }
     }
 
@@ -494,13 +383,42 @@ impl App {
     pub(super) fn restore_input_for_reload(session_id: &str) -> Option<RestoredReloadInput> {
         let jcode_dir = crate::storage::jcode_dir().ok()?;
         let path = jcode_dir.join(format!("client-input-{}", session_id));
-        if !path.exists() {
-            return None;
-        }
-        let data = std::fs::read_to_string(&path).ok()?;
-        let _ = std::fs::remove_file(&path);
+        let data = match std::fs::read_to_string(&path) {
+            Ok(data) => data,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    crate::logging::warn(&format!(
+                        "Failed to read reload input {}: {error}",
+                        path.display()
+                    ));
+                }
+                return None;
+            }
+        };
 
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+            let stashed_input = match reload_field::<Option<StashedInput>>(&value, "stashed_input")
+            {
+                Ok(stashed) => stashed,
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Invalid reload stashed input for {session_id}: {error}"
+                    ));
+                    return None;
+                }
+            };
+            let uncertain_queue_prompts = match reload_field::<Vec<crate::protocol::QueuedPrompt>>(
+                &value,
+                "uncertain_queue_prompts",
+            ) {
+                Ok(prompts) => prompts,
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "Invalid reload uncertain queue for {session_id}: {error}"
+                    ));
+                    return None;
+                }
+            };
             let input = value
                 .get("input")
                 .and_then(|v| v.as_str())
@@ -603,6 +521,10 @@ impl App {
                 .get("rate_limit_pending_message")
                 .and_then(|pending| pending.as_object())
                 .map(|pending| super::PendingRemoteMessage {
+                    jarvis_voice: pending
+                        .get("jarvis_voice")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                     content: pending
                         .get("content")
                         .and_then(|v| v.as_str())
@@ -677,12 +599,30 @@ impl App {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let cursor = cursor.min(input.len());
+            if let Err(error) = std::fs::remove_file(&path) {
+                crate::logging::warn(&format!(
+                    "Failed to consume reload input {}: {error}",
+                    path.display()
+                ));
+            }
             return Some(RestoredReloadInput {
                 input,
+                stashed_input,
                 cursor,
                 pending_images,
                 submit_on_restore,
                 queued_messages,
+                queued_images: match value.get("queued_images") {
+                    None => Vec::new(),
+                    Some(images) => {
+                        serde_json::from_value(images.clone()).unwrap_or_else(|error| {
+                            crate::logging::warn(&format!(
+                                "Cannot restore queued image list: {error}"
+                            ));
+                            Vec::new()
+                        })
+                    }
+                },
                 queued_commands,
                 hidden_queued_system_messages,
                 startup_status_notice,
@@ -690,6 +630,7 @@ impl App {
                 interleave_message,
                 pending_soft_interrupts,
                 pending_soft_interrupt_resend,
+                uncertain_queue_prompts,
                 rate_limit_pending_message,
                 rate_limit_reset,
                 observe_mode_enabled,
@@ -719,14 +660,22 @@ impl App {
         }
 
         let (cursor_str, input) = data.split_once('\n')?;
+        if let Err(error) = std::fs::remove_file(&path) {
+            crate::logging::warn(&format!(
+                "Failed to consume legacy reload input {}: {error}",
+                path.display()
+            ));
+        }
         let cursor = cursor_str.parse::<usize>().unwrap_or(0);
         let cursor = cursor.min(input.len());
         Some(RestoredReloadInput {
             input: input.to_string(),
+            stashed_input: None,
             cursor,
             pending_images: Vec::new(),
             submit_on_restore: false,
             queued_messages: Vec::new(),
+            queued_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             startup_status_notice: None,
@@ -734,6 +683,7 @@ impl App {
             interleave_message: None,
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_resend: None,
+            uncertain_queue_prompts: Vec::new(),
             rate_limit_pending_message: None,
             rate_limit_reset: None,
             observe_mode_enabled: false,
@@ -959,7 +909,7 @@ impl App {
             &self.side_panel,
             terminal_width,
             terminal_height,
-            self.diagram_pane_ratio,
+            self.diagram.view().ratio,
             has_protocol,
             self.centered,
         );
@@ -999,7 +949,7 @@ impl App {
                     tool_data: m.tool_data.clone(),
                 })
                 .collect(),
-            streaming_text: self.streaming.streaming_text.clone(),
+            streaming_text: self.streaming.streaming_text.to_string(),
             streaming_tool_calls: self.streaming_tool_calls.clone(),
             input: self.input.clone(),
             cursor_pos: self.cursor_pos,
@@ -1100,8 +1050,16 @@ impl App {
                 let (_, writer) = stream.into_split();
                 let mut writer = writer;
 
-                let snapshot_json =
-                    serde_json::to_string(&initial_snapshot).unwrap_or_default() + "\n";
+                let mut snapshot_json = match serde_json::to_string(&initial_snapshot) {
+                    Ok(json) => json,
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "Cannot encode initial debug snapshot: {error}"
+                        ));
+                        continue;
+                    }
+                };
+                snapshot_json.push('\n');
                 if writer.write_all(snapshot_json.as_bytes()).await.is_ok() {
                     clients.lock().await.push(writer);
                 }
@@ -1118,779 +1076,14 @@ impl App {
     }
 }
 
-fn push_cache_signature(
-    lines: &mut Vec<String>,
-    label: &str,
-    signature: Option<&KvCacheRequestSignature>,
-) {
-    if let Some(signature) = signature {
-        lines.push(format!(
-            "- {}.system_static_hash: {:016x}",
-            label, signature.system_static_hash
-        ));
-        lines.push(format!(
-            "- {}.tools_hash: {:016x}",
-            label, signature.tools_hash
-        ));
-        lines.push(format!(
-            "- {}.messages_hash: {:016x}",
-            label, signature.messages_hash
-        ));
-        lines.push(format!(
-            "- {}.message_hashes_len: {}",
-            label,
-            signature.message_hashes.len()
-        ));
-        lines.push(format!(
-            "- {}.message_count: {}",
-            label, signature.message_count
-        ));
-        lines.push(format!("- {}.tool_count: {}", label, signature.tool_count));
-        lines.push(format!(
-            "- {}.system_static_chars: {}",
-            label,
-            bold_count(signature.system_static_chars as u64)
-        ));
-        lines.push(format!(
-            "- {}.tools_json_chars: {}",
-            label,
-            bold_count(signature.tools_json_chars as u64)
-        ));
-        lines.push(format!(
-            "- {}.messages_json_chars: {}",
-            label,
-            bold_count(signature.messages_json_chars as u64)
-        ));
-        lines.push(format!(
-            "- {}.ephemeral_hash: {}",
-            label,
-            signature
-                .ephemeral_hash
-                .map(|hash| format!("{:016x}", hash))
-                .unwrap_or_else(|| "None".to_string())
-        ));
-        lines.push(format!(
-            "- {}.ephemeral_chars: {}",
-            label,
-            bold_count(signature.ephemeral_chars as u64)
-        ));
-        lines.push(format!(
-            "- {}.ephemeral_message_count: {}",
-            label, signature.ephemeral_message_count
-        ));
-    } else {
-        lines.push(format!("- {}: None", label));
-    }
-}
+#[path = "state_ui/cache_stats.rs"]
+mod cache_stats;
+#[allow(unused_imports)]
+pub(crate) use cache_stats::*;
 
-fn push_cache_baseline(lines: &mut Vec<String>, label: &str, baseline: Option<&KvCacheBaseline>) {
-    if let Some(baseline) = baseline {
-        lines.push(format!(
-            "- {}.input_tokens: {}",
-            label,
-            bold_count(baseline.input_tokens)
-        ));
-        lines.push(format!(
-            "- {}.age_secs: {}",
-            label,
-            baseline.completed_at.elapsed().as_secs()
-        ));
-        lines.push(format!("- {}.provider: {}", label, baseline.provider));
-        lines.push(format!("- {}.model: {}", label, baseline.model));
-        lines.push(format!(
-            "- {}.cache_ttl_secs: {:?}",
-            label, baseline.cache_ttl_secs
-        ));
-        lines.push(format!(
-            "- {}.cache_ttl_is_estimate: {}",
-            label,
-            crate::provider::cache_ttl_is_estimate(&baseline.provider)
-        ));
-
-        lines.push(format!(
-            "- {}.upstream_provider: {}",
-            label,
-            opt_string(baseline.upstream_provider.as_deref())
-        ));
-        push_cache_signature(
-            lines,
-            &format!("{}.signature", label),
-            baseline.signature.as_ref(),
-        );
-    } else {
-        lines.push(format!("- {}: None", label));
-    }
-}
-
-fn format_cache_stats(app: &App) -> String {
-    let remote_usage = app.remote_token_usage_totals;
-    let remote_cache_reported = remote_usage
-        .map(|usage| usage.cache_reported_input_tokens)
-        .unwrap_or(0);
-    let remote_cache_read = remote_usage
-        .map(|usage| usage.cache_read_input_tokens)
-        .unwrap_or(0);
-    let remote_cache_write = remote_usage
-        .map(|usage| usage.cache_creation_input_tokens)
-        .unwrap_or(0);
-    let reported = remote_cache_reported
-        .saturating_add(app.token_accounting.total_cache_reported_input_tokens);
-    let read = remote_cache_read.saturating_add(app.token_accounting.total_cache_read_tokens);
-    let write = remote_cache_write.saturating_add(app.token_accounting.total_cache_creation_tokens);
-    let optimal = app.token_accounting.total_cache_optimal_input_tokens;
-    // Preserve per-request accounting across providers. Legacy history without an
-    // explicit denominator remains unknown rather than guessing from aggregate writes.
-    let effective_reported = remote_usage
-        .map_or(Some(0), |usage| usage.cache_prompt_tokens)
-        .map(|prompt| prompt.saturating_add(app.token_accounting.total_cache_prompt_tokens));
-    let format_pct = |tokens, prompt: Option<u64>| {
-        prompt
-            .filter(|prompt| *prompt > 0)
-            .map(|prompt| format!("{}%", cache_ratio_pct(tokens, prompt)))
-            .unwrap_or_else(|| "unknown (prompt accounting unavailable)".to_string())
-    };
-    let read_pct = format_pct(read, effective_reported);
-    let write_pct = format_pct(write, effective_reported);
-    let optimal_pct =
-        (optimal > 0 && remote_cache_read == 0).then(|| cache_ratio_pct(read, optimal));
-    let cache_totals_source = match (
-        remote_usage.is_some(),
-        app.token_accounting.total_cache_prompt_tokens > 0,
-    ) {
-        (true, true) => "remote_history+client_observed_api_calls",
-        (true, false) => "remote_history",
-        (false, true) => "client_observed_api_calls",
-        (false, false) => "none_yet",
-    };
-    let live_cache_telemetry = !app.kv_cache.current_api_usage_recorded
-        && (app.streaming.streaming_cache_read_tokens.is_some()
-            || app.streaming.streaming_cache_creation_tokens.is_some());
-    let live_reported = if live_cache_telemetry {
-        app.streaming.streaming_input_tokens
-    } else {
-        0
-    };
-    let reported_including_live = reported.saturating_add(live_reported);
-    let read_including_live = read.saturating_add(if live_cache_telemetry {
-        app.streaming.streaming_cache_read_tokens.unwrap_or(0)
-    } else {
-        0
-    });
-    let write_including_live = write.saturating_add(if live_cache_telemetry {
-        app.streaming.streaming_cache_creation_tokens.unwrap_or(0)
-    } else {
-        0
-    });
-    let live_prompt = if live_cache_telemetry {
-        crate::tui::info_widget::effective_prompt_tokens(
-            &app.kv_cache_provider_name(),
-            live_reported,
-            app.streaming.streaming_cache_read_tokens.unwrap_or(0),
-            app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
-        )
-    } else {
-        0
-    };
-    let prompt_including_live = effective_reported.map(|prompt| prompt.saturating_add(live_prompt));
-    let read_pct_including_live = format_pct(read_including_live, prompt_including_live);
-    let write_pct_including_live = format_pct(write_including_live, prompt_including_live);
-    let ttl = if crate::provider::anthropic::is_cache_ttl_1h() {
-        "1 hour"
-    } else {
-        "5 minutes"
-    };
-    let current_provider = if app.is_remote {
-        app.remote_provider_name
-            .clone()
-            .unwrap_or_else(|| app.provider.name().to_string())
-    } else {
-        app.provider.name().to_string()
-    };
-    let current_model = if app.is_remote {
-        app.remote_provider_model
-            .clone()
-            .unwrap_or_else(|| app.provider.model())
-    } else {
-        app.provider.model()
-    };
-
-    let local_persisted_usage = app
-        .session
-        .messages
-        .iter()
-        .filter_map(|message| message.token_usage.as_ref())
-        .fold(
-            (0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_usize),
-            |acc, usage| {
-                (
-                    acc.0.saturating_add(usage.input_tokens),
-                    acc.1.saturating_add(usage.output_tokens),
-                    acc.2.saturating_add(
-                        if usage.cache_read_input_tokens.is_some()
-                            || usage.cache_creation_input_tokens.is_some()
-                        {
-                            usage.input_tokens
-                        } else {
-                            0
-                        },
-                    ),
-                    acc.3
-                        .saturating_add(usage.cache_read_input_tokens.unwrap_or(0)),
-                    acc.4
-                        .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0)),
-                    acc.5.saturating_add(1),
-                )
-            },
-        );
-
-    let (
-        persisted_source,
-        persisted_messages_len,
-        persisted_messages_with_usage,
-        persisted_input_tokens,
-        persisted_output_tokens,
-        persisted_cache_reported_input_tokens,
-        persisted_cache_read_input_tokens,
-        persisted_cache_creation_input_tokens,
-    ) = if let Some(usage) = remote_usage {
-        (
-            "remote_history",
-            None,
-            usage.messages_with_token_usage,
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_reported_input_tokens,
-            usage.cache_read_input_tokens,
-            usage.cache_creation_input_tokens,
-        )
-    } else {
-        (
-            "local_client_session",
-            Some(app.session.messages.len()),
-            local_persisted_usage.5,
-            local_persisted_usage.0,
-            local_persisted_usage.1,
-            local_persisted_usage.2,
-            local_persisted_usage.3,
-            local_persisted_usage.4,
-        )
-    };
-
-    let remote_history_tokens = app
-        .remote_total_tokens
-        .or_else(|| remote_usage.map(|usage| (usage.input_tokens, usage.output_tokens)));
-    let (history_input_tokens, history_output_tokens, totals_source) = if app.is_remote {
-        if let Some((input, output)) = remote_history_tokens {
-            (
-                input.saturating_add(app.token_accounting.total_input_tokens),
-                output.saturating_add(app.token_accounting.total_output_tokens),
-                if app.token_accounting.total_input_tokens > 0
-                    || app.token_accounting.total_output_tokens > 0
-                {
-                    "remote_history+client_observed_api_calls"
-                } else {
-                    "remote_history"
-                },
-            )
-        } else {
-            (
-                app.token_accounting.total_input_tokens,
-                app.token_accounting.total_output_tokens,
-                "client_observed_api_calls",
-            )
-        }
-    } else {
-        (
-            app.token_accounting.total_input_tokens,
-            app.token_accounting.total_output_tokens,
-            "local_completed_turns",
-        )
-    };
-    let live_unrecorded_input_tokens =
-        if app.streaming.streaming_input_tokens > 0 && !app.kv_cache.current_api_usage_recorded {
-            app.streaming.streaming_input_tokens
-        } else {
-            0
-        };
-    let live_unrecorded_output_tokens =
-        if app.streaming.streaming_output_tokens > 0 && !app.kv_cache.current_api_usage_recorded {
-            app.streaming.streaming_output_tokens
-        } else {
-            0
-        };
-
-    let mut lines = Vec::new();
-    lines.push("KV cache stats".to_string());
-    lines.push(String::new());
-    lines.push("Raw session/cache diagnostic state for this client. Cache telemetry is provider-reported when available.".to_string());
-    lines.push(String::new());
-
-    lines.push("Current route / settings".to_string());
-    lines.push(format!(
-        "- anthropic_cache_ttl_setting: {} (subsequent requests)",
-        ttl
-    ));
-    lines.push(format!("- is_remote: {}", app.is_remote));
-    lines.push(format!("- is_replay: {}", app.is_replay));
-    lines.push(format!("- current_provider: {}", current_provider));
-    lines.push(format!("- current_model: {}", current_model));
-    let route_provider = app.kv_cache_provider_name();
-    let route_ttl = crate::tui::cache_ttl_for_provider_model(&route_provider, Some(&current_model));
-    let retention = match route_ttl {
-        Some(seconds) if crate::provider::cache_ttl_is_estimate(&route_provider) => format!(
-            "{} minutes, provider estimate/minimum, not a guaranteed expiry",
-            seconds / 60
-        ),
-        Some(seconds) => format!("{} minutes", seconds / 60),
-        None => "unknown, provider-managed retention".to_string(),
-    };
-    lines.push(format!("- active_route_cache_retention: {}", retention));
-    let expiry_policy =
-        if route_ttl.is_none() || crate::provider::cache_ttl_is_estimate(&route_provider) {
-            "disabled (retention is estimated or provider-managed)"
-        } else {
-            "explicit TTL only"
-        };
-    lines.push(format!(
-        "- cache_expiry_notification_policy: {}",
-        expiry_policy
-    ));
-    lines.push(format!(
-        "- cache_expiry_notification_active: {}",
-        app.cache_ttl_status()
-            .is_some_and(|info| info.expiry_notification_active())
-    ));
-
-    lines.push(
-        "- anthropic_cache_ttl_setting_scope: Anthropic only, does not configure OpenAI retention"
-            .to_string(),
-    );
-    lines.push(format!(
-        "- upstream_provider: {}",
-        opt_string(app.upstream_provider.as_deref())
-    ));
-    lines.push(format!(
-        "- connection_type: {}",
-        opt_string(app.connection_type.as_deref())
-    ));
-    lines.push(format!(
-        "- status_detail: {}",
-        opt_string(app.status_detail.as_deref())
-    ));
-    lines.push(String::new());
-
-    lines.push("Session token totals".to_string());
-    lines.push(format!("- total_tokens_source: {}", totals_source));
-    lines.push(format!(
-        "- total_input_tokens: {}",
-        bold_count(history_input_tokens)
-    ));
-    lines.push(format!(
-        "- total_output_tokens: {}",
-        bold_count(history_output_tokens)
-    ));
-    lines.push(format!(
-        "- total_input_tokens_including_unrecorded_live: {}",
-        bold_count(history_input_tokens.saturating_add(live_unrecorded_input_tokens))
-    ));
-    lines.push(format!(
-        "- total_output_tokens_including_unrecorded_live: {}",
-        bold_count(history_output_tokens.saturating_add(live_unrecorded_output_tokens))
-    ));
-    lines.push(format!(
-        "- client_observed_completed_input_tokens: {}",
-        bold_count(app.token_accounting.total_input_tokens)
-    ));
-    lines.push(format!(
-        "- client_observed_completed_output_tokens: {}",
-        bold_count(app.token_accounting.total_output_tokens)
-    ));
-    lines.push(format!("- total_cost_usd: {:.6}", app.cost.total_cost));
-    lines.push(format!(
-        "- cached_prompt_price_per_1m: {}",
-        app.cost
-            .cached_prompt_price
-            .map(|price| format!("{:.6}", price))
-            .unwrap_or_else(|| "None".to_string())
-    ));
-    lines.push(format!(
-        "- cached_completion_price_per_1m: {}",
-        app.cost
-            .cached_completion_price
-            .map(|price| format!("{:.6}", price))
-            .unwrap_or_else(|| "None".to_string())
-    ));
-    lines.push(format!(
-        "- context_limit: {}",
-        bold_count(app.context_limit)
-    ));
-    lines.push(format!(
-        "- last_turn_input_tokens: {}",
-        opt_u64(app.last_turn_input_tokens)
-    ));
-    lines.push(format!(
-        "- last_api_completed_age_secs: {}",
-        app.last_api_completed
-            .map(|instant| instant.elapsed().as_secs().to_string())
-            .unwrap_or_else(|| "None".to_string())
-    ));
-    lines.push(format!(
-        "- last_api_completed_provider: {}",
-        opt_string(app.last_api_completed_provider.as_deref())
-    ));
-    lines.push(format!(
-        "- last_api_completed_model: {}",
-        opt_string(app.last_api_completed_model.as_deref())
-    ));
-    lines.push(String::new());
-
-    lines.push("Provider cache telemetry totals".to_string());
-    lines.push(format!("- cache_totals_source: {}", cache_totals_source));
-    lines.push(format!(
-        "- total_cache_reported_input_tokens: {}",
-        bold_count(reported)
-    ));
-    lines.push(format!("- total_cache_read_tokens: {}", bold_count(read)));
-    lines.push(format!(
-        "- total_cache_creation_tokens: {}",
-        bold_count(write)
-    ));
-    lines.push(format!(
-        "- total_cache_optimal_input_tokens: {}",
-        bold_count(optimal)
-    ));
-    lines.push(format!(
-        "- effective_prompt_tokens (input+read+creation for split providers): {}",
-        effective_reported
-            .map(bold_count)
-            .unwrap_or_else(|| "unknown (legacy history lacks per-request accounting)".to_string())
-    ));
-    lines.push(format!(
-        "- cache_read_pct_of_effective_prompt: {}",
-        read_pct
-    ));
-    lines.push(format!(
-        "- cache_write_pct_of_effective_prompt: {}",
-        write_pct
-    ));
-    lines.push(format!(
-        "- effective_prompt_tokens_including_unrecorded_live: {}",
-        prompt_including_live
-            .map(bold_count)
-            .unwrap_or_else(|| "unknown".to_string())
-    ));
-    lines.push(format!(
-        "- total_cache_reported_input_tokens_including_unrecorded_live: {}",
-        bold_count(reported_including_live)
-    ));
-    lines.push(format!(
-        "- total_cache_read_tokens_including_unrecorded_live: {}",
-        bold_count(read_including_live)
-    ));
-    lines.push(format!(
-        "- total_cache_creation_tokens_including_unrecorded_live: {}",
-        bold_count(write_including_live)
-    ));
-    lines.push(format!(
-        "- cache_read_pct_of_effective_prompt_including_unrecorded_live: {}",
-        read_pct_including_live
-    ));
-    lines.push(format!(
-        "- cache_write_pct_of_effective_prompt_including_unrecorded_live: {}",
-        write_pct_including_live
-    ));
-    lines.push(format!(
-        "- cache_read_pct_of_optimal_input: {}",
-        optimal_pct
-            .map(|pct| format!("{}%", pct))
-            .unwrap_or_else(|| "None".to_string())
-    ));
-    lines.push(format!(
-        "- last_cache_reported_input_tokens: {}",
-        opt_u64(app.token_accounting.last_cache_reported_input_tokens)
-    ));
-    lines.push(format!(
-        "- last_cache_read_tokens: {}",
-        opt_u64(app.token_accounting.last_cache_read_tokens)
-    ));
-    lines.push(format!(
-        "- last_cache_creation_tokens: {}",
-        opt_u64(app.token_accounting.last_cache_creation_tokens)
-    ));
-    lines.push(format!(
-        "- last_cache_optimal_input_tokens: {}",
-        opt_u64(app.token_accounting.last_cache_optimal_input_tokens)
-    ));
-    lines.push(format!(
-        "- cache_next_optimal_input_tokens: {}",
-        opt_u64(app.token_accounting.cache_next_optimal_input_tokens)
-    ));
-    lines.push(String::new());
-
-    lines.push("Current / live stream counters".to_string());
-    lines.push(format!(
-        "- streaming_input_tokens: {}",
-        bold_count(app.streaming.streaming_input_tokens)
-    ));
-    lines.push(format!(
-        "- streaming_output_tokens: {}",
-        bold_count(app.streaming.streaming_output_tokens)
-    ));
-    lines.push(format!(
-        "- streaming_total_output_tokens: {}",
-        bold_count(app.streaming.streaming_total_output_tokens)
-    ));
-    lines.push(format!(
-        "- streaming_cache_read_tokens: {}",
-        opt_u64(app.streaming.streaming_cache_read_tokens)
-    ));
-    lines.push(format!(
-        "- streaming_cache_creation_tokens: {}",
-        opt_u64(app.streaming.streaming_cache_creation_tokens)
-    ));
-    lines.push(format!(
-        "- current_api_usage_recorded: {}",
-        app.kv_cache.current_api_usage_recorded
-    ));
-    lines.push(format!("- status: {:?}", app.status));
-    lines.push(format!("- is_processing: {}", app.is_processing));
-    lines.push(format!(
-        "- processing_started_age_secs: {}",
-        app.processing_started
-            .map(|instant| instant.elapsed().as_secs().to_string())
-            .unwrap_or_else(|| "None".to_string())
-    ));
-    lines.push(format!(
-        "- last_stream_activity_age_secs: {}",
-        app.last_stream_activity
-            .map(|instant| instant.elapsed().as_secs().to_string())
-            .unwrap_or_else(|| "None".to_string())
-    ));
-    lines.push(format!(
-        "- stream_message_ended: {}",
-        app.stream_message_ended
-    ));
-    lines.push(format!(
-        "- streaming_tool_calls_len: {}",
-        app.streaming_tool_calls.len()
-    ));
-    lines.push(String::new());
-
-    lines.push("KV cache tracker state".to_string());
-    lines.push(format!(
-        "- kv_cache_turn_number: {}",
-        opt_usize(app.kv_cache.kv_cache_turn_number)
-    ));
-    lines.push(format!(
-        "- kv_cache_turn_call_index: {}",
-        app.kv_cache.kv_cache_turn_call_index
-    ));
-    lines.push(format!(
-        "- kv_cache_miss_samples_len: {}",
-        app.kv_cache.kv_cache_miss_samples.len()
-    ));
-    push_cache_baseline(
-        &mut lines,
-        "baseline",
-        app.kv_cache.kv_cache_baseline.as_ref(),
-    );
-    if let Some(request) = app.kv_cache.pending_kv_cache_request.as_ref() {
-        lines.push("- pending_request: present".to_string());
-        lines.push(format!(
-            "- pending_request.turn_number: {}",
-            request.turn_number
-        ));
-        lines.push(format!(
-            "- pending_request.call_index: {}",
-            request.call_index
-        ));
-        lines.push(format!("- pending_request.provider: {}", request.provider));
-        lines.push(format!("- pending_request.model: {}", request.model));
-        lines.push(format!(
-            "- pending_request.upstream_provider: {}",
-            opt_string(request.upstream_provider.as_deref())
-        ));
-        lines.push(format!(
-            "- pending_request.baseline_messages_prefix_matches: {:?}",
-            request.baseline_messages_prefix_matches
-        ));
-        push_cache_signature(
-            &mut lines,
-            "pending_request.signature",
-            request.signature.as_ref(),
-        );
-        push_cache_baseline(
-            &mut lines,
-            "pending_request.baseline",
-            request.baseline.as_ref(),
-        );
-    } else {
-        lines.push("- pending_request: None".to_string());
-    }
-    lines.push(String::new());
-
-    lines.push("Persisted transcript token usage".to_string());
-    lines.push(format!(
-        "- persisted_token_usage_source: {}",
-        persisted_source
-    ));
-    lines.push(format!(
-        "- local_client_session.messages_len: {}",
-        bold_count_usize(app.session.messages.len())
-    ));
-    lines.push(format!(
-        "- persisted_messages_len: {}",
-        persisted_messages_len
-            .map(bold_count_usize)
-            .unwrap_or_else(|| "None".to_string())
-    ));
-    lines.push(format!(
-        "- messages_with_token_usage: {}",
-        persisted_messages_with_usage
-    ));
-    lines.push(format!(
-        "- persisted_input_tokens: {}",
-        bold_count(persisted_input_tokens)
-    ));
-    lines.push(format!(
-        "- persisted_output_tokens: {}",
-        bold_count(persisted_output_tokens)
-    ));
-    lines.push(format!(
-        "- persisted_cache_reported_input_tokens: {}",
-        bold_count(persisted_cache_reported_input_tokens)
-    ));
-    lines.push(format!(
-        "- persisted_cache_read_input_tokens: {}",
-        bold_count(persisted_cache_read_input_tokens)
-    ));
-    lines.push(format!(
-        "- persisted_cache_creation_input_tokens: {}",
-        bold_count(persisted_cache_creation_input_tokens)
-    ));
-    lines.push(String::new());
-
-    lines.push("Recent miss attributions".to_string());
-    if app.kv_cache.kv_cache_miss_samples.is_empty() {
-        lines.push("- none attributed".to_string());
-    } else {
-        for sample in app.kv_cache.kv_cache_miss_samples.iter().rev() {
-            lines.push(format!(
-                "- turn={} call={} missed_tokens={} reason={}",
-                sample.turn_number,
-                sample.call_index,
-                human_count(sample.missed_tokens),
-                sample.reason.label()
-            ));
-        }
-    }
-
-    lines.join("\n")
-}
-
-/// Build the `/skills` report: currently loaded skills (marking the active one)
-/// plus the curated list of jcode-endorsed skills (marking which are installed).
-fn build_skills_report(app: &App) -> String {
-    let mut out = String::new();
-
-    let active = app.active_skill().map(|s| s.to_string());
-
-    // Loaded skills. In remote mode we only have names; locally we have full
-    // skill metadata (description + path).
-    out.push_str("Loaded skills\n");
-    if app.is_remote && !app.remote_skills.is_empty() {
-        let mut names = app.remote_skills.clone();
-        names.sort();
-        for name in &names {
-            let marker = if active.as_deref() == Some(name.as_str()) {
-                " (active)"
-            } else {
-                ""
-            };
-            out.push_str(&format!("- /{}{}\n", name, marker));
-        }
-    } else {
-        let snapshot = app.current_skills_snapshot();
-        let mut skills = snapshot.list();
-        skills.sort_by(|a, b| a.name.cmp(&b.name));
-        if skills.is_empty() {
-            out.push_str(
-                "- none loaded\n  Add skills under ~/.jcode/skills/<name>/SKILL.md or ./.jcode/skills/<name>/SKILL.md\n",
-            );
-        } else {
-            for skill in skills {
-                let marker = if active.as_deref() == Some(skill.name.as_str()) {
-                    " (active)"
-                } else {
-                    ""
-                };
-                out.push_str(&format!("- /{}{}\n", skill.name, marker));
-                out.push_str(&format!("    {}\n", skill.description));
-                out.push_str(&format!("    path: {}\n", skill.path.display()));
-            }
-        }
-    }
-
-    // Endorsed skills, marking which are installed. Build the installed set in a
-    // remote-aware way (the inherent `available_skills()` ignores remote skills).
-    let installed: std::collections::HashSet<String> =
-        if app.is_remote && !app.remote_skills.is_empty() {
-            app.remote_skills.iter().cloned().collect()
-        } else {
-            app.current_skills_snapshot()
-                .list()
-                .iter()
-                .map(|s| s.name.clone())
-                .collect()
-        };
-    out.push_str("\nEndorsed skills (recommended by jcode)\n");
-    // Group by category, preserving first-seen category order.
-    let mut category_order: Vec<&str> = Vec::new();
-    for endorsed in crate::skill::endorsed_skills() {
-        if !category_order.contains(&endorsed.category) {
-            category_order.push(endorsed.category);
-        }
-    }
-    for category in category_order {
-        let installed_in_category = crate::skill::endorsed_skills()
-            .iter()
-            .filter(|e| e.category == category && installed.contains(e.name))
-            .count();
-        let total_in_category = crate::skill::endorsed_skills()
-            .iter()
-            .filter(|e| e.category == category)
-            .count();
-        out.push_str(&format!(
-            "\n  {} ({}/{} installed)\n",
-            category, installed_in_category, total_in_category
-        ));
-        for endorsed in crate::skill::endorsed_skills()
-            .iter()
-            .filter(|e| e.category == category)
-        {
-            let is_installed = installed.contains(endorsed.name);
-            let status = if is_installed {
-                "installed"
-            } else {
-                "not installed"
-            };
-            out.push_str(&format!("  - /{} [{}]\n", endorsed.name, status));
-            out.push_str(&format!("      {}\n", endorsed.description));
-            out.push_str(&format!("      source: {}\n", endorsed.source));
-            if !is_installed && let Some(install) = endorsed.install {
-                out.push_str(&format!("      install: {}\n", install));
-            }
-        }
-    }
-
-    out.push_str("\nActivate a skill by typing its slash command (e.g. /optimization).\n");
-    out.push_str("Manage skills with the skill_manage tool (list/load/read/reload).\n");
-    out.push_str(
-        "NVIDIA CUDA-X skills come from the official catalog at https://github.com/NVIDIA/skills.\n",
-    );
-
-    out.trim_end().to_string()
-}
+#[path = "state_ui_skills_report.rs"]
+mod skills_report;
+use skills_report::build_skills_report;
 
 pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/skills" {
@@ -1907,7 +1100,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/version" {
         let version = jcode_build_meta::version();
-        let is_canary = if app.session.is_canary {
+        let is_canary = if app.session.is_canary() {
             " (canary/self-dev)"
         } else {
             ""
@@ -1946,6 +1139,8 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -1967,6 +1162,8 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: Some("KV cache stats".to_string()),
                     tool_data: None,
+                    codemode: None,
+                    ask: None,
                 });
                 app.set_status_notice("Cache stats");
             }
@@ -2013,7 +1210,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             .filter(|m| m.role == "user")
             .count();
 
-        let session_duration = chrono::Utc::now().signed_duration_since(app.session.created_at);
+        let session_duration = chrono::Utc::now().signed_duration_since(app.session.created_at());
         let duration_str = if session_duration.num_hours() > 0 {
             format!(
                 "{}h {}m",
@@ -2031,7 +1228,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         info.push_str(&format!(
             "Session: {} ({})\n",
             app.session.short_name.as_deref().unwrap_or("unnamed"),
-            &app.session.id[..8]
+            &app.session.id()[..8]
         ));
         info.push_str(&format!(
             "Duration: {} ({} turns)\n",
@@ -2059,9 +1256,9 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             ));
         }
 
-        if app.session.is_canary {
+        if app.session.is_canary() {
             info.push_str("\nSelf-Dev Mode: enabled\n");
-            if let Some(ref build) = app.session.testing_build {
+            if let Some(ref build) = app.session.testing_build() {
                 info.push_str(&format!("Testing Build: {}\n", build));
             }
         }
@@ -2080,6 +1277,8 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -2093,10 +1292,9 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             .unwrap_or_else(|_| "unknown".to_string());
         let active_session_id = app
             .active_client_session_id()
-            .unwrap_or(app.session.id.as_str())
+            .unwrap_or(app.session.id())
             .to_string();
         let context = app.context_info();
-        let todos = crate::todo::load_todos(active_session_id.as_str()).unwrap_or_default();
 
         let (provider_name, model_name, reasoning_effort, service_tier, transport, total_tokens) =
             if app.is_remote {
@@ -2139,7 +1337,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 } else {
                     manager.mode().as_str().to_string()
                 };
-                let summary_kind = match app.session.compaction.as_ref() {
+                let summary_kind = match app.session.compaction() {
                     Some(state) if state.openai_encrypted_content.is_some() => {
                         "native/openai-encrypted"
                     }
@@ -2147,7 +1345,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                     None => "none",
                 };
                 format!(
-                    "- supported: yes\n- mode: {}\n- jcode-managed: {}\n- active summary: {} ({})\n- compacted messages: {}\n- active messages: {}\n- summary chars: {}\n- estimated tokens: {}\n- effective tokens: {}\n- observed tokens: {}\n- usage: {:.1}%\n- compacting now: {}\n- budget: {}",
+                    "- supported: yes\n- mode: {}\n- jcode-managed: {}\n- active summary: {} ({})\n- compacted messages: {}\n- active messages: {}\n- summary tokens: {}\n- estimated tokens: {}\n- effective tokens: {}\n- observed tokens: {}\n- usage: {:.1}%\n- compacting now: {}\n- budget: {}",
                     mode,
                     if app.provider.uses_jcode_compaction() {
                         "yes"
@@ -2158,7 +1356,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                     summary_kind,
                     manager.compacted_count(),
                     stats.active_messages,
-                    manager.summary_chars(),
+                    manager.summary_tokens(),
                     stats.token_estimate,
                     stats.effective_tokens,
                     stats
@@ -2182,28 +1380,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         let side_panel_pages = app.side_panel.pages.len();
         let focused_side_panel = app.side_panel.focused_page_id.as_deref().unwrap_or("none");
 
-        let mut todo_lines = String::new();
-        if todos.is_empty() {
-            todo_lines.push_str("- none\n");
-        } else {
-            for todo in todos.iter().take(8) {
-                let (confidence_label, confidence) = if todo.status == "completed" {
-                    ("done", todo.completion_confidence.or(todo.confidence))
-                } else {
-                    ("confidence", todo.confidence)
-                };
-                let confidence = confidence
-                    .map(|state| state.as_str().to_string())
-                    .unwrap_or_else(|| "?".to_string());
-                todo_lines.push_str(&format!(
-                    "- [{}|{}|{} {}] {}\n",
-                    todo.status, todo.priority, confidence_label, confidence, todo.content
-                ));
-            }
-            if todos.len() > 8 {
-                todo_lines.push_str(&format!("- … {} more\n", todos.len() - 8));
-            }
-        }
+        let todo_lines = context_todos::render(&active_session_id);
 
         let mut context_report = String::new();
         context_report.push_str("Session Context\n\n");
@@ -2214,7 +1391,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             "- mode: {}{}{}\n",
             if app.is_remote { "remote" } else { "local" },
             if app.is_replay { ", replay" } else { "" },
-            if app.session.is_canary {
+            if app.session.is_canary() {
                 ", self-dev"
             } else {
                 ""
@@ -2257,18 +1434,19 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         if let Some((input, output)) = total_tokens {
             context_report.push_str(&format!("- session tokens: ↑{} ↓{}\n", input, output));
         }
+        let family = crate::message::TokenFamily::from_model(&model_name);
         context_report.push_str("\nPrompt / Context Composition\n");
         context_report.push_str(&format!(
             "- total chars: {} (~{} tokens)\n",
             context.total_chars,
-            context.estimated_tokens()
+            context.estimated_tokens(family)
         ));
         context_report.push_str(&format!(
             "- prompt prefix before any user text: {} chars (~{} tokens)\n- tool definitions only: {} chars (~{} tokens)\n",
             context.prompt_prefix_chars(),
-            context.prompt_prefix_tokens(),
+            context.prompt_prefix_tokens(family),
             context.tool_defs_chars,
-            context.tool_definition_tokens(),
+            context.tool_definition_tokens(family),
         ));
         context_report.push_str(&format!(
             "- system prompt: {} chars\n- session context: {} chars\n- project AGENTS.md: {} ({})\n- global ~/AGENTS.md: {} ({})\n- prompt overlays: {} chars\n- preferred tools: {} chars\n- skills section: {} chars\n- self-dev section: {} chars\n- memory section: {} chars\n- tool definitions: {} chars across {} tools\n- user messages: {} chars across {} messages\n- assistant messages: {} chars across {} messages\n- tool calls: {} chars across {} calls\n- tool results: {} chars across {} results\n",

@@ -13,6 +13,10 @@ impl MultiProvider {
             "claude" | "claude-oauth" | "claude-api" | "anthropic-api" | "anthropic-api-key" => {
                 "claude"
             }
+            "https" => "antigravity",
+            "code-assist-oauth" => "gemini",
+            "jcode-subscription" => "jcode",
+            "grok-build" | "grok-build-acp" => "grok-build",
             other => other,
         };
         if !models::is_agent_model_for_failover(model, provider) {
@@ -48,6 +52,10 @@ impl MultiProvider {
             match method {
                 "openai-api" | "openai-api-key" => "openai-api".to_owned(),
                 "claude-api" | "anthropic-api" | "anthropic-api-key" => "anthropic-api".to_owned(),
+                "https" => "antigravity".to_owned(),
+                "code-assist-oauth" => "gemini".to_owned(),
+                "jcode-subscription" => "jcode".to_owned(),
+                "grok-build" | "grok-build-acp" => "grok-build".to_owned(),
                 // Unqualified OAuth routes do not identify a billing account.
                 "openai" | "claude" | "openai-oauth" | "claude-oauth" => return false,
                 other => other.to_owned(),
@@ -73,7 +81,7 @@ impl MultiProvider {
         };
         let default = crate::auth::account_pool::default_member(&key, api_key);
         let pool = crate::auth::account_pool::AccountPool::load();
-        !pool.excluded.contains(&key) && pool.is_member(&key, default)
+        pool.auto_switch() && !pool.excluded.contains(&key) && pool.is_member(&key, default)
     }
 
     fn account_failover_prompt(
@@ -90,7 +98,8 @@ impl MultiProvider {
         // Missing pins cannot heal to a different account. Neither may an
         // explicitly manual account silently enroll itself in the pool.
         let pool = crate::auth::account_pool::AccountPool::load();
-        if !labels.iter().any(|label| label == current)
+        if !pool.auto_switch()
+            || !labels.iter().any(|label| label == current)
             || !pool.is_member(
                 &crate::auth::account_pool::account_key(key, Some(current)),
                 true,
@@ -98,7 +107,12 @@ impl MultiProvider {
         {
             return None;
         }
-        let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
+        let (chars, tokens) = Self::estimate_request_input(
+            jcode_message_types::TokenFamily::from_model(&self.model()),
+            messages,
+            tools,
+            mode,
+        );
         self.cross_provider_pool_prompt(provider, provider, reason.to_owned(), chars, tokens)
     }
 
@@ -123,10 +137,14 @@ impl MultiProvider {
         };
         let pool = crate::auth::account_pool::AccountPool::load();
         let source_default = !source_key.ends_with("-api");
-        if pool.excluded.contains(&source_key) || !pool.is_member(&source_key, source_default) {
+        if !pool.auto_switch()
+            || pool.excluded.contains(&source_key)
+            || !pool.is_member(&source_key, source_default)
+        {
             return None;
         }
         let mut candidates: Vec<(String, ActiveProvider, String, String)> = Vec::new();
+        let failover_config = crate::config::Config::load().provider;
         // Preserve the current model when rotating to another saved account.
         // This path never consults or mutates the global active login.
         let context_only = jcode_provider_core::classify_failover_error_message(&reason)
@@ -136,9 +154,26 @@ impl MultiProvider {
         } else {
             tokens
         };
-        if let Some(current) = from_label
-            .as_deref()
-            .filter(|_| !context_only && same_provider_account_failover_enabled())
+        let openai_context_limit = models::openai_route_context_limit_resolver();
+        // Use the same eligibility policy for saved-account and catalog
+        // candidates, without leaking Codex capacity into API-key routes.
+        let model_fits = |model: &str, provider: &str, api_method: &str| {
+            let limit = if provider == "openai" {
+                openai_context_limit(model, api_method)
+            } else {
+                models::context_limit_for_model_with_provider(model, Some(provider))
+            };
+            models::is_agent_model_for_failover(model, provider)
+                && limit.is_some_and(|limit| limit >= required_context)
+        };
+        // With routing in auto it moves sessions between accounts of a provider;
+        // this prompt only offers other providers.
+        let same_provider_rotation = same_provider_account_failover_enabled()
+            && !account_failover::routing_decides(from, &self.model());
+        if !failover_config.failover_model_excluded(&self.model())
+            && let Some(current) = from_label
+                .as_deref()
+                .filter(|_| !context_only && same_provider_rotation)
         {
             let method = if from == ActiveProvider::OpenAI {
                 "openai-oauth"
@@ -151,7 +186,7 @@ impl MultiProvider {
             {
                 let spec = format!("{method}@{label}:{}", self.model());
                 if Self::is_failover_route_pool_approved(&spec)
-                    && Self::failover_model_fits(&self.model(), from_provider, required_context)
+                    && model_fits(&self.model(), from_provider, &format!("{method}@{label}"))
                 {
                     candidates.push((
                         crate::auth::account_pool::account_key(from_provider, Some(&label)),
@@ -162,11 +197,9 @@ impl MultiProvider {
                 }
             }
         }
-        for route in self
-            .model_routes()
-            .into_iter()
-            .filter(|route| route.available)
-        {
+        for route in self.model_routes().into_iter().filter(|route| {
+            route.available && !failover_config.failover_model_excluded(&route.model)
+        }) {
             let selection = jcode_provider_core::RouteSelection::from_model_route(&route);
             let spec = selection.routed_model_spec();
             if !Self::is_failover_route_pool_approved(&spec) {
@@ -186,17 +219,15 @@ impl MultiProvider {
                 jcode_provider_core::RuntimeKey::OpenRouter => ActiveProvider::OpenRouter,
                 _ => continue,
             };
-            if !Self::failover_model_fits(
+            if !model_fits(
                 &route.model,
                 Self::provider_key(target_provider),
-                required_context,
+                &route.api_method,
             ) || route.detail.contains("no tools")
             {
                 continue;
             }
-            if target_provider == from
-                && (context_only || !same_provider_account_failover_enabled())
-            {
+            if target_provider == from && (context_only || !same_provider_rotation) {
                 continue;
             }
             let label = jcode_provider_core::oauth_account_label(&route.api_method);
@@ -259,18 +290,6 @@ impl MultiProvider {
                 {
                     return Some(*preferred);
                 }
-                if let Some(best) = group
-                    .iter()
-                    .filter(|candidate| {
-                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
-                            != usize::MAX
-                    })
-                    .min_by_key(|candidate| {
-                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
-                    })
-                {
-                    return Some(*best);
-                }
                 let models: Vec<&str> = group
                     .iter()
                     .map(|candidate| candidate_model(candidate))
@@ -283,6 +302,18 @@ impl MultiProvider {
                     .find(|candidate| candidate_model(candidate) == preferred)
                 {
                     return Some(*flagship);
+                }
+                if let Some(best) = group
+                    .iter()
+                    .filter(|candidate| {
+                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
+                            != usize::MAX
+                    })
+                    .min_by_key(|candidate| {
+                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
+                    })
+                {
+                    return Some(*best);
                 }
                 // Capacity is eligibility, not quality. Never pick an unknown
                 // model by maximum context, catalog position or lexical order.
@@ -328,7 +359,12 @@ impl MultiProvider {
                     true,
                 )
             {
-                let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
+                let (chars, tokens) = Self::estimate_request_input(
+                    jcode_message_types::TokenFamily::from_model(&self.model()),
+                    messages,
+                    tools,
+                    mode,
+                );
                 for target in Self::fallback_sequence(provider)
                     .into_iter()
                     .filter(|target| *target != provider)

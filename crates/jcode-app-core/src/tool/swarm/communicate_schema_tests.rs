@@ -1,0 +1,567 @@
+use super::*;
+
+#[test]
+fn model_facing_swarm_definition_stays_compact() {
+    fn description_bytes(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Object(fields) => fields
+                .iter()
+                .map(|(key, value)| {
+                    if key == "description" && value.is_string() {
+                        value.as_str().unwrap().len()
+                    } else {
+                        description_bytes(value)
+                    }
+                })
+                .sum(),
+            serde_json::Value::Array(values) => values.iter().map(description_bytes).sum(),
+            _ => 0,
+        }
+    }
+
+    let tool = CommunicateTool::new();
+    let mut schema = tool.parameters_schema();
+    // Budget schema prose, not user-owned prompt overrides or model allowlists.
+    super::super::apply_swarm_model_policy(&mut schema, &crate::config::AgentsConfig::default());
+    let prose_bytes = description_bytes(&schema);
+    let definition_bytes = serde_json::to_vec(&json!({
+        "name": tool.name(), "description": tool.description(), "parameters": schema
+    }))
+    .unwrap()
+    .len();
+    println!(
+        "swarm: schema description bytes={prose_bytes}, default prompt bytes={}, definition bytes={definition_bytes}",
+        crate::prompt::DEFAULT_SWARM_PROMPT.trim().len()
+    );
+    assert!(
+        prose_bytes < 1_220,
+        "swarm field descriptions grew to {prose_bytes} bytes"
+    );
+    // working_dir needs its inheritance rule: omission must not accidentally
+    // spawn workers in the daemon's own working directory.
+    let working_dir = schema["properties"]["working_dir"]["description"]
+        .as_str()
+        .expect("working directory override must explain inheritance");
+    assert!(working_dir.contains("override"));
+    assert!(working_dir.contains("inherit the requesting session"));
+    for field in ["action", "session_ids", "delivery"] {
+        assert!(
+            schema["properties"][field].get("description").is_none(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn schema_still_requires_action() {
+    let schema = CommunicateTool::new().parameters_schema();
+    assert_eq!(schema["required"], json!(["action"]));
+}
+
+#[test]
+fn schema_hides_model_override_by_default_and_scopes_effort_to_set_model() {
+    let schema = CommunicateTool::new().parameters_schema();
+    let props = schema["properties"]
+        .as_object()
+        .expect("swarm schema should have properties");
+
+    let mut schema = schema.clone();
+    super::super::apply_swarm_model_policy(&mut schema, &crate::config::AgentsConfig::default());
+    assert!(schema["properties"].get("model").is_none());
+    // Spawned worker effort is user-configured (`agents.swarm_effort`, default
+    // low). `effort` exists only to retune a running worker via set_model.
+    assert!(
+        props["effort"]["description"]
+            .as_str()
+            .is_some_and(|d| d.contains("set_model")),
+        "effort is for set_model only"
+    );
+    assert!(
+        schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum")
+            .contains(&json!("list_models"))
+    );
+}
+
+#[test]
+fn schema_only_exposes_exact_allowlisted_worker_models_when_enabled() {
+    let mut schema = CommunicateTool::new().parameters_schema();
+    let mut agents = crate::config::AgentsConfig {
+        swarm_model_allowlist: vec!["openai:gpt-5.5".to_string()],
+        ..Default::default()
+    };
+    super::super::apply_swarm_model_policy(&mut schema, &agents);
+    assert!(schema["properties"].get("model").is_none());
+    agents.swarm_model_selection = true;
+    super::super::apply_swarm_model_policy(&mut schema, &agents);
+    assert_eq!(
+        schema["properties"]["model"]["enum"],
+        json!(["openai:gpt-5.5"])
+    );
+    agents.swarm_model_allowlist.clear();
+    super::super::apply_swarm_model_policy(&mut schema, &agents);
+    assert!(schema["properties"].get("model").is_none());
+}
+
+#[test]
+fn schema_exposes_only_spawn_allowed_models_to_agents() {
+    let mut schema = CommunicateTool::new().parameters_schema();
+    let agents = crate::config::AgentsConfig {
+        spawn_allowed_models: vec![
+            "opencode-go:deepseek-v4.1-flash".to_string(),
+            "claude:claude-opus-5-5".to_string(),
+        ],
+        ..Default::default()
+    };
+    super::super::apply_swarm_model_policy(&mut schema, &agents);
+    assert_eq!(
+        schema["properties"]["model"]["enum"],
+        json!(["opencode-go:deepseek-v4.1-flash", "claude:claude-opus-5-5"])
+    );
+}
+
+#[test]
+fn spawn_allowlist_rejects_fable_and_astra_for_worker_actions() {
+    let agents = crate::config::AgentsConfig {
+        spawn_allowed_models: vec![
+            "opencode-go:deepseek-v4.1-flash".to_string(),
+            "claude:claude-sonnet-5-5".to_string(),
+            "claude:claude-opus-5-5".to_string(),
+        ],
+        ..Default::default()
+    };
+    for action in ["spawn", "assign_task", "assign_next", "retry", "resume"] {
+        let input: CommunicateInput = serde_json::from_value(json!({
+            "action": action, "model": "claude:claude-opus-5-5"
+        }))
+        .unwrap();
+        assert!(
+            agents
+                .validate_spawn_allowed_model(input.model.as_deref())
+                .is_ok()
+        );
+        for denied in [
+            "claude:claude-fable-5",
+            "claude:claude-fable-5-2",
+            "claude:claude-astra-5",
+        ] {
+            let error = agents
+                .validate_spawn_allowed_model(Some(denied))
+                .expect_err(denied);
+            assert!(error.contains("claude:claude-opus-5-5"), "{error}");
+        }
+        // Omitting the model means "use agents.swarm_model", never fable.
+        assert!(agents.validate_spawn_allowed_model(None).is_ok());
+    }
+}
+
+#[test]
+fn spawning_actions_cannot_bypass_worker_model_policy() {
+    let mut agents = crate::config::AgentsConfig {
+        swarm_model_allowlist: vec!["claude:claude-opus-4-8".to_string()],
+        ..Default::default()
+    };
+    for action in ["spawn", "assign_task", "assign_next", "retry", "resume"] {
+        let input: CommunicateInput = serde_json::from_value(json!({
+            "action": action, "model": "claude:claude-opus-4-8"
+        }))
+        .unwrap();
+        assert!(
+            agents
+                .validate_swarm_model_request(input.model.as_deref())
+                .is_err()
+        );
+        agents.swarm_model_selection = true;
+        assert!(
+            agents
+                .validate_swarm_model_request(input.model.as_deref())
+                .is_ok()
+        );
+        assert!(
+            agents
+                .validate_swarm_model_request(Some("claude-api:claude-opus-4-8"))
+                .is_err()
+        );
+        agents.swarm_model_selection = false;
+    }
+}
+
+#[tokio::test]
+async fn stale_worker_model_override_is_rejected_before_server_dispatch() {
+    let _env = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let tool = CommunicateTool::new();
+    let result = tool
+        .execute(
+            json!({"action": "spawn", "label": "worker", "model": "claude-api:claude-opus-4-8"}),
+            test_ctx("coordinator", temp.path()),
+        )
+        .await;
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("Agent-selected swarm models are disabled"),
+        "{error}"
+    );
+}
+
+#[test]
+fn schema_requires_a_nonblank_label_for_spawn() {
+    let schema = CommunicateTool::new().parameters_schema();
+    assert_eq!(schema["properties"]["label"]["minLength"], json!(1));
+    assert!(
+        schema["properties"]["label"]["description"]
+            .as_str()
+            .expect("label description")
+            .contains("Required for spawn")
+    );
+    assert!(schema["properties"]["action"].get("description").is_none());
+
+    // Spawn's conditional requirement is enforced by required_spawn_label,
+    // not by paying for a repeated action enum in root combiners.
+    assert!(schema.get("anyOf").is_none());
+    let prompt_description = schema["properties"]["prompt"]["description"]
+        .as_str()
+        .expect("prompt description");
+    assert!(prompt_description.contains("Extra spawn context"));
+    assert!(prompt_description.contains("not lane tasks"));
+    assert!(
+        schema["properties"]["label"]["description"]
+            .as_str()
+            .expect("label description")
+            .contains("source of truth")
+    );
+}
+
+#[test]
+fn schema_advertises_only_canonical_spawn_and_target_fields() {
+    let schema = CommunicateTool::new().parameters_schema();
+    let props = schema["properties"].as_object().unwrap();
+    for canonical in ["to_session", "prompt"] {
+        assert!(props.contains_key(canonical), "{canonical}");
+    }
+    for alias in ["target_session", "initial_message"] {
+        assert!(!props.contains_key(alias), "advertised alias {alias}");
+    }
+    let gemini =
+        jcode_schema_dialect::dialect::apply(&schema, &jcode_schema_dialect::registry::GEMINI);
+    let errors = jcode_schema_dialect::must_not_contain_unsupported_constructs(
+        &gemini,
+        &jcode_schema_dialect::registry::GEMINI,
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+    for required in schema["required"].as_array().unwrap() {
+        assert!(props.contains_key(required.as_str().unwrap()));
+    }
+}
+
+#[test]
+fn spawn_label_validation_rejects_missing_or_blank_labels() {
+    let missing: CommunicateInput =
+        serde_json::from_value(json!({"action": "spawn"})).expect("spawn input");
+    assert_eq!(
+        missing
+            .required_spawn_label()
+            .expect_err("missing label must fail")
+            .to_string(),
+        "'label' is required for spawn action"
+    );
+
+    let blank: CommunicateInput = serde_json::from_value(json!({
+        "action": "spawn",
+        "label": "  \n\t "
+    }))
+    .expect("spawn input");
+    assert_eq!(
+        blank
+            .required_spawn_label()
+            .expect_err("blank label must fail")
+            .to_string(),
+        "'label' must not be blank for spawn action"
+    );
+}
+
+#[test]
+fn spawn_label_validation_trims_valid_labels() {
+    let params: CommunicateInput = serde_json::from_value(json!({
+        "action": "spawn",
+        "label": "  api reviewer  "
+    }))
+    .expect("spawn input");
+    assert_eq!(
+        params.required_spawn_label().expect("valid label"),
+        "api reviewer"
+    );
+}
+
+#[tokio::test]
+async fn spawn_execute_rejects_missing_label_before_sending_request() {
+    let working_dir = tempfile::tempdir().expect("working dir");
+    let error = CommunicateTool::new()
+        .execute(
+            json!({"action": "spawn", "prompt": "review the API"}),
+            test_ctx("session-parent", working_dir.path()),
+        )
+        .await
+        .expect_err("missing spawn label must fail locally");
+
+    assert_eq!(error.to_string(), "'label' is required for spawn action");
+}
+
+#[tokio::test]
+async fn swarm_worker_controls_require_an_explicit_target() {
+    let working_dir = tempfile::tempdir().unwrap();
+    let tool = CommunicateTool::new();
+    for action in ["set_model", "compact"] {
+        let error = tool
+            .execute(
+                json!({"action": action}),
+                test_ctx("session-parent", working_dir.path()),
+            )
+            .await
+            .expect_err("worker control must not default to a target");
+        assert_eq!(
+            error.to_string(),
+            format!("'to_session' is required for {action} action")
+        );
+    }
+}
+
+#[test]
+fn description_includes_swarm_prompt_guidance() {
+    let tool = CommunicateTool::new();
+    let description = tool.description();
+    assert!(
+        description.starts_with("Coordinate agents"),
+        "description should lead with the short coordination summary"
+    );
+    assert!(
+        description.contains("Swarm prompt"),
+        "description should embed the swarm prompt section"
+    );
+}
+
+#[test]
+fn existing_tool_keeps_prompt_while_new_tool_loads_edit() {
+    let project = tempfile::tempdir().unwrap();
+    let prompt_dir = project.path().join(".jcode");
+    std::fs::create_dir_all(&prompt_dir).unwrap();
+    let prompt_path = prompt_dir.join("swarm-prompt.md");
+    std::fs::write(&prompt_path, "first routing version").unwrap();
+
+    let existing = CommunicateTool::new_for_working_dir(Some(project.path()));
+    std::fs::write(&prompt_path, "second routing version").unwrap();
+    let newly_created = CommunicateTool::new_for_working_dir(Some(project.path()));
+
+    assert!(existing.description().contains("first routing version"));
+    assert!(!existing.description().contains("second routing version"));
+    assert!(
+        newly_created
+            .description()
+            .contains("second routing version")
+    );
+}
+
+#[test]
+fn spawning_action_inputs_preserve_requested_model() {
+    for action in ["spawn", "assign_task", "assign_next"] {
+        for model in [
+            "z-ai/glm-5.2:free",
+            "openai-api:gpt-5.5",
+            "inherit",
+            "coordinator",
+            "  ",
+        ] {
+            let input: CommunicateInput = serde_json::from_value(json!({
+                "action": action,
+                "label": "reviewer",
+                "model": model
+            }))
+            .unwrap();
+            assert_eq!(input.model.as_deref(), Some(model));
+        }
+    }
+}
+
+#[test]
+fn spawning_action_inputs_allow_omitted_or_null_model() {
+    for action in ["spawn", "assign_task", "assign_next"] {
+        let without_model: CommunicateInput =
+            serde_json::from_value(json!({"action": action, "label": "reviewer"})).unwrap();
+        assert!(without_model.model.is_none());
+        let null_model: CommunicateInput = serde_json::from_value(json!({
+            "action": action,
+            "label": "reviewer",
+            "model": null
+        }))
+        .unwrap();
+        assert!(null_model.model.is_none());
+    }
+}
+
+#[test]
+fn format_swarm_model_list_renders_routes_and_default() {
+    let routes = vec![
+        jcode_provider_core::ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
+            model: "gpt-5.5".to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "openai-api-key".to_string(),
+            available: true,
+            detail: "API key".to_string(),
+            usage: None,
+            cheapness: None,
+            account: None,
+            icon: None,
+        },
+        jcode_provider_core::ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
+            model: "claude-fable-5".to_string(),
+            provider: "Anthropic".to_string(),
+            api_method: "anthropic-api-key".to_string(),
+            available: false,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+            account: None,
+            icon: None,
+        },
+    ];
+    let output =
+        format_swarm_model_list(Some("claude-fable-5"), Some("openai-api:gpt-5.5"), &routes);
+    assert!(output.contains("Current coordinator model: claude-fable-5"));
+    assert!(output.contains("Configured agents.swarm_model default: openai-api:gpt-5.5"));
+    assert!(output.contains("gpt-5.5 via OpenAI [openai-api-key] (API key)"));
+    assert!(output.contains("claude-fable-5 via Anthropic [anthropic-api-key] [unavailable]"));
+    assert!(!output.contains("pass effort"));
+}
+
+#[test]
+fn format_swarm_model_list_handles_empty_catalog() {
+    let output = format_swarm_model_list(None, None, &[]);
+    assert!(output.contains("Current coordinator model: unknown"));
+    assert!(output.contains("No agents.swarm_model default configured"));
+    assert!(!output.contains("unless model is passed"));
+    assert!(output.contains("No model routes reported"));
+}
+
+#[test]
+fn schema_does_not_advertise_explicit_completion_reporting() {
+    let tool = CommunicateTool::new();
+    let schema = tool.parameters_schema();
+    let serialized = schema.to_string();
+    assert!(!serialized.contains("report"), "{serialized}");
+    assert!(!serialized.contains("validation"), "{serialized}");
+    assert!(!serialized.contains("follow_up"), "{serialized}");
+}
+
+#[test]
+fn legacy_report_input_remains_compatible() {
+    let input: super::CommunicateInput = serde_json::from_value(json!({
+        "action": "report",
+        "message": "Implemented the change.",
+        "status": "completed",
+        "validation": "Tests passed.",
+        "follow_up": "None."
+    }))
+    .expect("old transcripts and scripts can still deserialize reports");
+    assert_eq!(input.action, "report");
+    assert_eq!(input.status.as_deref(), Some("completed"));
+    assert_eq!(input.validation.as_deref(), Some("Tests passed."));
+    assert_eq!(input.follow_up.as_deref(), Some("None."));
+}
+
+#[test]
+fn schema_advertises_a_lean_lane_first_action_set() {
+    let schema = CommunicateTool::new().parameters_schema();
+    let props = schema["properties"]
+        .as_object()
+        .expect("swarm schema should have properties");
+    let actions: Vec<&str> = schema["properties"]["action"]["enum"]
+        .as_array()
+        .expect("action enum")
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect();
+    for kept in [
+        "spawn",
+        "message",
+        "status",
+        "plan_status",
+        "list",
+        "summary",
+        "await_members",
+        "stop",
+        "resume",
+        "retry",
+        "list_models",
+    ] {
+        assert!(
+            actions.contains(&kept),
+            "{kept} should be offered: {actions:?}"
+        );
+    }
+    for hidden in [
+        "report",
+        "propose_plan",
+        "approve_plan",
+        "reject_plan",
+        "assign_task",
+        "assign_next",
+        "launch",
+        "fill_slots",
+        "run_plan",
+        "resync_plan",
+        "share",
+        "read",
+        "start_task",
+        "salvage",
+        "subscribe_channel",
+        "task_graph",
+    ] {
+        assert!(!actions.contains(&hidden), "{hidden} should not be offered");
+    }
+    assert!(
+        actions.len() <= 17,
+        "keep the swarm tool small: {actions:?}"
+    );
+    for kept in [
+        "message",
+        "to_session",
+        "channel",
+        "label",
+        "phase",
+        "prompt",
+        "session_ids",
+        "delivery",
+        "wake",
+    ] {
+        assert!(props.contains_key(kept), "{kept} param should be offered");
+    }
+    for dropped in [
+        "target_session",
+        "initial_message",
+        "status",
+        "validation",
+        "follow_up",
+        "key",
+        "value",
+        "proposer_session",
+        "reason",
+        "role",
+        "plan_items",
+    ] {
+        assert!(
+            !props.contains_key(dropped),
+            "{dropped} belongs to hidden actions"
+        );
+    }
+}

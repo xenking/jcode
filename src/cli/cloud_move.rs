@@ -10,7 +10,7 @@
 //!   lease says the session moved.
 //! - **Code: git.** The move ships the exact local state (HEAD, branch,
 //!   uncommitted and untracked work) as a git bundle plus a *snapshot commit*.
-//!   The cloud continues from that snapshot at the same absolute path. Return
+//!   The cloud continues from that snapshot in a managed workspace. Return
 //!   brings the cloud snapshot back as refs and 3-way merges it into whatever
 //!   the local checkout looks like now, so local edits made meanwhile survive.
 //!   Conflicts are ordinary git conflicts.
@@ -212,9 +212,8 @@ impl CloudAccount {
 
 /// Never infer OAuth from a bare provider name: it may actually use an API key.
 fn oauth_selection(sess: &session::Session) -> Result<Option<(TransferProvider, Option<&str>)>> {
-    let route = sess.route_api_method.as_deref().or_else(|| {
-        sess.model
-            .as_deref()
+    let route = sess.route_api_method().or_else(|| {
+        sess.model()
             .and_then(|model| model.split_once(':').map(|(route, _)| route))
     });
     let Some(route) = route else { return Ok(None) };
@@ -333,8 +332,7 @@ fn run_credentials(provider: &str, account: &str, export: bool) -> Result<()> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RepoManifest {
-    /// Absolute repo root. Restored at the same path so every path in the
-    /// transcript stays valid.
+    /// Absolute source repository root.
     pub root: String,
     /// Session working directory (may be a subdirectory of `root`).
     pub working_dir: String,
@@ -347,6 +345,214 @@ pub(crate) struct RepoManifest {
     pub git_user_name: Option<String>,
     pub git_user_email: Option<String>,
     pub ignored_files: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkspaceMapping {
+    epoch: u64,
+    source_root: String,
+    destination_root: String,
+}
+
+fn workspace_mapping_path(session_id: &str) -> Result<PathBuf> {
+    baseline_path(session_id)?;
+    Ok(storage::jcode_dir()?
+        .join("cloud_workspace_mappings")
+        .join(format!("{session_id}.json")))
+}
+
+fn save_workspace_mapping(
+    session_id: &str,
+    epoch: u64,
+    original: &RepoManifest,
+    mapped: &RepoManifest,
+) -> Result<()> {
+    storage::write_json_secret(
+        &workspace_mapping_path(session_id)?,
+        &WorkspaceMapping {
+            epoch,
+            source_root: original.root.clone(),
+            destination_root: mapped.root.clone(),
+        },
+    )?;
+    Ok(())
+}
+
+fn portable_repo(repo: &RepoManifest, source_host: &str, home: &Path) -> Result<RepoManifest> {
+    let root = Path::new(&repo.root);
+    let working = Path::new(&repo.working_dir);
+    let relative = working
+        .strip_prefix(root)
+        .context("session cwd is outside its repository")?;
+    if !root.is_absolute()
+        || relative
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        bail!("repository or working directory is not a portable absolute path");
+    }
+    let key = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(source_host, &repo.root))?)
+    );
+    let destination = home.join("cloud_workspaces").join(key).join("repo");
+    let mut mapped = repo.clone();
+    mapped.root = destination.to_string_lossy().into_owned();
+    mapped.working_dir = destination.join(relative).to_string_lossy().into_owned();
+    Ok(mapped)
+}
+
+fn reserve_portable_repo(repo: &RepoManifest) -> Result<()> {
+    let root = Path::new(&repo.root);
+    let container = root.parent().context("invalid workspace destination")?;
+    std::fs::create_dir_all(container.parent().context("invalid workspace parent")?)?;
+    match std::fs::create_dir(container) {
+        Ok(()) => {
+            std::fs::create_dir(root)?;
+            git(root, &["init", "--quiet"])?;
+            std::fs::write(root.join(".git/jcode-cloud-workspace"), b"1")?;
+            if let Some(url) = &repo.origin_url {
+                git(root, &["remote", "add", "origin", url])?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if std::fs::symlink_metadata(container)?
+                .file_type()
+                .is_symlink()
+                || std::fs::symlink_metadata(root)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(true)
+                || std::fs::symlink_metadata(root.join(".git"))
+                    .map(|m| !m.file_type().is_dir())
+                    .unwrap_or(true)
+                || !root.join(".git/jcode-cloud-workspace").is_file()
+            {
+                bail!(
+                    "workspace destination is not a jcode-owned repository: {}",
+                    root.display()
+                );
+            }
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+fn ensure_portable_cwd(repo: &RepoManifest) -> Result<()> {
+    let root = Path::new(&repo.root);
+    let relative = Path::new(&repo.working_dir).strip_prefix(root)?;
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            bail!("invalid workspace subdirectory")
+        };
+        path.push(name);
+        match std::fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !std::fs::symlink_metadata(&path)?.file_type().is_dir() {
+                    bail!(
+                        "workspace subdirectory is not a real directory: {}",
+                        path.display()
+                    );
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn check_portable_repo_available(repo: &RepoManifest) -> Result<()> {
+    let root = Path::new(&repo.root);
+    if let Some(directory) = storage::session_leases_dir()
+        && directory.exists()
+    {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                let lease: storage::SessionLease = read_json(&entry.path())?;
+                if lease.is_here() && lease.repo_root.as_deref() == Some(&repo.root) {
+                    bail!(
+                        "workspace is in use by session {}; return it before moving another session here",
+                        lease.session_id
+                    );
+                }
+            }
+        }
+    }
+    let scratch = tempfile::tempdir()?;
+    let tree = snapshot_worktree_tree(root, scratch.path())?;
+    let empty = git(root, &["hash-object", "-t", "tree", "/dev/null"])?;
+    if tree == empty {
+        return Ok(());
+    }
+    let refs = git(
+        root,
+        &["for-each-ref", "--format=%(refname)", SNAPSHOT_REF_PREFIX],
+    )?;
+    for reference in refs
+        .lines()
+        .filter(|r| r.ends_with("/base") || r.ends_with("/outgoing"))
+    {
+        if git(root, &["rev-parse", &format!("{reference}^{{tree}}")])
+            .ok()
+            .as_deref()
+            == Some(&tree)
+        {
+            return Ok(());
+        }
+    }
+    bail!(
+        "workspace contains unreturned changes; refusing to overwrite {}",
+        root.display()
+    )
+}
+
+fn lock_portable_repo(repo: &RepoManifest) -> Result<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(Path::new(&repo.root).join(".git/jcode-cloud-lock"))?;
+    lock.try_lock()
+        .context("another migration is using this workspace")?;
+    Ok(lock)
+}
+
+fn validate_staged_workspace(repo: &RepoManifest, members: &[String]) -> Result<()> {
+    let mut already_active = false;
+    if let Some(directory) = storage::session_leases_dir()
+        && directory.exists()
+    {
+        for entry in std::fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                let lease: storage::SessionLease = read_json(&path)?;
+                if lease.is_here() && lease.repo_root.as_deref() == Some(&repo.root) {
+                    if !members.contains(&lease.session_id) {
+                        bail!("workspace is in use by session {}", lease.session_id);
+                    }
+                    already_active = true;
+                }
+            }
+        }
+    }
+    if !already_active {
+        let root = Path::new(&repo.root);
+        let scratch = tempfile::tempdir()?;
+        let actual = snapshot_worktree_tree(root, scratch.path())?;
+        let expected = git(root, &["rev-parse", &format!("{}^{{tree}}", repo.snapshot)])?;
+        if actual != expected {
+            bail!("staged cloud workspace changed before activation; retry the move");
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -474,17 +680,19 @@ pub(crate) fn run_move(
             });
             if let Some(account) = &auth_account {
                 // Pin an implicit OAuth route to the exact account being transferred.
-                sess.route_api_method = Some(account.route());
+                sess.apply_route(crate::session::Route {
+                    route_api_method: Some(account.route()),
+                    ..sess.route()
+                });
             }
             let auth_accounts = cloud_accounts()?;
             let epoch = storage::read_session_lease(&session_id)
                 .map(|lease| lease.epoch)
                 .unwrap_or(0)
-                .max(sess.migration_epoch)
+                .max(sess.migration_epoch())
                 + 1;
             let working_dir = sess
-                .working_dir
-                .clone()
+                .working_dir()
                 .map(PathBuf::from)
                 .or_else(|| std::env::current_dir().ok())
                 .context("session has no working directory")?;
@@ -516,7 +724,10 @@ pub(crate) fn run_move(
 
             // The shipped transcript: current conversation plus a hidden notice that
             // tells the agent where it now runs and what did not come along.
-            sess.migration_epoch = epoch;
+            sess.apply_lineage(crate::session::Lineage {
+                migration_epoch: epoch,
+                ..sess.lineage()
+            });
             let dangling = dangling_tool_use_ids(&sess);
             append_arrival(&mut sess, &dangling, &host, &arrival_notice(&manifest));
             let session_json = serde_json::to_vec(&sess)?;
@@ -525,6 +736,7 @@ pub(crate) fn run_move(
                 stage.join("manifest.json"),
                 serde_json::to_vec_pretty(&manifest)?,
             )?;
+            std::fs::write(stage.join("portable-workspace-v1"), b"1")?;
             copy_if_exists(&todo_file(&session_id)?, &stage.join("todos.json"))?;
             // Last known account limits, so the cloud UI shows them instantly
             // instead of waiting on fresh usage probes.
@@ -579,7 +791,8 @@ pub(crate) fn run_move(
     })?;
     if let Some(repo) = &repo {
         timed_move_stage("repository bundle", || {
-            create_repo_bundle(repo, &session_id, staging.path(), base.as_deref())
+            let _ = base;
+            create_repo_bundle(repo, &session_id, staging.path(), None)
         })?;
     }
     let tarball = staging.path().join("move.tar");
@@ -595,6 +808,7 @@ pub(crate) fn run_move(
                 "limits.json",
                 "repo.bundle",
                 "ignored.tar",
+                "portable-workspace-v1",
             ],
         )
     })?;
@@ -672,7 +886,9 @@ pub(crate) fn run_move(
                 .map_err(|_| anyhow::anyhow!("router transfer thread panicked"))
                 .and_then(|result| result)
         });
-        let out = out?;
+        let out = out.context(
+            "cloud receive failed; an older cloud jcode may require the original absolute path, update it for portable workspaces",
+        )?;
         let baselines = baselines?;
         if let Some(result) = router_result {
             result?;
@@ -689,11 +905,11 @@ pub(crate) fn run_move(
     if verify.session_id != session_id || verify.epoch != epoch {
         bail!("cloud host staged the wrong session/epoch: {verify:?}");
     }
-    if verify.messages != sess.messages.len() {
+    if verify.messages != sess.message_count() {
         bail!(
             "cloud transcript has {} messages, expected {}",
             verify.messages,
-            sess.messages.len()
+            sess.message_count()
         );
     }
     if let Some(repo) = &repo
@@ -786,7 +1002,9 @@ pub(crate) fn run_move(
     if let Some(repo) = &repo {
         // Ownership has moved. Environment hydration must not turn a successful
         // migration into an apparent failure that invites a second migration.
-        if environment::sync_saved(Path::new(&repo.root), target).is_err() {
+        if environment::sync_saved_handoff(Path::new(&repo.root), target, &session_id, epoch)
+            .is_err()
+        {
             step(
                 "environment",
                 "saved environment requirements need attention on the cloud host; the agent can retry through cloud_environment",
@@ -804,6 +1022,8 @@ pub(crate) struct ReturnReport {
     pub epoch: u64,
     pub messages: usize,
     pub merge: MergeOutcome,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -832,8 +1052,17 @@ pub(crate) fn run_return(
     keep_local_auth: bool,
 ) -> Result<ReturnReport> {
     let session_id = resolve_session_id(session_ref)?;
-    group::reject_member_return(&session_id)?;
+    if let Some(coordinator) = group::return_coordinator(&session_id)? {
+        return group::return_group(
+            &coordinator,
+            &session_id,
+            target,
+            refs_only,
+            keep_local_auth,
+        );
+    }
     let _migration_lock = group::lock_sessions(std::slice::from_ref(&session_id))?;
+    group::reject_member_return(&session_id)?;
     let lease = storage::read_session_lease(&session_id)
         .with_context(|| format!("session {session_id} was never moved"))?;
     let receipt_path = return_state_path(&session_id, lease.epoch, "receipt.json")?;
@@ -846,6 +1075,10 @@ pub(crate) fn run_return(
         (Some(away), _) => away.clone(),
         (None, _) => bail!("session {session_id} already lives here"),
     };
+    let local_working_dir = session::Session::load(&session_id)
+        .context("local session is missing; cannot safely restore its original working directory")?
+        .working_dir()
+        .map(str::to_owned);
     let epoch = lease.epoch + 1;
 
     // ---- export (cloud stops owning at `epoch`) --------------------------
@@ -965,7 +1198,14 @@ pub(crate) fn run_return(
     // ---- conversation: install the cloud transcript ----------------------
     step("session", "installing the cloud transcript locally");
     let mut sess: session::Session = read_json(&stage.join("session.json"))?;
-    sess.migration_epoch = epoch;
+    sess.apply_lineage(crate::session::Lineage {
+        migration_epoch: epoch,
+        ..sess.lineage()
+    });
+    sess.apply_workspace(crate::session::Workspace {
+        working_dir: local_working_dir,
+        ..sess.workspace()
+    });
     let merge_note = match &merge {
         MergeOutcome::Conflicts { files, .. } => format!(
             " Git merge of the cloud work into the local checkout left conflicts in: {}. Resolve them (the cloud side is `{SNAPSHOT_REF_PREFIX}/{session_id}/cloud`) before continuing.",
@@ -982,7 +1222,7 @@ pub(crate) fn run_return(
     append_system_notice(
         &mut sess,
         &format!(
-            "Session returned from cloud host `{host}` to local machine `{}` at {}. Same repo path.{merge_note} Processes you started on the cloud host (dev servers, background tasks, terminals) did not come back. Restart anything you still need.",
+            "Session returned from cloud host `{host}` to local machine `{}` at {}. The original local working directory is restored.{merge_note} Processes you started on the cloud host (dev servers, background tasks, terminals) did not come back. Restart anything you still need.",
             local_host_label(),
             chrono::Utc::now().to_rfc3339(),
         ),
@@ -992,8 +1232,9 @@ pub(crate) fn run_return(
         session_id: session_id.clone(),
         host,
         epoch,
-        messages: sess.messages.len(),
+        messages: sess.message_count(),
         merge,
+        members: Vec::new(),
     };
     // Persist the completion receipt before switching the local lease. A retry
     // can acknowledge the remote fence even after a lost SSH response/crash.
@@ -1136,16 +1377,42 @@ pub(crate) fn run_receive() -> Result<()> {
     }
     let sess: session::Session = read_json(&stage.join("session.json"))?;
 
-    // Restore the repo at the same absolute path.
-    let snapshot = match &manifest.repo {
+    let mapped = if stage.join("portable-workspace-v1").is_file() {
+        manifest
+            .repo
+            .as_ref()
+            .map(|repo| portable_repo(repo, &manifest.source_host, &storage::jcode_dir()?))
+            .transpose()?
+    } else {
+        manifest.repo.clone()
+    };
+    let mut _workspace_lock = None;
+    if stage.join("portable-workspace-v1").is_file()
+        && let Some(repo) = &mapped
+    {
+        reserve_portable_repo(repo)?;
+        _workspace_lock = Some(lock_portable_repo(repo)?);
+        check_portable_repo_available(repo)?;
+        std::fs::write(stage.join("mapped-repo.json"), serde_json::to_vec(repo)?)?;
+    }
+    let snapshot = match &mapped {
         Some(repo) => Some(restore_repo(
             repo,
             &stage.join("repo.bundle"),
             &stage.join("ignored.tar"),
             &manifest.session_id,
-        )?),
+        ).with_context(|| if stage.join("portable-workspace-v1").is_file() {
+            "restore managed cloud workspace"
+        } else {
+            "legacy sender requires the original absolute path; update the sending jcode for portable workspaces"
+        })?),
         None => None,
     };
+    if stage.join("portable-workspace-v1").is_file()
+        && let Some(repo) = &mapped
+    {
+        ensure_portable_cwd(repo)?;
+    }
 
     let dest = inbox.join(format!("{}.{}", manifest.session_id, manifest.epoch));
     let _ = std::fs::remove_dir_all(&dest);
@@ -1154,9 +1421,9 @@ pub(crate) fn run_receive() -> Result<()> {
     let report = ReceiveReport {
         session_id: manifest.session_id,
         epoch: manifest.epoch,
-        messages: sess.messages.len(),
+        messages: sess.message_count(),
         snapshot,
-        repo_root: manifest.repo.map(|r| r.root),
+        repo_root: mapped.map(|r| r.root),
     };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
@@ -1187,8 +1454,42 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
         bail!("no staged move for {session_id} at epoch {epoch}");
     }
     let manifest: MoveManifest = read_json(&dir.join("manifest.json"))?;
-    let sess: session::Session = read_json(&dir.join("session.json"))?;
-    if sess.migration_epoch != epoch {
+    let mut sess: session::Session = read_json(&dir.join("session.json"))?;
+    let mut _workspace_lock = None;
+    let mapped = if dir.join("mapped-repo.json").is_file() {
+        let repo: RepoManifest = read_json(&dir.join("mapped-repo.json"))?;
+        _workspace_lock = Some(lock_portable_repo(&repo)?);
+        validate_staged_workspace(&repo, &[session_id.to_owned()])?;
+        sess.apply_workspace(crate::session::Workspace {
+            working_dir: Some(repo.working_dir.clone()),
+            ..sess.workspace()
+        });
+        save_workspace_mapping(
+            session_id,
+            epoch,
+            manifest
+                .repo
+                .as_ref()
+                .context("missing original repository")?,
+            &repo,
+        )?;
+        append_system_notice(
+            &mut sess,
+            &format!(
+                "Cloud workspace is at {}. The original local repository is at {} and will be restored on return.",
+                repo.root,
+                manifest
+                    .repo
+                    .as_ref()
+                    .map(|r| r.root.as_str())
+                    .unwrap_or("unknown")
+            ),
+        );
+        Some(repo)
+    } else {
+        manifest.repo.clone()
+    };
+    if sess.migration_epoch() != epoch {
         bail!("staged transcript epoch mismatch");
     }
     if let Some(account) = &manifest.auth_account {
@@ -1207,7 +1508,7 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
         session_id: session_id.to_string(),
         epoch,
         away_host: None,
-        repo_root: manifest.repo.as_ref().map(|r| r.root.clone()),
+        repo_root: mapped.as_ref().map(|r| r.root.clone()),
         last_sync_snapshot: manifest.repo.as_ref().map(|r| r.snapshot.clone()),
         last_sync_head: manifest.repo.as_ref().map(|r| r.head.clone()),
         updated_at: chrono::Utc::now().to_rfc3339(),
@@ -1283,8 +1584,7 @@ fn export_return_archive(
             .tempdir()?;
         let stage = staging.path();
         let working_dir = sess
-            .working_dir
-            .clone()
+            .working_dir()
             .map(PathBuf::from)
             .or_else(|| lease.repo_root.clone().map(PathBuf::from));
         let repo = match working_dir {
@@ -1916,6 +2216,45 @@ fn merge_back(
     base_snapshot: Option<&str>,
     refs_only: bool,
 ) -> Result<MergeOutcome> {
+    let plan = plan_merge_back(root, session_id, remote, bundle, base_snapshot, refs_only)?;
+    if let Some(checkout) = &plan.checkout {
+        apply_checkout_merge(root, checkout)?;
+    }
+    Ok(plan.outcome)
+}
+
+#[derive(Serialize, Deserialize)]
+struct ReturnMergePlan {
+    outcome: MergeOutcome,
+    checkout: Option<CheckoutMerge>,
+}
+
+impl From<MergeOutcome> for ReturnMergePlan {
+    fn from(outcome: MergeOutcome) -> Self {
+        Self {
+            outcome,
+            checkout: None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CheckoutMerge {
+    local_head: String,
+    new_head: String,
+    branch: Option<String>,
+    ours: String,
+    tree: String,
+}
+
+fn plan_merge_back(
+    root: &Path,
+    session_id: &str,
+    remote: &RepoManifest,
+    bundle: &Path,
+    base_snapshot: Option<&str>,
+    refs_only: bool,
+) -> Result<ReturnMergePlan> {
     let cloud_ref = format!("{SNAPSHOT_REF_PREFIX}/{session_id}/cloud");
     let cloud_head_ref = format!("{SNAPSHOT_REF_PREFIX}/{session_id}/cloud-head");
     let bundle_str = bundle.to_string_lossy().to_string();
@@ -1934,10 +2273,10 @@ fn merge_back(
     let cloud_snapshot = remote.snapshot.clone();
 
     if base_snapshot == Some(cloud_snapshot.as_str()) {
-        return Ok(MergeOutcome::Unchanged);
+        return Ok(MergeOutcome::Unchanged.into());
     }
     if refs_only {
-        return Ok(MergeOutcome::RefsOnly { cloud_snapshot });
+        return Ok(MergeOutcome::RefsOnly { cloud_snapshot }.into());
     }
 
     // Step 1: commits. If the cloud branch strictly moved ahead of the
@@ -2034,43 +2373,126 @@ fn merge_back(
         return Ok(MergeOutcome::Conflicts {
             cloud_snapshot,
             files: conflicts,
-        });
+        }
+        .into());
     }
 
-    // Apply: move branch (if fast-forwarded), then check out merged tree as
-    // uncommitted changes relative to the new HEAD. `read-tree -m -u` with two
-    // trees refuses to overwrite files that differ from the old tree, so we
-    // go from the "ours" tree we just captured (== current worktree).
-    if new_head != local_head
-        && let Some(branch) = &local_branch
+    Ok(ReturnMergePlan {
+        outcome: MergeOutcome::Applied {
+            cloud_snapshot,
+            branch: local_branch.clone(),
+            head: new_head.clone(),
+        },
+        checkout: Some(CheckoutMerge {
+            local_head,
+            new_head,
+            branch: local_branch,
+            ours,
+            tree,
+        }),
+    })
+}
+
+fn apply_checkout_merge(root: &Path, plan: &CheckoutMerge) -> Result<()> {
+    let staging = tempfile::tempdir()?;
+    let head = git(root, &["rev-parse", "HEAD"])?;
+    let branch = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
+    if branch != plan.branch || (head != plan.local_head && head != plan.new_head) {
+        bail!(
+            "local HEAD or branch changed during cloud return; the cloud work is still in the rescue refs"
+        );
+    }
+    if plan.new_head != plan.local_head {
+        let git_dir = git(root, &["rev-parse", "--absolute-git-dir"])?;
+        let index = staging.path().join("preserve.index");
+        match std::fs::copy(Path::new(&git_dir).join("index"), &index) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let env = [("GIT_INDEX_FILE", index.as_os_str())];
+                git_env(root, &["read-tree", &plan.local_head], &env)?;
+            }
+            Err(error) => return Err(error).context("copy index before cloud return"),
+        }
+        let env = [("GIT_INDEX_FILE", index.as_os_str())];
+        git_env(
+            root,
+            &["read-tree", "-m", &plan.local_head, &plan.new_head],
+            &env,
+        )
+        .context(
+            "cloud commits conflict with the local staged index; no working files were changed",
+        )?;
+    }
+    let current = snapshot_worktree_tree(root, staging.path())?;
+    if current != plan.ours && current != plan.tree {
+        // On restart, each file may be in its original or merged state, but a
+        // third state is a concurrent edit and must not be overwritten.
+        let before = changed_paths(root, &plan.ours, &current)?;
+        let after = changed_paths(root, &plan.tree, &current)?;
+        if !before.is_disjoint(&after) {
+            bail!(
+                "local worktree changed during cloud return; the cloud work is still in the rescue refs"
+            );
+        }
+    }
+    if current != plan.tree {
+        let index = staging.path().join("apply.index");
+        let env = [("GIT_INDEX_FILE", index.as_os_str())];
+        git_env(root, &["read-tree", &current], &env)?;
+        let _ = git_env(root, &["update-index", "-q", "--refresh"], &env);
+        git_env(root, &["read-tree", "-m", "-u", &current, &plan.tree], &env)?;
+    }
+    if plan.new_head != plan.local_head {
+        git(root, &["read-tree", "-m", &plan.local_head, &plan.new_head]).context(
+            "local staged index changed during cloud return; cloud work remains in rescue refs",
+        )?;
+    }
+    if plan.new_head != head
+        && let Some(branch) = &plan.branch
     {
         git(
             root,
             &[
                 "update-ref",
                 &format!("refs/heads/{branch}"),
-                &new_head,
-                &local_head,
+                &plan.new_head,
+                &head,
             ],
         )?;
     }
-    let index = staging.path().join("apply.index");
-    let env = [("GIT_INDEX_FILE", index.as_os_str())];
-    git_env(root, &["read-tree", &ours], &env)?;
-    // A fresh index has no stat data, so every file looks modified. Refresh
-    // it against the worktree (which equals `ours`) so two-way read-tree can
-    // update files safely.
-    let _ = git_env(root, &["update-index", "-q", "--refresh"], &env);
-    git_env(root, &["read-tree", "-m", "-u", &ours, &tree], &env)?;
-    // Real index: reflect new HEAD, keep changes unstaged like before.
-    git(root, &["reset", "--quiet", "--mixed", &new_head])?;
-    // Files deleted by the merge that were untracked locally are handled by
-    // read-tree -u. Report.
-    Ok(MergeOutcome::Applied {
-        cloud_snapshot,
-        branch: local_branch,
-        head: new_head,
-    })
+    Ok(())
+}
+
+fn changed_paths(
+    root: &Path,
+    before: &str,
+    after: &str,
+) -> Result<std::collections::BTreeSet<Vec<u8>>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            before,
+            after,
+            "--",
+        ])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "could not compare Git return trees: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output
+        .stdout
+        .split(|&byte| byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect())
 }
 
 /// Tree object for the current working tree (tracked + untracked, not ignored).
@@ -2269,10 +2691,21 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
                         files.join(", ")
                     ),
                 };
-                println!(
-                    "Returned {} from `{}` ({} messages). Code: {merge}.\n  Resume: jcode --resume {}",
-                    report.session_id, report.host, report.messages, report.session_id
-                );
+                if report.members.is_empty() {
+                    println!(
+                        "Returned {} from `{}` ({} messages). Code: {merge}.\n  Resume: jcode --resume {}",
+                        report.session_id, report.host, report.messages, report.session_id
+                    );
+                } else {
+                    println!(
+                        "Returned {} sessions from `{}` ({} messages): {}. Code: {merge}.\n  Resume: jcode --resume {}",
+                        report.members.len(),
+                        report.host,
+                        report.messages,
+                        report.members.join(", "),
+                        report.session_id
+                    );
+                }
             }
             if attach {
                 let exe = std::env::current_exe()?;
@@ -2326,7 +2759,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             println!("{}", super::cloud_managed::describe(&reply));
             Ok(())
         }
-        C::Proxy => super::cloud_managed::run_proxy(),
+        C::Proxy { machine } => super::cloud_managed::run_proxy(machine),
         C::Credentials {
             provider,
             account,
@@ -2341,6 +2774,21 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             require_completion,
         } => run_export(&session, epoch, require_completion),
         C::CompleteReturn { session, epoch } => complete_return(&session, epoch),
+        C::GroupExport {
+            coordinator,
+            epoch,
+            transfer,
+        } => {
+            let bytes = group::export_group(coordinator, epoch, transfer)?;
+            std::io::stdout().write_all(&bytes)?;
+            std::io::stdout().flush()?;
+            Ok(())
+        }
+        C::GroupCompleteReturn {
+            coordinator,
+            epoch,
+            transfer,
+        } => group::complete_group_return(coordinator, epoch, transfer),
         C::CancelReturn { session, epoch } => {
             group::reject_member_return(&session)?;
             let _migration_lock = group::lock_sessions(std::slice::from_ref(&session))?;
@@ -2350,7 +2798,10 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
                 bail!("cloud return can no longer be cancelled");
             }
             let mut sess = session::Session::load(&session)?;
-            sess.migration_epoch = epoch;
+            sess.apply_lineage(crate::session::Lineage {
+                migration_epoch: epoch,
+                ..sess.lineage()
+            });
             let empty = tempfile::tempdir()?;
             install_session(&sess, empty.path())?;
             // Cancellation is serialized with export. Discard the old snapshot
@@ -2412,7 +2863,7 @@ fn resolve_session_id(session_ref: Option<&str>) -> Result<String> {
 }
 
 fn install_session(sess: &session::Session, stage: &Path) -> Result<()> {
-    let path = session::session_path(&sess.id)?;
+    let path = session::session_path(sess.id())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -2423,7 +2874,7 @@ fn install_session(sess: &session::Session, stage: &Path) -> Result<()> {
     storage::write_json(&path, sess)?;
     let todos = stage.join("todos.json");
     if todos.is_file() {
-        let dest = todo_file(&sess.id)?;
+        let dest = todo_file(sess.id())?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -2434,7 +2885,7 @@ fn install_session(sess: &session::Session, stage: &Path) -> Result<()> {
     }
     let memory = stage.join("project_memory.json");
     if memory.is_file()
-        && let Some(dir) = sess.working_dir.as_deref()
+        && let Some(dir) = sess.working_dir()
     {
         let dest = crate::memory::project_memory_file(Path::new(dir))?;
         if !dest.exists() {
@@ -2447,149 +2898,9 @@ fn install_session(sess: &session::Session, stage: &Path) -> Result<()> {
     Ok(())
 }
 
-fn append_system_notice(sess: &mut session::Session, text: &str) {
-    append_arrival(sess, &[], "", text);
-}
-
-/// Tool calls in the final assistant message that have no result yet. When
-/// the agent itself runs `/cloud` mid-turn, its own bash call is one of these.
-fn dangling_tool_use_ids(sess: &session::Session) -> Vec<String> {
-    use crate::message::{ContentBlock, Role};
-    let Some(last_assistant) = sess
-        .messages
-        .iter()
-        .rposition(|m| m.role == Role::Assistant)
-    else {
-        return Vec::new();
-    };
-    let answered: std::collections::HashSet<&str> = sess.messages[last_assistant + 1..]
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| match b {
-            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
-            _ => None,
-        })
-        .collect();
-    sess.messages[last_assistant]
-        .content
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, .. } if !answered.contains(id.as_str()) => Some(id.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn append_arrival(sess: &mut session::Session, dangling: &[String], host: &str, text: &str) {
-    let mut blocks: Vec<crate::message::ContentBlock> = dangling
-        .iter()
-        .map(|id| crate::message::ContentBlock::ToolResult {
-            tool_use_id: id.clone(),
-            content: format!(
-                "jcode cloud move completed. This session now runs on cloud host `{host}`. This tool call was interrupted by the move; rerun it here if its result still matters."
-            ),
-            is_error: None,
-        })
-        .collect();
-    blocks.push(crate::message::ContentBlock::Text {
-        text: format!("<system-reminder>\n{text}\n</system-reminder>"),
-        cache_control: None,
-    });
-    // Tool results must stay provider-visible and paired with their calls.
-    let role = dangling
-        .is_empty()
-        .then_some(session::StoredDisplayRole::System);
-    sess.add_message_with_display_role(crate::message::Role::User, blocks, role);
-}
-
-fn arrival_context(manifest: &MoveManifest) -> Vec<String> {
-    let mut lines = vec![format!(
-        "This session was moved from `{}` to cloud host `{}` at {} (migration epoch {}). You are now running on the cloud host. The conversation, todos and project memory came along.",
-        manifest.source_host, manifest.target_host, manifest.created_at, manifest.epoch
-    )];
-    if let Some(repo) = &manifest.repo {
-        lines.push(format!(
-            "The repository is restored at the same path `{}` on branch `{}` at {}{}. Paths in earlier messages are still valid.",
-            repo.root,
-            repo.branch.as_deref().unwrap_or("(detached)"),
-            &repo.head[..repo.head.len().min(12)],
-            if repo.dirty {
-                ", with the same uncommitted and untracked changes"
-            } else {
-                ""
-            }
-        ));
-        if !repo.ignored_files.is_empty() {
-            lines.push(format!(
-                "Ignored files copied: {}.",
-                repo.ignored_files.join(", ")
-            ));
-        }
-        lines.push("Build caches (target/, node_modules/, etc.) did not come along. The first build here will be cold. Install dependencies if a command fails for that reason.".to_string());
-    }
-    if !manifest.toolchain_hints.is_empty() {
-        lines.push(format!(
-            "Toolchain hints from the repo: {}. Check these tools exist on this host before relying on them.",
-            manifest.toolchain_hints.join(", ")
-        ));
-    }
-    if !manifest.not_transferred.is_empty() {
-        lines.push(format!(
-            "These were running locally and did NOT move: {}. Restart them here if you still need them.",
-            manifest.not_transferred.join("; ")
-        ));
-    }
-    if !manifest.mcp_servers.is_empty() {
-        lines.push(format!(
-            "Local MCP servers ({}) are not connected here unless this host configures them too.",
-            manifest.mcp_servers.join(", ")
-        ));
-    }
-    lines
-}
-
-fn arrival_notice(manifest: &MoveManifest) -> String {
-    let mut lines = arrival_context(manifest);
-    lines.push("There is no local display, desktop, browser or ssh-agent on this host. Keep working on the task exactly where you left off. The user can bring the session back with /local (`jcode cloud return`). Git will merge your work with any local edits.".to_string());
-    lines.push(crate::cloud_environment::migration_guidance(
-        &manifest.session_id,
-    ));
-    lines.join("\n")
-}
-
-fn describe_local_only_state(session_id: &str) -> Vec<String> {
-    let mut items = Vec::new();
-    let dir = std::env::temp_dir().join("jcode-bg-tasks");
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Ok(raw) = std::fs::read(&path) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw) else {
-                continue;
-            };
-            if value.get("session_id").and_then(|v| v.as_str()) != Some(session_id) {
-                continue;
-            }
-            if value.get("status").and_then(|v| v.as_str()) != Some("running") {
-                continue;
-            }
-            let name = value
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .or_else(|| value.get("tool_name").and_then(|v| v.as_str()))
-                .unwrap_or("task");
-            let id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or("?");
-            items.push(format!("background task {id} ({name})"));
-        }
-    }
-    items
-}
-
+#[path = "cloud_move_arrival.rs"]
+mod arrival;
+use arrival::*;
 fn toolchain_hints(root: Option<&Path>) -> Vec<String> {
     let Some(root) = root else { return Vec::new() };
     [

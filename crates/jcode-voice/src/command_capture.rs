@@ -6,7 +6,7 @@
 //! A custom `[dictation] recorder` command may be any shell command that
 //! prints that format. The recorder is started only after an explicit press,
 //! and stop, cancel, drop, or the five-minute cap terminates it.
-use super::{MAX_RECORDING_DURATION, PcmRecording, VoiceError};
+use super::{MAX_STREAMING_DURATION, PcmRecording, VoiceError};
 use std::{
     io::Read,
     process::{Child, Command, Stdio},
@@ -21,7 +21,7 @@ use std::{
 
 /// 100 ms of 16 kHz audio per chunk, the same cadence as native capture.
 const CHUNK_SAMPLES: usize = 1600;
-const MAX_SAMPLES: usize = 16000 * MAX_RECORDING_DURATION.as_secs() as usize;
+const MAX_SAMPLES: usize = 16000 * MAX_STREAMING_DURATION.as_secs() as usize;
 /// A recorder that prints nothing this long after starting is treated as
 /// broken, so the next candidate can be tried.
 const FIRST_AUDIO_TIMEOUT: Duration = Duration::from_secs(3);

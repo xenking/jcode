@@ -10,7 +10,7 @@ impl App {
         self.copy_selection_dragging = false;
         self.copy_selection_pending_anchor = None;
         self.diff_pane_focus = false;
-        self.diagram_focus = false;
+        self.diagram.blur();
     }
 
     pub(super) fn exit_copy_selection_mode(&mut self) {
@@ -444,6 +444,11 @@ impl App {
                 self.copy_current_selection_to_clipboard();
                 true
             }
+            // In transcript selection mode, expand the swarm row under the cursor.
+            KeyCode::Char('e') if modifiers.is_empty() => self
+                .copy_selection_cursor
+                .and_then(crate::tui::ui::chat_message_index_from_copy_point)
+                .is_some_and(|index| self.toggle_swarm_message_expand(index)),
             KeyCode::Char('a') if !modifiers.contains(KeyModifiers::CONTROL) => {
                 self.select_all_in_copy_mode();
                 true

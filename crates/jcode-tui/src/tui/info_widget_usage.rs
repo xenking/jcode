@@ -141,12 +141,11 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
 /// Masked account email on the bottom-right border. The top border already
 /// holds the provider title, and the usual ~29-column widget cannot fit both;
 /// the lone footer slot truncates with an ellipsis instead of wrapping.
-fn with_account_hint(mut framed: Framed, info: &UsageInfo) -> Framed {
+fn with_account_hint(framed: Framed, info: &UsageInfo) -> Framed {
     match info.account_hint.as_deref().filter(|hint| !hint.is_empty()) {
-        Some(hint) => {
-            framed.footer = None;
-            framed.footer_right(frame::dim(hint.to_string()))
-        }
+        Some(hint) => framed
+            .without_footer()
+            .footer_right(frame::dim(hint.to_string())),
         None => framed,
     }
 }
@@ -286,32 +285,6 @@ const LABEL_WIDTH: usize = 7;
 /// length instead of each stretching to its own label column.
 const CARD_MAX_BAR_WIDTH: usize = 16;
 
-/// The same limit bar and percentage as the widget, without its label column.
-pub(crate) fn render_inline_limit_bar(
-    left_pct: u8,
-    cells: u16,
-    display_used: bool,
-) -> Vec<Span<'static>> {
-    let left_pct = left_pct.min(100);
-    let suffix_width = if display_used {
-        format!(" {}% used", 100 - left_pct).len()
-    } else {
-        format!(" {left_pct}% left").len()
-    } as u16;
-    render_labeled_bar(
-        "",
-        100 - left_pct,
-        left_pct,
-        None,
-        LABEL_WIDTH as u16 + cells.min(12) + suffix_width,
-        display_used,
-    )
-    .spans
-    .into_iter()
-    .skip(1)
-    .collect()
-}
-
 pub(crate) fn render_labeled_bar(
     label: &str,
     used_pct: u8,
@@ -335,9 +308,9 @@ pub(crate) fn render_labeled_bar(
 
 /// Color for a limit with `left_pct` remaining, shared by every usage bar.
 pub(crate) fn limit_color(left_pct: u8) -> Color {
-    if left_pct <= 20 {
+    if left_pct <= 10 {
         rgb(255, 100, 100)
-    } else if left_pct <= 50 {
+    } else if left_pct <= 30 {
         rgb(255, 200, 100)
     } else {
         rgb(100, 200, 100)
@@ -484,31 +457,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inline_limit_bar_reuses_widget_colors_and_compacts_without_bar() {
-        for (left, expected_color) in [
-            (100, rgb(100, 200, 100)),
-            (51, rgb(100, 200, 100)),
-            (50, rgb(255, 200, 100)),
-            (21, rgb(255, 200, 100)),
-            (20, rgb(255, 100, 100)),
-            (0, rgb(255, 100, 100)),
-        ] {
-            for used in [false, true] {
-                let spans = render_inline_limit_bar(left, 4, used);
-                assert_eq!(
-                    spans[0].content.chars().count() + spans[1].content.chars().count(),
-                    4
-                );
-                assert_eq!(spans[0].style.fg, Some(expected_color));
-                assert_eq!(spans[2].style.fg, Some(expected_color));
-                let compact = render_inline_limit_bar(left, 0, used);
-                assert!(compact[0].content.is_empty() && compact[1].content.is_empty());
-                assert_eq!(compact[2], spans[2]);
-            }
-        }
-    }
-
-    #[test]
     fn usage_footer_metadata_covers_provider_paths() {
         for provider in [
             UsageProvider::Anthropic,
@@ -565,6 +513,20 @@ mod tests {
     }
 
     #[test]
+    fn usage_bar_color_changes_at_seventy_and_ninety_percent_used() {
+        for (used, expected) in [
+            (0, rgb(100, 200, 100)),
+            (69, rgb(100, 200, 100)),
+            (70, rgb(255, 200, 100)),
+            (89, rgb(255, 200, 100)),
+            (90, rgb(255, 100, 100)),
+            (100, rgb(255, 100, 100)),
+        ] {
+            assert_eq!(limit_color(100 - used), expected, "{used}% used");
+        }
+    }
+
+    #[test]
     fn usage_bar_shows_reset_countdown_before_exhaustion() {
         let text = line_text(&render_labeled_bar(
             "5-hour",
@@ -603,7 +565,7 @@ mod tests {
 
         assert!(line_text(&left).contains("15% left"));
         assert!(line_text(&used).contains("85% used"));
-        assert_eq!(left.spans[1].style.fg, Some(rgb(255, 100, 100)));
+        assert_eq!(left.spans[1].style.fg, Some(rgb(255, 200, 100)));
         assert_eq!(used.spans[1].style.fg, left.spans[1].style.fg);
     }
 

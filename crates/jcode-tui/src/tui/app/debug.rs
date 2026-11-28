@@ -1,80 +1,6 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
-fn percentile_ms(samples_ms: &[f64], percentile: f64) -> f64 {
-    if samples_ms.is_empty() {
-        return 0.0;
-    }
-    let percentile = percentile.clamp(0.0, 1.0);
-    let rank = ((samples_ms.len() - 1) as f64 * percentile).round() as usize;
-    samples_ms[rank.min(samples_ms.len() - 1)]
-}
-
-fn summarize_mermaid_ui_bench(
-    samples: &[MermaidUiBenchSample],
-    protocol_supported: bool,
-    protocol: Option<String>,
-) -> MermaidUiBenchSummary {
-    let mut elapsed_ms = 0.0;
-    let mut first_worker_render_frame = None;
-    let mut first_protocol_render_frame = None;
-    let mut first_deferred_idle_frame = None;
-    let mut pending_frames = 0usize;
-    let mut protocol_render_frames = 0usize;
-    let mut protocol_rebuild_frames = 0usize;
-    let mut saw_pending = false;
-    let mut time_to_first_worker_render_ms = None;
-    let mut time_to_first_protocol_render_ms = None;
-    let mut time_to_deferred_idle_ms = None;
-
-    for sample in samples {
-        elapsed_ms += sample.frame_ms;
-        if sample.deferred_pending_after > 0 {
-            saw_pending = true;
-            pending_frames += 1;
-        }
-        if first_worker_render_frame.is_none() && sample.deferred_worker_renders > 0 {
-            first_worker_render_frame = Some(sample.frame);
-            time_to_first_worker_render_ms = Some(elapsed_ms);
-        }
-        let protocol_rendered = sample.image_state_hits > 0
-            || sample.image_state_misses > 0
-            || sample.fit_state_reuse_hits > 0
-            || sample.fit_protocol_rebuilds > 0
-            || sample.viewport_state_reuse_hits > 0
-            || sample.viewport_protocol_rebuilds > 0;
-        if protocol_rendered {
-            protocol_render_frames += 1;
-            if first_protocol_render_frame.is_none() {
-                first_protocol_render_frame = Some(sample.frame);
-                time_to_first_protocol_render_ms = Some(elapsed_ms);
-            }
-        }
-        if sample.fit_protocol_rebuilds > 0 || sample.viewport_protocol_rebuilds > 0 {
-            protocol_rebuild_frames += 1;
-        }
-        if saw_pending && first_deferred_idle_frame.is_none() && sample.deferred_pending_after == 0
-        {
-            first_deferred_idle_frame = Some(sample.frame);
-            time_to_deferred_idle_ms = Some(elapsed_ms);
-        }
-    }
-
-    MermaidUiBenchSummary {
-        protocol_supported,
-        protocol,
-        pending_frames,
-        protocol_render_frames,
-        protocol_rebuild_frames,
-        first_worker_render_frame,
-        first_protocol_render_frame,
-        first_deferred_idle_frame,
-        time_to_first_worker_render_ms,
-        time_to_first_protocol_render_ms,
-        time_to_deferred_idle_ms,
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct DebugSnapshot {
     state: serde_json::Value,
@@ -128,37 +54,6 @@ pub(super) struct DebugRunReport {
     ok: bool,
     steps: Vec<DebugStepResult>,
     assertions: Vec<DebugAssertResult>,
-}
-
-fn estimate_display_message_bytes(message: &DisplayMessage) -> usize {
-    message.role.len()
-        + message.content.len()
-        + message
-            .tool_calls
-            .iter()
-            .map(|call| call.len())
-            .sum::<usize>()
-        + message.title.as_ref().map(|title| title.len()).unwrap_or(0)
-        + message
-            .tool_data
-            .as_ref()
-            .map(crate::process_memory::estimate_json_bytes)
-            .unwrap_or(0)
-}
-
-fn estimate_string_vec_bytes(values: &[String]) -> usize {
-    values.iter().map(|value| value.capacity()).sum()
-}
-
-fn estimate_pair_vec_bytes(values: &[(String, usize)]) -> usize {
-    values.iter().map(|(name, _)| name.capacity()).sum()
-}
-
-fn estimate_pending_images_bytes(values: &[(String, String)]) -> usize {
-    values
-        .iter()
-        .map(|(media_type, data)| media_type.capacity() + data.capacity())
-        .sum()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -282,179 +177,6 @@ pub(super) struct MermaidUiBenchSummary {
     time_to_deferred_idle_ms: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct DebugEvent {
-    at_ms: u64,
-    kind: String,
-    detail: String,
-}
-
-pub(super) struct DebugTrace {
-    pub(super) enabled: bool,
-    pub(super) started_at: Instant,
-    pub(super) events: Vec<DebugEvent>,
-}
-
-impl DebugTrace {
-    pub(super) fn new() -> Self {
-        Self {
-            enabled: false,
-            started_at: Instant::now(),
-            events: Vec::new(),
-        }
-    }
-
-    pub(super) fn record(&mut self, kind: &str, detail: String) {
-        if !self.enabled {
-            return;
-        }
-        let at_ms = self.started_at.elapsed().as_millis() as u64;
-        self.events.push(DebugEvent {
-            at_ms,
-            kind: kind.to_string(),
-            detail,
-        });
-    }
-}
-
-const LARGE_DISPLAY_BLOB_THRESHOLD_BYTES: usize = 16 * 1024;
-
-#[derive(Default)]
-struct ProviderMessageMemoryStats {
-    content_blocks: usize,
-    text_bytes: usize,
-    reasoning_bytes: usize,
-    tool_use_input_json_bytes: usize,
-    tool_result_bytes: usize,
-    image_data_bytes: usize,
-    openai_compaction_bytes: usize,
-    large_blob_count: usize,
-    large_blob_bytes: usize,
-    large_tool_result_count: usize,
-    large_tool_result_bytes: usize,
-    max_block_bytes: usize,
-}
-
-impl ProviderMessageMemoryStats {
-    fn record_bytes(&mut self, bytes: usize) {
-        self.max_block_bytes = self.max_block_bytes.max(bytes);
-        if bytes >= LARGE_DISPLAY_BLOB_THRESHOLD_BYTES {
-            self.large_blob_count += 1;
-            self.large_blob_bytes += bytes;
-        }
-    }
-
-    fn record_message(&mut self, message: &crate::message::Message) {
-        for block in &message.content {
-            self.content_blocks += 1;
-            match block {
-                crate::message::ContentBlock::Text { text, .. } => {
-                    self.text_bytes += text.len();
-                    self.record_bytes(text.len());
-                }
-                crate::message::ContentBlock::Reasoning { text }
-                | crate::message::ContentBlock::ReasoningTrace { text } => {
-                    self.reasoning_bytes += text.len();
-                    self.record_bytes(text.len());
-                }
-                crate::message::ContentBlock::AnthropicThinking {
-                    thinking,
-                    signature,
-                } => {
-                    let bytes = thinking.len() + signature.len();
-                    self.reasoning_bytes += bytes;
-                    self.record_bytes(bytes);
-                }
-                crate::message::ContentBlock::OpenAIReasoning {
-                    id,
-                    summary,
-                    encrypted_content,
-                    status,
-                } => {
-                    let bytes = id.len()
-                        + summary.iter().map(String::len).sum::<usize>()
-                        + encrypted_content.as_ref().map(String::len).unwrap_or(0)
-                        + status.as_ref().map(String::len).unwrap_or(0);
-                    self.reasoning_bytes += bytes;
-                    self.record_bytes(bytes);
-                }
-                crate::message::ContentBlock::ToolUse { input, .. } => {
-                    let bytes = crate::process_memory::estimate_json_bytes(input);
-                    self.tool_use_input_json_bytes += bytes;
-                    self.record_bytes(bytes);
-                }
-                crate::message::ContentBlock::ToolResult { content, .. } => {
-                    self.tool_result_bytes += content.len();
-                    if content.len() >= LARGE_DISPLAY_BLOB_THRESHOLD_BYTES {
-                        self.large_tool_result_count += 1;
-                        self.large_tool_result_bytes += content.len();
-                    }
-                    self.record_bytes(content.len());
-                }
-                crate::message::ContentBlock::Image { data, .. } => {
-                    self.image_data_bytes += data.len();
-                    self.record_bytes(data.len());
-                }
-                crate::message::ContentBlock::OpenAICompaction { encrypted_content } => {
-                    self.openai_compaction_bytes += encrypted_content.len();
-                    self.record_bytes(encrypted_content.len());
-                }
-                crate::message::ContentBlock::ToolReference { tool_name, .. } => {
-                    self.record_bytes(tool_name.len());
-                }
-                crate::message::ContentBlock::ProviderNative { item, .. } => {
-                    let bytes = crate::process_memory::estimate_json_bytes(item);
-                    self.tool_result_bytes += bytes;
-                    self.record_bytes(bytes);
-                }
-            }
-        }
-    }
-
-    fn payload_text_bytes(&self) -> usize {
-        self.text_bytes
-            + self.reasoning_bytes
-            + self.tool_result_bytes
-            + self.image_data_bytes
-            + self.openai_compaction_bytes
-    }
-}
-
-#[derive(Default)]
-struct DisplayMessageMemoryStats {
-    role_bytes: usize,
-    content_bytes: usize,
-    tool_call_text_bytes: usize,
-    title_bytes: usize,
-    tool_data_json_bytes: usize,
-    large_content_count: usize,
-    large_content_bytes: usize,
-    max_content_bytes: usize,
-}
-
-impl DisplayMessageMemoryStats {
-    fn record_message(&mut self, message: &DisplayMessage) {
-        self.role_bytes += message.role.len();
-        self.content_bytes += message.content.len();
-        self.tool_call_text_bytes += message
-            .tool_calls
-            .iter()
-            .map(|call| call.len())
-            .sum::<usize>();
-        self.title_bytes += message.title.as_ref().map(|title| title.len()).unwrap_or(0);
-        self.tool_data_json_bytes += message
-            .tool_data
-            .as_ref()
-            .map(crate::process_memory::estimate_json_bytes)
-            .unwrap_or(0);
-        self.max_content_bytes = self.max_content_bytes.max(message.content.len());
-        if message.content.len() >= LARGE_DISPLAY_BLOB_THRESHOLD_BYTES {
-            self.large_content_count += 1;
-            self.large_content_bytes += message.content.len();
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(super) struct ScrollTestState {
     display_messages: Vec<DisplayMessage>,
@@ -478,22 +200,15 @@ pub(super) struct ScrollTestState {
     status: ProcessingStatus,
     processing_started: Option<Instant>,
     status_notice: Option<(String, Instant)>,
-    diagram_mode: crate::config::DiagramDisplayMode,
-    diagram_focus: bool,
-    diagram_index: usize,
-    diagram_scroll_x: i32,
-    diagram_scroll_y: i32,
-    diagram_pane_ratio: u8,
-    diagram_pane_ratio_from: u8,
-    diagram_pane_ratio_target: u8,
-    diagram_pane_anim_start: Option<Instant>,
-    diagram_pane_enabled: bool,
-    diagram_pane_position: crate::config::DiagramPanePosition,
-    diagram_zoom: u8,
+    diagram: super::diagram_pane::DiagramSnapshot,
 }
 
 impl ScrollTestState {
-    fn capture(app: &App) -> Self {
+    fn capture(app: &mut App, mode: Option<crate::config::DiagramDisplayMode>) -> Self {
+        let diagram = match mode {
+            Some(mode) => app.diagram.begin_benchmark(mode),
+            None => app.diagram.snapshot(),
+        };
         Self {
             display_messages: app.display_messages.clone(),
             display_messages_version: app.display_messages_version,
@@ -507,7 +222,7 @@ impl ScrollTestState {
             diff_pane_focus: app.diff_pane_focus,
             diff_pane_auto_scroll: app.diff_pane_auto_scroll,
             is_processing: app.is_processing,
-            streaming_text: app.streaming.streaming_text.clone(),
+            streaming_text: app.streaming.streaming_text.to_string(),
             queued_messages: app.queued_messages.clone(),
             interleave_message: app.interleave_message.clone(),
             pending_soft_interrupts: app.pending_soft_interrupts.clone(),
@@ -516,18 +231,7 @@ impl ScrollTestState {
             status: app.status.clone(),
             processing_started: app.processing_started,
             status_notice: app.status_notice.clone(),
-            diagram_mode: app.diagram_mode,
-            diagram_focus: app.diagram_focus,
-            diagram_index: app.diagram_index,
-            diagram_scroll_x: app.diagram_scroll_x,
-            diagram_scroll_y: app.diagram_scroll_y,
-            diagram_pane_ratio: app.diagram_pane_ratio,
-            diagram_pane_ratio_from: app.diagram_pane_ratio_from,
-            diagram_pane_ratio_target: app.diagram_pane_ratio_target,
-            diagram_pane_anim_start: app.diagram_pane_anim_start,
-            diagram_pane_enabled: app.diagram_pane_enabled,
-            diagram_pane_position: app.diagram_pane_position,
-            diagram_zoom: app.diagram_zoom,
+            diagram,
         }
     }
 
@@ -553,18 +257,7 @@ impl ScrollTestState {
         app.status = self.status;
         app.processing_started = self.processing_started;
         app.status_notice = self.status_notice;
-        app.diagram_mode = self.diagram_mode;
-        app.diagram_focus = self.diagram_focus;
-        app.diagram_index = self.diagram_index;
-        app.diagram_scroll_x = self.diagram_scroll_x;
-        app.diagram_scroll_y = self.diagram_scroll_y;
-        app.diagram_pane_ratio = self.diagram_pane_ratio;
-        app.diagram_pane_ratio_from = self.diagram_pane_ratio_from;
-        app.diagram_pane_ratio_target = self.diagram_pane_ratio_target;
-        app.diagram_pane_anim_start = self.diagram_pane_anim_start;
-        app.diagram_pane_enabled = self.diagram_pane_enabled;
-        app.diagram_pane_position = self.diagram_pane_position;
-        app.diagram_zoom = self.diagram_zoom;
+        app.diagram.restore(&self.diagram);
     }
 }
 
@@ -596,6 +289,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
         app.set_status_notice("Visual debug: ON");
         return true;
@@ -611,6 +306,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
         app.set_status_notice("Visual debug: OFF");
         return true;
@@ -635,6 +332,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
+                    ask: None,
                 });
             }
             Err(e) => {
@@ -645,6 +344,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
+                    ask: None,
                 });
             }
         }
@@ -675,6 +376,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -690,6 +393,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -711,6 +416,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
+                ask: None,
             });
         }
         return true;
@@ -730,6 +437,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -776,6 +485,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -790,6 +501,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
         return true;
     }

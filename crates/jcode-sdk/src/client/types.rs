@@ -17,6 +17,8 @@ pub struct RunOptions {
 /// Runtime identity and protocol metadata returned by [`JcodeClient::get_runtime_info`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeInfo {
+    pub speed_mode: jcode_harness_api::SpeedMode,
+    pub speed_options: Vec<jcode_harness_api::SpeedOption>,
     pub server: String,
     pub protocol_version: u32,
     pub capabilities: Vec<String>,

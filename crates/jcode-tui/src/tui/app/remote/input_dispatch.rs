@@ -1,5 +1,6 @@
 use super::super::{PendingRemoteMessage, PendingSplitPrompt};
 use super::*;
+#[cfg(test)]
 use crate::tui::app as app_mod;
 
 #[expect(
@@ -16,31 +17,153 @@ pub(in crate::tui::app) async fn begin_remote_send(
     auto_retry: bool,
     retry_attempts: u8,
 ) -> Result<u64> {
-    app.prepare_cloud_environment(remote).await?;
+    begin_remote_send_with_attachments(
+        app,
+        remote,
+        content.clone(),
+        images,
+        Vec::new(),
+        content,
+        is_system,
+        system_reminder,
+        auto_retry,
+        retry_attempts,
+        false,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Carry voice origin through remote retries"
+)]
+pub(in crate::tui::app) async fn begin_remote_send_with_origin(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    content: String,
+    images: Vec<(String, String)>,
+    is_system: bool,
+    system_reminder: Option<String>,
+    auto_retry: bool,
+    retry_attempts: u8,
+    jarvis_voice: bool,
+) -> Result<u64> {
+    begin_remote_send_with_attachments(
+        app,
+        remote,
+        content.clone(),
+        images,
+        Vec::new(),
+        content,
+        is_system,
+        system_reminder,
+        auto_retry,
+        retry_attempts,
+        jarvis_voice,
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Carry wire and retry payloads independently"
+)]
+async fn begin_remote_send_with_attachments(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    content: String,
+    images: Vec<(String, String)>,
+    attachments: Vec<jcode_session_types::Attachment>,
+    retry_content: String,
+    is_system: bool,
+    system_reminder: Option<String>,
+    auto_retry: bool,
+    retry_attempts: u8,
+    jarvis_voice: bool,
+) -> Result<u64> {
+    if let Err(error) = app.prepare_local_tools(remote).await {
+        crate::logging::info(&format!(
+            "RECOVERY_SEND_FAILED session_id={:?} previous_request_id={:?} request_id=unassigned phase=prepare content_bytes={} images={} retry_attempts={}",
+            app.remote_session_id,
+            app.current_message_id,
+            content.len(),
+            images.len(),
+            retry_attempts
+        ));
+        return Err(error);
+    }
+    // Reload delivery is idempotent on the server: an exact repeat of its
+    // hidden reminder is acknowledged with Done without running the agent.
+    // Delivery does not imply successful execution, though. A provider failure
+    // (including a fallback route switch) must resume that accepted turn rather
+    // than replay the original delivery token. Keep the instructions, but mark
+    // this as an execution retry. Do this at the shared send boundary so both
+    // fallback resends and same-route retries behave identically.
+    const EXECUTION_RETRY_PREFIX: &str = "<system-reminder>Retry the interrupted execution of the previous turn. Continue from the current conversation and completed tool results without repeating completed work.</system-reminder>\n\n";
     let recovery = app.cloud_recovery_reminder();
     let system_reminder = match (system_reminder, recovery.as_ref()) {
         (Some(reminder), Some(recovery)) => Some(format!("{reminder}\n\n{recovery}")),
         (None, Some(recovery)) => Some(recovery.clone()),
         (reminder, None) => reminder,
     };
+    // Classify the final wire reminder, including cloud recovery context. A
+    // cloud-only continuation otherwise bypasses the execution-retry marker.
+    let system_reminder = system_reminder.map(|reminder| {
+        if retry_attempts > 0
+            && is_system
+            && content.trim().is_empty()
+            && images.is_empty()
+            && !reminder.starts_with(EXECUTION_RETRY_PREFIX)
+        {
+            format!("{EXECUTION_RETRY_PREFIX}{reminder}")
+        } else {
+            reminder
+        }
+    });
     let msg_id = remote
-        .send_message_with_images_reminder_and_skill(
+        .send_message_with_attachments_and_origin(
             content.clone(),
             images.clone(),
+            attachments,
             system_reminder.clone(),
             app.active_skill.clone(),
+            jarvis_voice,
         )
-        .await?;
+        .await;
+    let msg_id = match msg_id {
+        Ok(id) => id,
+        Err(error) => {
+            // Errors can contain wire data, so keep diagnostics metadata-only.
+            crate::logging::info(&format!(
+                "RECOVERY_SEND_FAILED session_id={:?} request_id=unassigned previous_request_id={:?} phase=write content_bytes={} images={} retry_attempts={}",
+                app.remote_session_id,
+                app.current_message_id,
+                content.len(),
+                images.len(),
+                retry_attempts
+            ));
+            return Err(error);
+        }
+    };
+    crate::logging::info(&format!(
+        "RECOVERY_SEND_SUBMITTED session_id={:?} request_id={} content_bytes={} images={} retry_attempts={} is_system={}",
+        app.remote_session_id,
+        msg_id,
+        content.len(),
+        images.len(),
+        retry_attempts,
+        is_system
+    ));
     if !is_system {
         app.publish_user_image_previews(&images);
     }
     if recovery.is_some() {
-        app.cloud_recovery_context = None;
-        app.cloud_recovery_auto_pending = false;
+        app.cloud_recovery.clear_after_delivery();
     }
     app.current_message_id = Some(msg_id);
     app.deferred_stream_done_id = None;
     app.is_processing = true;
+    app.reset_processing_interrupts();
     app.status = ProcessingStatus::Sending;
     app.status_detail = None;
     app.processing_started = Some(Instant::now());
@@ -62,7 +185,8 @@ pub(in crate::tui::app) async fn begin_remote_send(
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content,
+        jarvis_voice,
+        content: retry_content,
         images,
         is_system,
         system_reminder,
@@ -80,9 +204,17 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     app: &mut App,
     prepared: input::PreparedInput,
 ) {
+    crate::logging::info(&format!(
+        "RECOVERY_DRAFT_RESTORED session_id={:?} request_id={:?} content_bytes={} images={}",
+        app.remote_session_id,
+        app.current_message_id,
+        prepared.raw_input.len(),
+        prepared.images.len()
+    ));
     app.input = prepared.raw_input;
     app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
+    app.pasted_contents = prepared.pasted_contents;
 }
 
 pub(in crate::tui::app) fn history_matches_pending_startup_prompt(app: &App) -> bool {
@@ -122,6 +254,14 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     prepared: input::PreparedInput,
 ) -> Result<()> {
     if app.remote_model_switch_in_flight || app.auth_catalog_refresh_pending {
+        crate::logging::info(&format!(
+            "RECOVERY_SUBMISSION_DEFERRED session_id={:?} request_id={:?} reason=model_setup content_bytes={} images={} replacing_pending={}",
+            app.remote_session_id,
+            app.current_message_id,
+            prepared.expanded.len(),
+            prepared.images.len(),
+            app.pending_prompt_after_model_switch.is_some()
+        ));
         app.pending_prompt_after_model_switch = Some(prepared);
         app.set_status_notice(if app.auth_catalog_refresh_pending {
             "Prompt queued until model setup completes"
@@ -139,9 +279,14 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     // `process_remote_followups` dispatch it once history is loaded - the same
     // gating that startup auto-submit already relies on.
     if !remote.has_loaded_history() {
-        crate::logging::info(
-            "Deferring manually submitted prompt until remote history loads (avoids first-prompt clobber)",
-        );
+        crate::logging::info(&format!(
+            "RECOVERY_SUBMISSION_DEFERRED session_id={:?} request_id={:?} reason=history content_bytes={} images={} replacing_pending={}",
+            app.remote_session_id,
+            app.current_message_id,
+            prepared.expanded.len(),
+            prepared.images.len(),
+            app.pending_prompt_before_history.is_some()
+        ));
         app.pending_prompt_before_history = Some(prepared);
         app.set_status_notice("Loading session...");
         return Ok(());
@@ -153,124 +298,71 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     }
 
     app.commit_pending_streaming_assistant_message();
-    // A manually submitted prompt supersedes any armed post-error fallback
-    // offer (and its staged resend): the user chose to continue differently.
+    // This typed turn supersedes any voice reply that is still being prepared.
+    if crate::tui::jarvis::always_on() {
+        app.cancel_jarvis_speech();
+    }
+    // The user chose to continue differently, superseding any post-error fallback.
     app.clear_pending_fallback_offer();
     // Remember the typed prompt so we can restore it to the input box if this turn
     // fails (e.g. "token refresh needed"), instead of dropping it.
     app.last_submitted_input = Some(prepared.raw_input.clone());
     app.automatic_failover_targets.clear();
     app.automatic_failover_stopped = false;
-    app.push_display_message(DisplayMessage {
-        role: "user".to_string(),
-        content: prepared.raw_input,
-        tool_calls: vec![],
-        duration_secs: None,
-        title: None,
-        tool_data: None,
-    });
-    let _ = app
-        .begin_remote_send(remote, prepared.expanded, prepared.images, false)
-        .await;
-    Ok(())
-}
-
-/// Route a slash input through the remote client instead of the local
-/// `submit_input` path. Built-in slash commands still belong to the client,
-/// but a skill invocation with a trailing prompt must become a remote turn.
-/// Calling `App::submit_input` directly for that case sets `pending_turn`,
-/// which only the local run loop consumes, leaving remote sessions stuck in
-/// the sending state.
-pub(in crate::tui::app) async fn submit_remote_slash_input(
-    app: &mut App,
-    remote: &mut RemoteConnection,
-    prepared: input::PreparedInput,
-) -> Result<()> {
-    let raw_input = prepared.raw_input.clone();
-
-    if crate::tui::is_ssh_remote() {
-        // Box the shared dispatcher because its non-SSH fallback can call
-        // this entry point. The SSH branch terminates in a wire send instead.
-        return Box::pin(super::key_handling::submit_prepared_remote_enter_input(
-            app, remote, prepared,
-        ))
-        .await;
-    }
-
-    // Text that merely starts with `/` is not necessarily a command. A terminal
-    // file drop (`/tmp/shot.png`) or a bare path (`/home/me/notes`) is ordinary
-    // user input. Routing those through `App::submit_input` stages a *local*
-    // turn via `pending_turn`, which no remote run loop consumes, so the client
-    // parks in "Sending" forever. Send them as a normal remote turn instead.
-    //
-    // `/?` is the one builtin whose token is not identifier-shaped, so it is
-    // allowed through explicitly.
-    // Resolve registered multi-word skill names before falling back to the
-    // existing single-token command handling.
-    let snapshot = app.current_skills_snapshot();
-    let trimmed = raw_input.trim();
-    let is_command_shaped = trimmed == "/?"
-        || (input::parse_dropped_paths(&raw_input).is_none()
-            && (snapshot.resolve_invocation(&raw_input).is_some()
-                || app_mod::commands_dispatch::contains_registered_slash_command(trimmed)));
-    if !is_command_shaped {
-        return submit_prepared_remote_input(app, remote, prepared).await;
-    }
-
-    let Some(invocation) = snapshot.resolve_invocation(&raw_input) else {
-        app.input = raw_input;
-        app.cursor_pos = app.input.len();
-        app.submit_input();
-        return Ok(());
-    };
-
-    let Some(trailing_prompt) = invocation.prompt else {
-        app.input = raw_input;
-        app.cursor_pos = app.input.len();
-        app.submit_input();
-        return Ok(());
-    };
-
-    let skill_name = invocation.name.to_string();
-    let mut skill = snapshot.get(&skill_name).cloned();
-    if skill.is_none() {
-        app.refresh_skills_snapshot();
-        skill = app.current_skills_snapshot().get(&skill_name).cloned();
-    }
-    if skill.is_none() {
-        // Preserve the existing unknown-skill and built-in slash-command
-        // handling, including the helpful endorsed-skill installation hint.
-        app.input = raw_input;
-        app.cursor_pos = app.input.len();
-        app.submit_input();
-        return Ok(());
-    }
-
-    // Reuse the normal bare invocation path to update active_skill and show
-    // the activation notice, then prepare only the trailing prompt for the
-    // remote request. This avoids duplicating slash-command presentation and
-    // keeps pasted images attached to the same user turn.
-    app.input = format!("/{}", skill_name);
-    app.cursor_pos = app.input.len();
-    app.pending_images.clear();
-    app.submit_input();
-
-    let expanded_prompt = app
-        .current_skills_snapshot()
-        .resolve_invocation(&prepared.expanded)
-        .and_then(|invocation| invocation.prompt)
-        .unwrap_or(trailing_prompt)
-        .to_string();
-    submit_prepared_remote_input(
+    let echo_index = app.display_messages().len();
+    app.push_display_message(DisplayMessage::user(prepared.raw_input.clone()));
+    let (wire_content, attachments) = input::paste_attachment_payload(
+        &prepared.raw_input,
+        &prepared.expanded,
+        &prepared.pasted_contents,
+        remote.supports_file_attachments(),
+    );
+    // Keyboard dispatch propagates Err to the TUI event loop. A failed write
+    // is recoverable: keep the consumed composer (including attachments) and
+    // report it here rather than exiting the client or claiming delivery.
+    if let Err(error) = begin_remote_send_with_attachments(
         app,
         remote,
-        input::PreparedInput {
-            raw_input: prepared.raw_input,
-            expanded: expanded_prompt,
-            images: prepared.images,
-        },
+        wire_content,
+        prepared.images.clone(),
+        attachments,
+        prepared.expanded.clone(),
+        false,
+        None,
+        false,
+        0,
+        false,
     )
     .await
+    {
+        crate::logging::info(&format!(
+            "RECOVERY_SUBMISSION_RESTORED session_id={:?} request_id={:?} content_bytes={} images={} queued={}",
+            app.remote_session_id,
+            app.current_message_id,
+            prepared.expanded.len(),
+            prepared.images.len(),
+            app.queued_messages.len()
+        ));
+        app.remove_display_message(echo_index);
+        app.restore_failover_payload(super::super::FallbackResendPayload {
+            content: prepared.expanded,
+            images: prepared.images,
+            raw_input: Some(prepared.raw_input),
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+        });
+        app.pasted_contents = prepared.pasted_contents;
+        app.push_display_message(DisplayMessage::error(format!(
+            "Failed to send message: {error}"
+        )));
+        app.set_status_notice("Message not sent; draft restored");
+        return Ok(());
+    }
+    // Origin: restore a stashed draft once the send succeeded.
+    app.restore_stash_after_send();
+    Ok(())
 }
 
 pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
@@ -297,6 +389,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                 .pending_split_prompt
                 .take()
                 .map(|prompt| input::PreparedInput {
+                    pasted_contents: Vec::new(),
                     raw_input: prepared.raw_input,
                     expanded: prompt.content,
                     images: prompt.images,
@@ -319,6 +412,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
             .pending_split_prompt
             .take()
             .map(|prompt| input::PreparedInput {
+                pasted_contents: Vec::new(),
                 raw_input: prepared.raw_input,
                 expanded: prompt.content,
                 images: prompt.images,
@@ -368,102 +462,6 @@ pub(in crate::tui::app) fn finish_remote_split_launch(app: &mut App) {
     app.current_message_id = None;
 }
 
-fn set_transcript_input(app: &mut App, text: String) {
-    app.input_typing_undo = None;
-    app.input = text;
-    app.cursor_pos = app.input.len();
-    app.reset_tab_completion();
-    app.sync_model_picker_preview_from_input();
-}
-
-fn transcript_send_text(text: &str) -> String {
-    const TRANSCRIPTION_PREFIX: &str = "[transcription]";
-
-    let trimmed_start = text.trim_start();
-    if trimmed_start.is_empty()
-        || trimmed_start.starts_with(TRANSCRIPTION_PREFIX)
-        || trimmed_start.starts_with('/')
-        || trimmed_start.starts_with('!')
-    {
-        return text.to_string();
-    }
-
-    format!("{} {}", TRANSCRIPTION_PREFIX, trimmed_start)
-}
-
-fn queue_transcript_input(app: &mut App) {
-    input::queue_message(app);
-    let count = app.queued_messages.len();
-    app.set_status_notice(format!(
-        "Transcript queued ({} message{})",
-        count,
-        if count == 1 { "" } else { "s" }
-    ));
-}
-
-fn submit_transcript_input(app: &mut App) {
-    match app.send_action(false) {
-        SendAction::Submit => app.submit_input(),
-        SendAction::Queue => queue_transcript_input(app),
-        SendAction::Interleave => {
-            let prepared = input::take_prepared_input(app);
-            input::stage_local_interleave(app, prepared.expanded, prepared.images);
-        }
-    }
-}
-
-async fn submit_remote_transcript_input(
-    app: &mut App,
-    remote: &mut RemoteConnection,
-) -> Result<()> {
-    input::promote_dropped_images(app);
-    let trimmed = app.input.trim().to_string();
-    if trimmed.is_empty() {
-        app.set_status_notice("Transcript was empty");
-        return Ok(());
-    }
-
-    if trimmed.starts_with('/') {
-        let prepared = input::take_prepared_input(app);
-        submit_remote_slash_input(app, remote, prepared).await?;
-        return Ok(());
-    }
-
-    if let Some(command) = input::extract_input_shell_command(&trimmed) {
-        let raw_input = std::mem::take(&mut app.input);
-        app.cursor_pos = 0;
-        app.clear_input_undo_history();
-        submit_remote_input_shell(app, remote, raw_input, command.to_string()).await?;
-        return Ok(());
-    }
-
-    match app.send_action(false) {
-        SendAction::Submit => {
-            let prepared = input::take_prepared_input(app);
-            app.automatic_failover_targets.clear();
-            app.automatic_failover_stopped = false;
-            app.push_display_message(DisplayMessage {
-                role: "user".to_string(),
-                content: prepared.raw_input,
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
-            app.begin_remote_send(remote, prepared.expanded, prepared.images, false)
-                .await?;
-        }
-        SendAction::Queue => queue_transcript_input(app),
-        SendAction::Interleave => {
-            let prepared = input::take_prepared_input(app);
-            app.send_interleave_now(prepared.expanded, prepared.images, remote)
-                .await;
-        }
-    }
-
-    Ok(())
-}
-
 pub(super) async fn submit_remote_input_shell(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -500,126 +498,6 @@ pub(super) async fn submit_remote_input_shell(
         "Running remote shell: {}",
         crate::util::truncate_str(&command, 48)
     ));
-    Ok(())
-}
-
-pub(in crate::tui::app) fn apply_transcript_event(
-    app: &mut App,
-    text: String,
-    mode: TranscriptMode,
-) {
-    if text.trim().is_empty() {
-        app.set_status_notice("Transcript was empty");
-        return;
-    }
-
-    match mode {
-        TranscriptMode::Insert => {
-            input::insert_input_text(app, &text);
-            app.set_status_notice("Transcript inserted");
-        }
-        TranscriptMode::Append => {
-            let mut combined = app.input.clone();
-            combined.push_str(&text);
-            set_transcript_input(app, combined);
-            app.set_status_notice("Transcript appended");
-        }
-        TranscriptMode::Replace => {
-            set_transcript_input(app, text);
-            app.set_status_notice("Transcript replaced input");
-        }
-        TranscriptMode::Send => {
-            let text = transcript_send_text(&text);
-            input::insert_input_text(app, &text);
-            submit_transcript_input(app);
-        }
-    }
-
-    app.follow_chat_bottom_for_typing();
-}
-
-/// Composer state set aside while a voice transcript is sent as its own
-/// prompt, so text the user already typed is neither sent nor lost.
-struct StashedDraft {
-    input: String,
-    cursor_pos: usize,
-    pasted_contents: Vec<String>,
-    pending_images: Vec<(String, String)>,
-    undo: Vec<(String, usize)>,
-}
-
-fn stash_draft_for_voice(app: &mut App, transcript: &str) -> StashedDraft {
-    let stash = StashedDraft {
-        input: std::mem::take(&mut app.input),
-        cursor_pos: std::mem::take(&mut app.cursor_pos),
-        pasted_contents: std::mem::take(&mut app.pasted_contents),
-        pending_images: std::mem::take(&mut app.pending_images),
-        undo: std::mem::take(&mut app.input_undo_stack),
-    };
-    app.input = jcode_session_types::wrap_transcription(transcript);
-    app.cursor_pos = app.input.len();
-    stash
-}
-
-fn restore_draft_after_voice(app: &mut App, stash: StashedDraft) {
-    // Submission consumes the composer. Anything left means it was kept (for
-    // example an oversized prompt), which must not be silently replaced.
-    if !app.input.is_empty() {
-        return;
-    }
-    app.input = stash.input;
-    app.cursor_pos = stash.cursor_pos.min(app.input.len());
-    app.pasted_contents = stash.pasted_contents;
-    app.pending_images = stash.pending_images;
-    app.input_undo_stack = stash.undo;
-    app.reset_tab_completion();
-    app.sync_model_picker_preview_from_input();
-}
-
-/// Send a built-in voice transcript from a local (in-process) session. It is
-/// wrapped in `<transcription>` tags, sent as soon as possible like Enter
-/// (steering an active turn), and the typed draft is left untouched.
-pub(in crate::tui::app) fn submit_voice_transcript(app: &mut App, transcript: &str) {
-    let stash = stash_draft_for_voice(app, transcript);
-    submit_transcript_input(app);
-    restore_draft_after_voice(app, stash);
-    app.follow_chat_bottom_for_typing();
-}
-
-/// Remote-session counterpart of [`submit_voice_transcript`].
-pub(in crate::tui::app) async fn submit_remote_voice_transcript(
-    app: &mut App,
-    remote: &mut RemoteConnection,
-    transcript: &str,
-) -> Result<()> {
-    let stash = stash_draft_for_voice(app, transcript);
-    let result = submit_remote_transcript_input(app, remote).await;
-    restore_draft_after_voice(app, stash);
-    app.follow_chat_bottom_for_typing();
-    result
-}
-
-pub(in crate::tui::app) async fn apply_remote_transcript_event(
-    app: &mut App,
-    remote: &mut RemoteConnection,
-    text: String,
-    mode: TranscriptMode,
-) -> Result<()> {
-    if text.trim().is_empty() {
-        app.set_status_notice("Transcript was empty");
-        return Ok(());
-    }
-
-    match mode {
-        TranscriptMode::Send => {
-            let text = transcript_send_text(&text);
-            input::insert_input_text(app, &text);
-            submit_remote_transcript_input(app, remote).await?;
-        }
-        _ => apply_transcript_event(app, text, mode),
-    }
-
-    app.follow_chat_bottom_for_typing();
     Ok(())
 }
 
@@ -660,6 +538,8 @@ mod ssh_slash_tests {
         }
     }
 
+    include!("ssh/ssh_git_diff_test.rs");
+
     #[test]
     fn ssh_alternate_slash_input_uses_wire_dispatch_not_agent_prompt() {
         if app_mod::commands_dispatch::ssh_test_runs_in_child(
@@ -681,16 +561,22 @@ mod ssh_slash_tests {
                 ("/memory on", "set_feature"),
                 ("/model refresh", "refresh_models"),
                 ("/git status", "input_shell"),
+                ("/git  status", "input_shell"),
                 ("/auth", "runtime_command"),
+                ("/mode server-only-skill", "runtime_command"),
+                ("/mode", "runtime_command"),
+                ("/mode off", "runtime_command"),
                 ("/refresh-model-list", "runtime_command"),
                 ("/logout openai", "runtime_command"),
                 ("/context", "runtime_command"),
                 ("/overnight status", "runtime_command"),
+                ("/acct hold claude:team 2h", "routing_intent"),
             ] {
                 submit_remote_slash_input(
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        pasted_contents: Vec::new(),
                         raw_input: command.to_string(),
                         expanded: command.to_string(),
                         images: Vec::new(),
@@ -705,12 +591,19 @@ mod ssh_slash_tests {
                     .unwrap();
                 let request: serde_json::Value = serde_json::from_str(&line).unwrap();
                 assert_eq!(request["type"], expected, "{command}: {line}");
-                if command == "/git status" {
+                if matches!(command, "/git status" | "/git  status") {
                     assert_eq!(request["command"], "git status --short --branch");
                 }
                 if command == "/logout openai" {
                     assert_eq!(request["command"], "logout");
                     assert_eq!(request["args"], serde_json::json!(["openai"]));
+                }
+                if command.split_whitespace().next() == Some("/mode") {
+                    assert_eq!(request["command"], "mode");
+                    assert!(
+                        app.active_skill.is_none(),
+                        "only server acknowledgement activates a mode"
+                    );
                 }
                 assert!(!app.pending_turn);
             }
@@ -720,6 +613,7 @@ mod ssh_slash_tests {
                 &mut app,
                 &mut remote,
                 input::PreparedInput {
+                    pasted_contents: Vec::new(),
                     raw_input: "/local".to_string(),
                     expanded: "/local".to_string(),
                     images: images.clone(),
@@ -813,6 +707,7 @@ mod ssh_slash_tests {
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        pasted_contents: Vec::new(),
                         raw_input: input.into(),
                         expanded: input.into(),
                         images: Vec::new(),
@@ -861,6 +756,7 @@ mod ssh_slash_tests {
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        pasted_contents: Vec::new(),
                         raw_input: command.to_string(),
                         expanded: command.to_string(),
                         images: Vec::new(),
@@ -889,6 +785,7 @@ mod ssh_slash_tests {
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        pasted_contents: Vec::new(),
                         raw_input: command.to_string(),
                         expanded: command.to_string(),
                         images: Vec::new(),

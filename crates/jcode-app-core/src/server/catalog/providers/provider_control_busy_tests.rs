@@ -1,0 +1,1064 @@
+#![allow(clippy::await_holding_lock)]
+use super::*;
+use crate::message::{Message, ToolDefinition};
+use crate::provider::EventStream;
+use async_trait::async_trait;
+use std::sync::Mutex as StdMutex;
+use tokio::time::{Duration, timeout};
+
+struct IsolatedRuntimeDir {
+    _prev_runtime: Option<std::ffi::OsString>,
+    _temp: tempfile::TempDir,
+}
+
+impl IsolatedRuntimeDir {
+    fn new() -> Self {
+        let temp = tempfile::TempDir::new().expect("runtime dir");
+        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+        crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+        Self {
+            _prev_runtime: prev_runtime,
+            _temp: temp,
+        }
+    }
+}
+
+impl Drop for IsolatedRuntimeDir {
+    fn drop(&mut self) {
+        if let Some(prev_runtime) = self._prev_runtime.take() {
+            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
+    }
+}
+
+#[derive(Default)]
+struct TestEffortProvider {
+    model: StdMutex<Option<String>>,
+    effort: StdMutex<Option<String>>,
+    service_tier: StdMutex<Option<String>>,
+    transport: StdMutex<Option<String>>,
+}
+
+#[async_trait]
+impl Provider for TestEffortProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        panic!("complete should not run in provider control test")
+    }
+
+    fn name(&self) -> &str {
+        "test-effort"
+    }
+
+    fn model(&self) -> String {
+        self.model
+            .lock()
+            .expect("model lock")
+            .clone()
+            .unwrap_or_else(|| "test-model-a".to_string())
+    }
+
+    fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        let model = model.split_once(':').map_or(model, |(_, model)| model);
+        *self.model.lock().expect("model lock") = Some(model.to_string());
+        Ok(())
+    }
+
+    fn available_models_for_switching(&self) -> Vec<String> {
+        vec!["test-model-a".to_string(), "test-model-b".to_string()]
+    }
+
+    fn context_window(&self) -> usize {
+        if self.model() == "test-model-b" {
+            32_000
+        } else {
+            16_000
+        }
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        self.effort.lock().expect("effort lock").clone()
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
+        *self.effort.lock().expect("effort lock") = Some(effort.to_string());
+        Ok(())
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        vec!["low", "medium", "high", "xhigh", "max"]
+    }
+
+    fn service_tier(&self) -> Option<String> {
+        self.service_tier.lock().expect("service lock").clone()
+    }
+
+    fn set_service_tier(&self, service_tier: &str) -> anyhow::Result<()> {
+        *self.service_tier.lock().expect("service lock") = Some(service_tier.to_string());
+        Ok(())
+    }
+
+    fn transport(&self) -> Option<String> {
+        self.transport.lock().expect("transport lock").clone()
+    }
+
+    fn set_transport(&self, transport: &str) -> anyhow::Result<()> {
+        *self.transport.lock().expect("transport lock") = Some(transport.to_string());
+        Ok(())
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            model: StdMutex::new(Some(self.model())),
+            effort: StdMutex::new(self.reasoning_effort()),
+            service_tier: StdMutex::new(self.service_tier()),
+            transport: StdMutex::new(self.transport()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn worker_effort_caps_apply_to_spawn_control_failover_and_resume() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[agents]\nswarm_effort_caps = { \"test-effort:test-model-b\" = \"medium\" }\n",
+    )
+    .unwrap();
+    crate::config::Config::invalidate_cache();
+
+    let (provider, worker, tx, mut rx) = test_agent("session_effort_cap_worker").await;
+    {
+        let mut agent = worker.lock().await;
+        agent.mark_swarm_worker().unwrap();
+        agent.set_model("test-model-b").unwrap();
+        assert_eq!(
+            agent.set_reasoning_effort("max").unwrap().as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            agent.set_reasoning_effort("low").unwrap().as_deref(),
+            Some("low")
+        );
+        agent.set_model("test-model-a").unwrap();
+        assert_eq!(
+            agent.set_reasoning_effort("max").unwrap().as_deref(),
+            Some("max")
+        );
+        agent.set_model("test-model-b").unwrap();
+        assert_eq!(provider.reasoning_effort().as_deref(), Some("medium"));
+    }
+    handle_set_reasoning_effort(
+        71,
+        "xhigh".into(),
+        true,
+        &worker,
+        "session_worker",
+        None,
+        &tx,
+    )
+    .await;
+    let event = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(event, ServerEvent::ReasoningEffortChanged { effort: Some(ref effort), error: None, .. } if effort == "medium")
+    );
+    let busy_worker = worker.lock().await;
+    handle_set_reasoning_effort(
+        72,
+        "max".into(),
+        true,
+        &worker,
+        "session_effort_cap_worker",
+        Some(provider.clone()),
+        &tx,
+    )
+    .await;
+    let event = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("busy worker must respond")
+        .unwrap();
+    assert!(
+        matches!(event, ServerEvent::ReasoningEffortChanged { effort: Some(ref effort), error: None, .. } if effort == "medium")
+    );
+    drop(busy_worker);
+    let mut saved = crate::session::Session::load("session_effort_cap_worker").unwrap();
+    assert!(saved.is_swarm_worker());
+    saved.apply_route(crate::session::Route {
+        model: Some("test-model-b".into()),
+        ..saved.route()
+    });
+    saved.apply_route(crate::session::Route {
+        provider_key: None,
+        ..saved.route()
+    });
+    saved.apply_route(crate::session::Route {
+        route_api_method: None,
+        ..saved.route()
+    });
+    saved.apply_limits(crate::session::Limits {
+        reasoning_effort: Some("max".into()),
+        ..saved.limits()
+    });
+    let resumed_provider = Arc::new(TestEffortProvider {
+        model: StdMutex::new(Some("test-model-b".into())),
+        ..Default::default()
+    });
+    let dyn_provider: Arc<dyn Provider> = resumed_provider.clone();
+    let registry = crate::tool::Registry::new(dyn_provider.clone()).await;
+    let resumed = Agent::new_with_session(dyn_provider, registry, saved, None);
+    assert!(
+        resumed.has_worker_effort_cap(),
+        "resumed model {:?}",
+        resumed.provider_model()
+    );
+    assert_eq!(
+        resumed_provider.reasoning_effort().as_deref(),
+        Some("medium")
+    );
+    let (_, root, _, _) = test_agent("session_effort_cap_root").await;
+    let mut root = root.lock().await;
+    root.set_model("test-model-b").unwrap();
+    assert_eq!(
+        root.set_reasoning_effort("max").unwrap().as_deref(),
+        Some("max")
+    );
+}
+
+async fn test_agent(
+    session_id: &str,
+) -> (
+    Arc<TestEffortProvider>,
+    Arc<Mutex<Agent>>,
+    mpsc::UnboundedSender<ServerEvent>,
+    mpsc::UnboundedReceiver<ServerEvent>,
+) {
+    let provider = Arc::new(TestEffortProvider::default());
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let registry = crate::tool::Registry::new(Arc::clone(&provider_dyn)).await;
+    let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    session.apply_route(crate::session::Route {
+        model: Some(provider.model()),
+        ..session.route()
+    });
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        Arc::clone(&provider_dyn),
+        registry,
+        session,
+        None,
+    )));
+    let (client_event_tx, client_event_rx) = mpsc::unbounded_channel();
+    (provider, agent, client_event_tx, client_event_rx)
+}
+
+#[tokio::test]
+async fn set_context_cap_is_deferred_isolated_and_persisted() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let (_, agent, tx, mut rx) = test_agent("session_context_cap_control").await;
+    let (_, other, _, _) = test_agent("session_context_cap_other").await;
+    let original_other_budget = other.lock().await.effective_context_budget().await;
+    handle_set_context_cap(70, "replaced-session".to_string(), Some(1), &agent, &tx).await;
+    let rejected = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(rejected, ServerEvent::Error { id: 70, .. }));
+    assert_eq!(
+        agent.lock().await.effective_context_budget().await,
+        original_other_budget
+    );
+    let lock = agent.lock().await;
+    timeout(
+        Duration::from_millis(100),
+        handle_set_context_cap(
+            71,
+            "session_context_cap_control".to_string(),
+            Some(8_000),
+            &agent,
+            &tx,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(rx.try_recv().is_err());
+    drop(lock);
+    let event = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event,
+        ServerEvent::ContextCapChanged {
+            id: 71,
+            max_context_tokens: Some(8_000),
+            effective_budget: 8_000,
+            ..
+        }
+    ));
+    assert_eq!(
+        other.lock().await.effective_context_budget().await,
+        original_other_budget
+    );
+    let saved = crate::session::Session::load("session_context_cap_control").unwrap();
+    assert_eq!(saved.context_cap(), Some(8_000));
+    let provider: Arc<dyn Provider> = Arc::new(TestEffortProvider::default());
+    let registry = crate::tool::Registry::new(Arc::clone(&provider)).await;
+    let mut resumed = Agent::new_with_session(provider, registry, saved, None);
+    assert_eq!(resumed.effective_context_budget().await, 8_000);
+    assert_eq!(
+        resumed.set_context_cap(Some(100_000)).await.unwrap(),
+        16_000
+    );
+    let fallback = resumed.set_context_cap(Some(0)).await.unwrap();
+    assert_eq!(fallback, original_other_budget);
+    assert_eq!(
+        crate::session::Session::load("session_context_cap_control")
+            .unwrap()
+            .context_cap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (provider, agent, client_event_tx, mut client_event_rx) =
+        test_agent("session_busy_reasoning_effort").await;
+    let busy_agent_lock = agent.lock().await;
+
+    timeout(
+        Duration::from_millis(100),
+        handle_set_reasoning_effort(
+            7,
+            "low".to_string(),
+            false,
+            &agent,
+            "session_busy_reasoning_effort",
+            Some(provider.clone()),
+            &client_event_tx,
+        ),
+    )
+    .await
+    .expect("reasoning effort changes must not wait for a busy agent mutex");
+
+    let event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("reasoning effort change must be confirmed while the turn is active");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+    assert!(matches!(
+        event,
+        Some(ServerEvent::ReasoningEffortChanged {
+            id: 7,
+            effort: Some(effort),
+            model: None,
+            error: None,
+        }) if effort == "low"
+    ));
+    drop(busy_agent_lock);
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if crate::session::Session::load("session_busy_reasoning_effort")
+                .ok()
+                .and_then(|session| session.reasoning_effort().map(str::to_owned))
+                .as_deref()
+                == Some("low")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("applied effort must be saved after the agent unlocks");
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+/// 2026-11-19: the live provider took "high" at once, but the session file
+/// still said "xhigh" because the busy turn never released the agent before
+/// the daemon reloaded, and the restored session went back to xhigh.
+#[tokio::test]
+async fn effort_applied_to_a_busy_turn_survives_a_restart_before_it_ends() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let _runtime = IsolatedRuntimeDir::new();
+    let session_id = "session_busy_effort_restart";
+
+    let (provider, agent, client_event_tx, _rx) = test_agent(session_id).await;
+    {
+        let mut agent = agent.lock().await;
+        agent.set_reasoning_effort("xhigh").unwrap();
+    }
+    let busy_agent_lock = agent.lock().await;
+    handle_set_reasoning_effort(
+        11,
+        "high".to_string(),
+        false,
+        &agent,
+        session_id,
+        Some(provider.clone()),
+        &client_event_tx,
+    )
+    .await;
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+
+    // The daemon dies while the turn still holds the agent.
+    std::mem::forget(busy_agent_lock);
+    crate::session_effort::forget_pending_efforts_in_memory();
+    let restored_provider = Arc::new(TestEffortProvider::default());
+    let dyn_provider: Arc<dyn Provider> = restored_provider.clone();
+    let registry = crate::tool::Registry::new(dyn_provider.clone()).await;
+    let restored = Agent::new_with_session(
+        dyn_provider,
+        registry,
+        crate::session::Session::load(session_id).unwrap(),
+        None,
+    );
+
+    assert_eq!(
+        restored_provider.reasoning_effort().as_deref(),
+        Some("high")
+    );
+    drop(restored);
+    assert_eq!(
+        crate::session::Session::load(session_id)
+            .unwrap()
+            .reasoning_effort(),
+        Some("high"),
+        "the restored session must store the effort the turn was using"
+    );
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+/// The live provider registration is a weak reference that can fail to
+/// upgrade while a turn owns the agent. That must queue the change for the
+/// next turn, not reject it as "live provider unavailable".
+#[tokio::test]
+async fn set_reasoning_effort_without_provider_queues_for_next_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (provider, agent, client_event_tx, mut client_event_rx) =
+        test_agent("session_busy_reasoning_effort_without_provider").await;
+    let busy_agent_lock = agent.lock().await;
+
+    timeout(
+        Duration::from_millis(100),
+        handle_set_reasoning_effort(
+            8,
+            "high".to_string(),
+            false,
+            &agent,
+            "session_busy_reasoning_effort_without_provider",
+            None,
+            &client_event_tx,
+        ),
+    )
+    .await
+    .expect("a busy turn must acknowledge the effort change without the agent lock");
+
+    let event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("a busy turn must confirm the queued effort change");
+    assert!(
+        matches!(
+            event,
+            Some(ServerEvent::ReasoningEffortChanged {
+                id: 8,
+                effort: Some(ref effort),
+                error: None,
+                ..
+            }) if effort == "high"
+        ),
+        "unexpected event: {event:?}"
+    );
+    assert_eq!(
+        crate::session_effort::session_effort("session_busy_reasoning_effort_without_provider")
+            .as_deref(),
+        Some("high"),
+        "the requested effort must be visible while the turn is still running"
+    );
+    assert_eq!(
+        provider.reasoning_effort(),
+        None,
+        "the in-flight provider must not be mutated before the agent is free"
+    );
+
+    drop(busy_agent_lock);
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if provider.reasoning_effort().as_deref() == Some("high") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queued effort must reach the provider after the agent unlocks");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if crate::session::Session::load("session_busy_reasoning_effort_without_provider")
+                .ok()
+                .and_then(|session| session.reasoning_effort().map(str::to_owned))
+                .as_deref()
+                == Some("high")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queued effort must persist after the agent unlocks");
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let (provider, agent, tx, mut rx) = test_agent("session_rejected_auto_route").await;
+    let initial_model = provider.model();
+    let selection = crate::provider::RouteSelection {
+        model: "gpt-6.1-sol".to_string(),
+        runtime_key: jcode_provider_core::RuntimeKey::OpenAIOAuth,
+        api_method: "openai-oauth@nonexistent-failover-test-account".to_string(),
+        provider_label: "OpenAI".to_string(),
+        detail: String::new(),
+    };
+    let lock = agent.lock().await;
+    timeout(
+        Duration::from_millis(100),
+        handle_set_route(29, selection, true, true, &agent, &tx),
+    )
+    .await
+    .expect("route request must not block on the agent lock");
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangePending { id: 29, .. })
+    ));
+    assert!(rx.try_recv().is_err());
+    drop(lock);
+    let event = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(event, ServerEvent::ModelChanged { id: 29, error: Some(error), .. }
+        if error.contains("Auto-switch canceled"))
+    );
+    assert_eq!(provider.model(), initial_model);
+}
+
+#[tokio::test]
+async fn automatic_failover_source_respects_current_api_pool_membership() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    struct ApiSource;
+    #[async_trait]
+    impl Provider for ApiSource {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            panic!("must not send")
+        }
+        fn name(&self) -> &str {
+            "OpenAI"
+        }
+        fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+            Some(jcode_provider_core::ResolvedCredential::ApiKey)
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+    let agent = Agent::new(Arc::new(ApiSource), crate::tool::Registry::empty());
+    assert!(
+        !automatic_failover_source_is_pool_member(&agent),
+        "metered keys stay manual by default"
+    );
+    let mut pool = crate::auth::account_pool::AccountPool::default();
+    pool.members.push("openai-api".to_string());
+    pool.save().unwrap();
+    assert!(automatic_failover_source_is_pool_member(&agent));
+    pool.members.clear();
+    pool.excluded.push("openai-api".to_string());
+    pool.save().unwrap();
+    assert!(
+        !automatic_failover_source_is_pool_member(&agent),
+        "a source moved below the boundary must stay manual"
+    );
+}
+
+#[tokio::test]
+async fn set_model_does_not_wait_for_busy_agent_lock() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (provider, agent, client_event_tx, mut client_event_rx) =
+        test_agent("session_busy_set_model").await;
+    let busy_agent_lock = agent.lock().await;
+
+    timeout(
+        Duration::from_millis(100),
+        handle_set_model(
+            8,
+            "test-model-b".to_string(),
+            true,
+            &agent,
+            &client_event_tx,
+        ),
+    )
+    .await
+    .expect("model changes must not wait for a busy agent mutex");
+
+    // The client hears at once that the switch waits for the turn, and the
+    // session keeps its current model until then.
+    assert!(matches!(
+        client_event_rx.try_recv(),
+        Ok(ServerEvent::ModelChangePending { id: 8, model }) if model == "test-model-b"
+    ));
+    assert_eq!(provider.model(), "test-model-a");
+    assert!(has_pending_model_switch(&agent));
+
+    drop(busy_agent_lock);
+
+    let event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("deferred model change should finish after agent is idle");
+    assert!(!has_pending_model_switch(&agent));
+    assert_eq!(provider.model(), "test-model-b");
+    assert_eq!(agent.lock().await.compaction_token_budget().await, 32_000);
+    assert!(matches!(
+        event,
+        Some(ServerEvent::ModelChanged {
+            id: 8,
+            model,
+            provider_name: Some(provider_name),
+            error: None,
+            ..
+        }) if model == "test-model-b" && provider_name == "test-effort"
+    ));
+}
+
+#[tokio::test]
+async fn cancelled_pending_model_change_never_applies() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (provider, agent, tx, mut rx) = test_agent("session_cancel_pending_model").await;
+    let busy_agent_lock = agent.lock().await;
+
+    handle_set_model(21, "test-model-b".to_string(), true, &agent, &tx).await;
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangePending { id: 21, .. })
+    ));
+
+    handle_cancel_pending_model_change(22, &agent, &tx);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangeCancelled {
+            id: 22,
+            pending_id: Some(21),
+            model: Some(model),
+        }) if model == "test-model-b"
+    ));
+    assert!(!has_pending_model_switch(&agent));
+
+    drop(busy_agent_lock);
+    // Let the queued task run and see it was withdrawn.
+    let _ = agent.lock().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(provider.model(), "test-model-a");
+    assert!(rx.try_recv().is_err(), "a withdrawn switch stays silent");
+
+    // Nothing waiting: the answer says so.
+    handle_cancel_pending_model_change(23, &agent, &tx);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangeCancelled {
+            id: 23,
+            pending_id: None,
+            model: None,
+        })
+    ));
+}
+
+#[tokio::test]
+async fn newer_pending_model_change_replaces_the_older_one() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (provider, agent, tx, mut rx) = test_agent("session_replace_pending_model").await;
+    let busy_agent_lock = agent.lock().await;
+
+    handle_set_model(31, "test-model-b".to_string(), true, &agent, &tx).await;
+    handle_set_model(32, "test-model-a".to_string(), true, &agent, &tx).await;
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangePending { id: 31, .. })
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangeCancelled {
+            id: 32,
+            pending_id: Some(31),
+            ..
+        })
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(ServerEvent::ModelChangePending { id: 32, .. })
+    ));
+
+    drop(busy_agent_lock);
+    let event = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("the newest switch applies")
+        .unwrap();
+    assert!(matches!(event, ServerEvent::ModelChanged { id: 32, .. }));
+    assert_eq!(provider.model(), "test-model-a");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(rx.try_recv().is_err(), "the replaced switch never applies");
+}
+
+#[tokio::test]
+async fn set_service_tier_does_not_wait_for_busy_agent_lock() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+
+    let (provider, agent, client_event_tx, mut client_event_rx) =
+        test_agent("session_busy_set_service_tier").await;
+    let busy_agent_lock = agent.lock().await;
+
+    timeout(
+        Duration::from_millis(100),
+        handle_set_service_tier(9, "priority".to_string(), &agent, None, &client_event_tx),
+    )
+    .await
+    .expect("service tier changes must not wait for a busy agent mutex");
+
+    assert!(matches!(
+        client_event_rx.try_recv(),
+        Ok(ServerEvent::ServiceTierChanged {
+            id: 9,
+            pending: true,
+            service_tier: None,
+            error: None,
+        })
+    ));
+    assert_eq!(provider.service_tier(), None);
+
+    drop(busy_agent_lock);
+
+    let event = timeout(Duration::from_secs(1), client_event_rx.recv())
+        .await
+        .expect("deferred service tier change should finish after agent is idle");
+    assert_eq!(provider.service_tier().as_deref(), Some("priority"));
+    assert!(matches!(
+        event,
+        Some(ServerEvent::ServiceTierChanged {
+            id: 9,
+            pending: false,
+            service_tier: Some(service_tier),
+            error: None,
+        }) if service_tier == "priority"
+    ));
+}
+
+#[tokio::test]
+async fn set_service_tier_configures_busy_session_immediately_with_one_confirmation() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let (provider, agent, tx, mut rx) = test_agent("session_busy_ultrafast_control").await;
+    let locked = agent.lock().await;
+    let control = super::super::session_control::SessionControlHandle::new(
+        "session_busy_ultrafast_control",
+        locked.soft_interrupt_queue(),
+        locked.background_tool_signal(),
+        locked.graceful_shutdown_signal(),
+    )
+    .with_provider(locked.provider_handle());
+    // Busy reattachment uses the same session's registered provider, never the
+    // creator connection's provisional provider or a different session's tier.
+    let reattached = super::super::session_control::SessionControlHandle::cancel_only(
+        "session_busy_ultrafast_control",
+        locked.soft_interrupt_queue(),
+        locked.graceful_shutdown_signal(),
+    );
+    assert!(control.provider_handle().is_some());
+    for (id, tier) in [(10, "priority"), (11, "ultrafast"), (12, "off")] {
+        timeout(
+            Duration::from_millis(100),
+            handle_set_service_tier(
+                id,
+                tier.to_string(),
+                &agent,
+                reattached.provider_handle(),
+                &tx,
+            ),
+        )
+        .await
+        .expect("configuration must not wait for the turn to finish");
+        assert_eq!(provider.service_tier().as_deref(), Some(tier));
+        assert!(matches!(rx.try_recv(), Ok(ServerEvent::ServiceTierChanged {
+            id: actual_id, pending: false, service_tier: Some(actual), error: None,
+        }) if actual_id == id && actual == tier));
+        assert!(
+            rx.try_recv().is_err(),
+            "instant changes emit one response only"
+        );
+    }
+    drop(locked);
+    super::super::session_control::remove_background_tool_signal("session_busy_ultrafast_control");
+}
+
+#[tokio::test]
+async fn service_tier_control_provider_registry_tracks_rebind_and_session_lifecycle() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let (original, agent, _, _) = test_agent("tier_registry_original").await;
+    let locked = agent.lock().await;
+    let control = super::super::session_control::SessionControlHandle::new(
+        "tier_registry_original",
+        locked.soft_interrupt_queue(),
+        locked.background_tool_signal(),
+        locked.graceful_shutdown_signal(),
+    )
+    .with_provider(locked.provider_handle());
+    let other = super::super::session_control::SessionControlHandle::cancel_only(
+        "tier_registry_other",
+        locked.soft_interrupt_queue(),
+        locked.graceful_shutdown_signal(),
+    );
+    assert!(
+        other.provider_handle().is_none(),
+        "never borrow another session's provider"
+    );
+    let replacement: Arc<dyn Provider> = Arc::new(TestEffortProvider::default());
+    let control = control.with_provider(replacement.clone());
+    assert!(Arc::ptr_eq(
+        &control.provider_handle().unwrap(),
+        &replacement
+    ));
+    assert_eq!(original.service_tier(), None);
+    super::super::session_control::rename_background_tool_signal(
+        "tier_registry_original",
+        "tier_registry_other",
+    );
+    assert!(control.provider_handle().is_none());
+    assert!(Arc::ptr_eq(&other.provider_handle().unwrap(), &replacement));
+    drop(replacement);
+    assert!(
+        other.provider_handle().is_none(),
+        "registry must not retain providers"
+    );
+    super::super::session_control::remove_background_tool_signal("tier_registry_other");
+}
+
+#[tokio::test]
+async fn set_reasoning_effort_propagates_sibling_model_change() {
+    struct SiblingEffortProvider {
+        model: StdMutex<String>,
+    }
+
+    #[async_trait]
+    impl Provider for SiblingEffortProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            panic!("complete should not run in sibling effort test")
+        }
+
+        fn name(&self) -> &str {
+            "antigravity"
+        }
+
+        fn model(&self) -> String {
+            self.model.lock().expect("model lock").clone()
+        }
+
+        fn set_model(&self, model: &str) -> anyhow::Result<()> {
+            *self.model.lock().expect("model lock") = model.to_string();
+            Ok(())
+        }
+
+        fn available_models_for_switching(&self) -> Vec<String> {
+            vec![
+                "gemini-4-neon-low".to_string(),
+                "gemini-4-neon-high".to_string(),
+            ]
+        }
+
+        fn available_efforts(&self) -> Vec<&'static str> {
+            vec!["low", "high", "swarm"]
+        }
+
+        fn reasoning_effort(&self) -> Option<String> {
+            let model = self.model();
+            model.rsplit('-').next().map(str::to_string)
+        }
+
+        fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
+            *self.model.lock().expect("model lock") = format!("gemini-4-neon-{effort}");
+            Ok(())
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self {
+                model: StdMutex::new(self.model()),
+            })
+        }
+    }
+
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(SiblingEffortProvider {
+        model: StdMutex::new("gemini-4-neon-low".to_string()),
+    });
+    let registry = crate::tool::Registry::new(provider.clone()).await;
+    let mut session = crate::session::Session::create_with_id(
+        "session_sibling_effort_change".to_string(),
+        None,
+        None,
+    );
+    session.apply_route(crate::session::Route {
+        model: Some(provider.model()),
+        ..session.route()
+    });
+    session.save_prepared().unwrap();
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        registry,
+        session,
+        None,
+    )));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    handle_set_reasoning_effort(
+        11,
+        "high".to_string(),
+        false,
+        &agent,
+        "session_sibling_effort_change",
+        None,
+        &tx,
+    )
+    .await;
+
+    let event = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("effort change should emit event");
+    assert!(matches!(
+        event,
+        Some(ServerEvent::ReasoningEffortChanged {
+            id: 11,
+            effort: Some(effort),
+            model: Some(model),
+            error: None,
+        }) if effort == "high" && model == "gemini-4-neon-high"
+    ));
+    assert_eq!(provider.model(), "gemini-4-neon-high");
+    assert_eq!(agent.lock().await.provider_model(), "gemini-4-neon-high");
+    let saved = crate::session::Session::load("session_sibling_effort_change").unwrap();
+    assert_eq!(saved.model(), Some("gemini-4-neon-high"));
+}
+
+#[path = "provider_control_busy_tests/model_deferral.rs"]
+mod model_deferral;

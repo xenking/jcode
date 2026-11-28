@@ -59,8 +59,7 @@ check() { # check <name> <expected-desc> <actual-desc> <condition-exit-status>
 }
 
 # ---------------------------------------------------------------------------
-# Sandbox: mocked release endpoint + tools, identical shape to
-# test_install_conversion.sh so both exercise the same installer code paths.
+# Sandbox: mocked release endpoint + tools.
 # ---------------------------------------------------------------------------
 mkdir -p "$work/bin"
 
@@ -86,11 +85,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$url" in
-  *telemetry.jcode.sh*) ;;
-  *jcode.sh/releases/latest/version) printf 'v%s\n' "${EVAL_VERSION:-1.2.3}" ;;
-  *jcode.sh/releases/v*/download-bases)
-    printf 'https://github.com/1jehuang/jcode/releases/download/v%s\n' "${EVAL_VERSION:-1.2.3}"
-    ;;
   *SHA256SUMS)
     # Checksum of the deterministic fake archive written by the tar mock's
     # sibling below (the literal bytes "fake archive").
@@ -98,7 +92,7 @@ case "$url" in
       "${EVAL_CHECKSUM_ASSET:-jcode-linux-x86_64.tar.gz}"
     ;;
   *github.com*/releases/latest)
-    printf 'https://github.com/1jehuang/jcode/releases/tag/v%s' "${EVAL_VERSION:-1.2.3}"
+    printf 'https://github.com/xenking/jcode/releases/tag/v%s' "${EVAL_VERSION:-1.2.3}"
     ;;
   *github.com*/releases/download/*)
     [ -n "$output" ] || exit 2
@@ -290,6 +284,11 @@ echo ""
 echo "-- Section D: Windows PATH parity (static audit) --"
 sh_text=$(cat "$install_sh")
 ps1_text=$(cat "$install_ps1")
+
+# Global hotkeys are explicit-only: installers may suggest `jcode setup-hotkey`, never run it.
+! grep -nE 'setup-hotkey' "$install_sh" "$repo_dir/scripts/install_release.sh" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(#|info )' >/dev/null
+check "installers never run setup-hotkey on their own" \
+  "only tips/comments mention setup-hotkey" "an installer invokes setup-hotkey" "$?"
 
 printf '%s' "$sh_text" | grep -q 'SetEnvironmentVariable.*"User"'
 check "install.sh (Git Bash) persists the Windows user PATH" \

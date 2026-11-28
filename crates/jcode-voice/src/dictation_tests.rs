@@ -4,6 +4,7 @@ use super::{
     ClientCandidate, extract_session_short_name_from_window_title, normalize_session_short_name,
     parse_ppid, read_resumed_session_id, run_command, select_candidate,
 };
+#[cfg(feature = "desktop-test-support")]
 use jcode_base::client_focus::{last_focused_session, remember_last_focused_session};
 #[cfg(target_os = "linux")]
 use std::ffi::OsString;
@@ -98,6 +99,67 @@ async fn run_command_trims_trailing_newlines() {
     assert_eq!(text, "hello from test");
 }
 
+/// The command hits `timeout_secs` mid-dictation. Words it already printed
+/// are the transcript, not an error, and the command is stopped.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_command_timeout_keeps_what_was_already_printed() {
+    let started = std::time::Instant::now();
+    let text = run_command("echo words said so far; sleep 30", 1)
+        .await
+        .expect("output printed before the limit must survive it");
+    assert_eq!(text, "words said so far");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+/// A bridge that prints its transcript only when interrupted (like one that
+/// asks an app to stop recording) still delivers it at the limit.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_command_timeout_lets_the_command_print_on_interrupt() {
+    let text = run_command(
+        "trap 'echo words from the stop; exit 0' INT; sleep 30 & wait",
+        1,
+    )
+    .await
+    .expect("interrupt handler output is the transcript");
+    assert_eq!(text, "words from the stop");
+}
+
+/// A bridge that stops its recorder on interrupt and then waits for the
+/// transcription (SuperWhisper takes seconds) is not cut short by the stop.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_command_timeout_waits_for_a_transcript_that_takes_seconds() {
+    let text = run_command(
+        "trap 'sleep 4; echo transcribed after the stop; exit 0' INT; sleep 30 & wait",
+        1,
+    )
+    .await
+    .expect("a slow transcript after the interrupt is still the transcript");
+    assert_eq!(text, "transcribed after the stop");
+}
+
+/// What a stopped command said on stderr (where its recording was kept) must
+/// reach the user, not be replaced by a generic timeout message.
+#[cfg(unix)]
+#[tokio::test]
+async fn run_command_timeout_error_carries_what_the_command_said() {
+    let error = run_command("echo recording kept at /tmp/x >&2; sleep 30", 1)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("stopped after 1s"), "{error}");
+    assert!(error.contains("recording kept at /tmp/x"), "{error}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn run_command_timeout_without_output_is_a_named_error() {
+    let error = run_command("sleep 30", 1).await.unwrap_err().to_string();
+    assert!(error.contains("stopped after 1s"), "{error}");
+}
+
 #[test]
 fn select_candidate_prefers_title_match() {
     let candidates = vec![
@@ -155,6 +217,7 @@ fn normalize_session_short_name_strips_wrapping_punctuation() {
     );
 }
 
+#[cfg(feature = "desktop-test-support")]
 #[test]
 fn remember_and_read_last_focused_session() {
     let _guard = jcode_base::storage::lock_test_env();
@@ -264,4 +327,43 @@ fn focused_cli_session_ignores_unrelated_windows() {
     let _path = EnvVarGuard::set("PATH", path);
 
     assert_eq!(super::focused_cli_session().expect("resolve"), None);
+}
+
+/// kitty runs every OS window from one process, so a focused window's PID tree
+/// can hold several registered clients. The last-focused one must win, not the
+/// window title or the first candidate.
+#[cfg(target_os = "linux")]
+#[test]
+fn shared_terminal_process_routes_to_last_focused_client() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+
+    let first = ChildGuard::spawn_named("jcode");
+    let second = ChildGuard::spawn_named("jcode");
+    let registry = temp.path().join("client_sessions");
+    std::fs::create_dir_all(&registry).expect("create registry");
+    let active = temp.path().join("active_pids");
+    std::fs::create_dir_all(&active).expect("create active_pids");
+    for (child, session) in [(&first, "session_owl_1"), (&second, "session_tiger_2")] {
+        std::fs::write(registry.join(child.pid().to_string()), session).expect("register");
+        std::fs::write(active.join(session), child.pid().to_string()).expect("active");
+    }
+    std::fs::write(
+        temp.path().join("last_focused_client_session"),
+        "session_tiger_2",
+    )
+    .expect("last focused");
+
+    // This test process stands in for the shared kitty process.
+    let window = super::NiriFocusedWindow {
+        id: Some(44),
+        pid: std::process::id(),
+        title: Some("🌐 jcode/citadel Owl".to_string()),
+        _app_id: Some("kitty".to_string()),
+    };
+    assert_eq!(
+        super::resolve_session_for_window(&window),
+        Some("session_tiger_2".to_string())
+    );
 }

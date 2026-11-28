@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "dispatch_estimation_tests.rs"]
+mod estimation_tests;
+
 #[derive(Clone, Copy)]
 pub(super) enum CompletionMode<'a> {
     Unified {
@@ -29,29 +33,53 @@ impl CompletionMode<'_> {
 
 impl MultiProvider {
     pub(super) fn estimate_request_input(
+        family: jcode_message_types::TokenFamily,
         messages: &[Message],
         tools: &[ToolDefinition],
         mode: CompletionMode<'_>,
     ) -> (usize, usize) {
-        let mut chars = serde_json::to_string(messages)
-            .map(|value| value.len())
-            .unwrap_or(0)
-            + serde_json::to_string(tools)
-                .map(|value| value.len())
-                .unwrap_or(0);
-        match mode {
-            CompletionMode::Unified { system } => {
-                chars += system.len();
-            }
+        // Count model context, not transport JSON. In particular, base64 images
+        // and opaque native compaction payloads are not tokenized as text.
+        let (mut chars, mut tokens) = (0usize, 0usize);
+        for message in messages {
+            let estimator = jcode_compaction_core::content_estimator(family, &message.content);
+            chars += estimator.bytes_fed();
+            tokens += estimator.tokens();
+        }
+        let referenced_tools: std::collections::HashSet<&str> = messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                crate::message::ContentBlock::ToolReference { tool_name, .. } => {
+                    Some(tool_name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        // Native deferred catalogs travel over the wire but enter model context
+        // only when referenced. Non-native routes already strip deferred tools
+        // before dispatch, so do not charge their full unloaded catalogs here.
+        for tool in tools
+            .iter()
+            .filter(|tool| !tool.defer_loading || referenced_tools.contains(tool.name.as_str()))
+        {
+            chars += tool.prompt_chars();
+            tokens += tool.prompt_token_estimate(family);
+        }
+        let system_parts: [&str; 2] = match mode {
+            CompletionMode::Unified { system } => [system, ""],
             CompletionMode::Split {
                 system_static,
                 system_dynamic,
-            } => {
-                chars += system_static.len() + system_dynamic.len();
-            }
+            } => [system_static, system_dynamic],
+        };
+        // The parts are one concatenated prompt on the wire.
+        let mut system = jcode_message_types::Estimator::new(family);
+        for part in system_parts {
+            // Writing to the estimator cannot fail.
+            let _ = std::fmt::Write::write_str(&mut system, part);
         }
-        let tokens = chars / 4;
-        (chars, tokens)
+        (chars + system.bytes_fed(), tokens + system.tokens())
     }
 
     pub(super) async fn complete_on_provider(

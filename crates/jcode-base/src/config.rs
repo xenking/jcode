@@ -4,16 +4,18 @@
 //! Environment variables override config file settings.
 
 pub use jcode_config_types::{
-    AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, CompactionConfig,
-    CompactionMode, CrossProviderFailoverMode, CustomWebSearchConfig, CustomWebSearchMethod,
-    DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO, DiagramDisplayMode, DiagramPanePosition,
-    DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HookCommands, HooksConfig,
-    KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig,
-    MarkdownSpacingMode, MenubarConfig, NamedProviderAuth, NamedProviderConfig,
+    AdvisorConfig, AgentProfileConfig, AgentsConfig, AmbientConfig, ApiKeyModelCost,
+    ApiKeyProfileConfig, AuthConfig, AutoJudgeConfig, AutoResetTrigger, AutoReviewConfig,
+    ColorEdit, CompactionConfig, CompactionMode, CrossProviderFailoverMode, CustomWebSearchConfig,
+    CustomWebSearchMethod, DEFAULT_UPDATE_BRANCH, DEFAULT_UPDATE_REPO, DiagramDisplayMode,
+    DiagramPanePosition, DiffDisplayMode, DisplayConfig, DisplayPreference, FeatureConfig,
+    GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LabelledApiKeyConfig,
+    LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig,
+    ModelPromptConfig, ModelPromptMode, NamedProviderAuth, NamedProviderConfig,
     NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig, NotificationsConfig,
     PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere, ResumeTimeMode,
-    SafetyConfig, SessionConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode,
-    SwarmStripLayout, TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    SafetyConfig, SessionConfig, SessionPickerResumeAction, SwarmSpawnMode, TerminalConfig,
+    TodoHeaderMode, UpdateChannel, WebSearchConfig, WebSearchEngine, WorkerModelSlot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -91,32 +93,6 @@ snippet_pointer = "/summary"
     assert!(no_count.count_param.is_none());
     assert_eq!(no_count.method, CustomWebSearchMethod::Get);
     assert!(WebSearchConfig::default().custom.is_none());
-}
-
-#[cfg(test)]
-#[test]
-fn agents_jev_models_parse_and_default_unset() {
-    let config: AgentsConfig = toml::from_str(
-        r#"
-memory_jev_model = "typesafe/jev-1.14"
-browser_jev_model = "typesafe/jev-1.14"
-voice_jev_model = "typesafe/jev-1.14"
-"#,
-    )
-    .unwrap();
-    assert_eq!(
-        config.memory_jev_model.as_deref(),
-        Some("typesafe/jev-1.14")
-    );
-    assert_eq!(
-        config.browser_jev_model.as_deref(),
-        Some("typesafe/jev-1.14")
-    );
-    assert_eq!(config.voice_jev_model.as_deref(), Some("typesafe/jev-1.14"));
-    let defaults = AgentsConfig::default();
-    assert!(defaults.memory_jev_model.is_none());
-    assert!(defaults.browser_jev_model.is_none());
-    assert!(defaults.voice_jev_model.is_none());
 }
 
 const CONFIG_ENV_KEYS: &[&str] = &[
@@ -220,9 +196,11 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_JADE_RELAY_TOKEN",
     "JCODE_JADE_RELAY_TOKEN_ID",
     "JCODE_JADE_RELAY_USER_ID",
+    "JCODE_JARVIS_SPEECH_ENDPOINT",
     "JCODE_KV_CACHE_MISS_NOTICES",
     "JCODE_LATEX_RENDERING",
     "JCODE_MARKDOWN_SPACING",
+    "JCODE_MEMORY_AUTO_RECALL",
     "JCODE_MEMORY_EMBEDDING_BACKEND",
     "JCODE_MEMORY_EMBEDDING_BASE_URL",
     "JCODE_MEMORY_EMBEDDING_DIM",
@@ -286,6 +264,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_SMTP_PASSWORD",
     "JCODE_SPAWN_HOOK",
     "JCODE_STREAM_IDLE_TIMEOUT_SECS",
+    "JCODE_TITLE_MODEL",
     "JCODE_MAX_RETRIES",
     "JCODE_MCP_TOOLS",
     "JCODE_MCP_TOOLS_TOKEN_THRESHOLD",
@@ -297,7 +276,6 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_SWARM_MODEL",
     "JCODE_SWARM_MAX_CONCURRENT_AGENTS",
     "JCODE_SWARM_SPAWN_MODE",
-    "JCODE_SWARM_STRIP_LAYOUT",
     "JCODE_TELEGRAM_BOT_TOKEN",
     "JCODE_TELEGRAM_CHAT_ID",
     "JCODE_TELEGRAM_REPLY_ENABLED",
@@ -350,7 +328,6 @@ struct ConfigCache {
     config: &'static Config,
     fingerprint: ConfigCacheFingerprint,
     last_checked: Instant,
-    force_reload: bool,
 }
 
 static CONFIG_CACHE: LazyLock<RwLock<ConfigCache>> = LazyLock::new(|| {
@@ -369,7 +346,6 @@ static CONFIG_CACHE: LazyLock<RwLock<ConfigCache>> = LazyLock::new(|| {
         config,
         fingerprint,
         last_checked: Instant::now(),
-        force_reload: false,
     })
 });
 
@@ -379,11 +355,10 @@ fn leak_config(config: Config) -> &'static Config {
 
 /// Seed the global context-limit cache from a config reference directly.
 ///
-/// Used during CONFIG_CACHE initialization (where calling config() would
-/// deadlock) and shares its logic with
-/// `crate::provider::populate_context_limits_from_config`.
+/// Used during CONFIG_CACHE initialization, where calling config() would
+/// deadlock, and again after every reload.
 fn populate_context_limits_from_config_ref(cfg: &Config) {
-    crate::provider::populate_context_limits_from_config_value(cfg);
+    crate::context_limits::populate_from_providers(&cfg.providers);
 }
 
 /// Get the global config instance.
@@ -396,7 +371,7 @@ fn populate_context_limits_from_config_ref(cfg: &Config) {
 pub fn config() -> &'static Config {
     let now = Instant::now();
     if let Ok(cache) = CONFIG_CACHE.read()
-        && !cache.force_reload
+        && !FORCE_RELOAD.load(std::sync::atomic::Ordering::Acquire)
         && now.duration_since(cache.last_checked) < CONFIG_CACHE_CHECK_INTERVAL
     {
         return cache.config;
@@ -410,17 +385,18 @@ pub fn config() -> &'static Config {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let now = Instant::now();
-        if !cache.force_reload
-            && now.duration_since(cache.last_checked) < CONFIG_CACHE_CHECK_INTERVAL
-        {
+        // Take the invalidation request before loading, so one that lands
+        // while the file is read triggers another reload instead of being lost.
+        let forced = FORCE_RELOAD.swap(false, std::sync::atomic::Ordering::AcqRel);
+        if !forced && now.duration_since(cache.last_checked) < CONFIG_CACHE_CHECK_INTERVAL {
             return cache.config;
         }
 
         let fingerprint = ConfigCacheFingerprint::current();
         cache.last_checked = now;
-        if cache.force_reload || cache.fingerprint != fingerprint {
+        if forced || cache.fingerprint != fingerprint {
             reload_reason = Some(describe_config_reload(
-                cache.force_reload,
+                forced,
                 &cache.fingerprint,
                 &fingerprint,
             ));
@@ -439,24 +415,22 @@ pub fn config() -> &'static Config {
             // Re-fingerprint after the load so those self-inflicted env changes
             // don't trigger a guaranteed second reload on the next check.
             cache.fingerprint = ConfigCacheFingerprint::current();
-            cache.force_reload = false;
         }
         cache.config
     };
 
-    // Auth lookups may consult config, so do this after releasing CONFIG_CACHE.
-    if let Some(route) = changed_default_route
-        && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(&route)
-    {
-        crate::logging::error(&format!(
-            "Could not sync account order after config edit: {error}"
-        ));
+    // The account pool reconciles this the next time it is loaded, so config
+    // never calls into auth: see `take_default_route_change`.
+    if let Some(route) = changed_default_route {
+        *PENDING_DEFAULT_ROUTE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(route);
     }
 
     if let Some(reason) = reload_reason {
         crate::logging::info(&format!("CONFIG_RELOAD {}", reason));
         // A config reload can change config-derived system prompt sections
-        // (feature toggles, sponsors, ...), which legitimately invalidates the
+        // (feature toggles, ...), which legitimately invalidates the
         // KV cache prefix of warm sessions. Document it so a subsequent
         // harness-attributed cache miss is surfaced with this cause instead of
         // as an unexplained prompt mutation.
@@ -464,7 +438,7 @@ pub fn config() -> &'static Config {
         notify_config_reloaded();
         // Re-seed the global context-limit cache so user edits to named
         // provider `context_window` values take effect without a restart.
-        crate::provider::populate_context_limits_from_config();
+        populate_context_limits_from_config_ref(config);
     }
 
     config
@@ -558,12 +532,25 @@ fn config_env_fingerprint() -> Vec<(String, String)> {
     values
 }
 
+/// A default provider route that changed in config.toml behind our back (a
+/// hand edit seen on reload) and has not been applied to the account pool yet.
+static PENDING_DEFAULT_ROUTE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Take the default route a config reload saw change, if any. The account pool
+/// applies it when it is next loaded, so config reloads never reach into auth.
+pub fn take_default_route_change() -> Option<String> {
+    PENDING_DEFAULT_ROUTE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+}
+
+/// Set by [`invalidate_config_cache`], consumed by the next reload. It lives
+/// outside the cache so invalidating never depends on the cached `Config`.
+static FORCE_RELOAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn invalidate_config_cache() {
-    let mut cache = CONFIG_CACHE
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.force_reload = true;
-    drop(cache);
+    FORCE_RELOAD.store(true, std::sync::atomic::Ordering::Release);
     notify_config_reloaded();
 }
 
@@ -666,6 +653,9 @@ pub struct Config {
     /// External dictation / speech-to-text integration
     pub dictation: DictationConfig,
 
+    /// Experimental voice replies. Models and synthesis services remain external.
+    pub jarvis: JarvisConfig,
+
     /// Display/UI configuration
     pub display: DisplayConfig,
 
@@ -687,6 +677,10 @@ pub struct Config {
     /// Provider configuration
     pub provider: ProviderConfig,
 
+    /// Bounded Anthropic prompt-cache reuse during confirmed waits.
+    #[serde(skip_serializing_if = "jcode_provider_core::cache_keepalive::Config::is_default")]
+    pub cache: jcode_provider_core::cache_keepalive::Config,
+
     /// Named provider profiles, keyed by profile name.
     ///
     /// Example:
@@ -695,6 +689,18 @@ pub struct Config {
     /// base_url = "https://llm.example.com/v1"
     /// api_key_env = "MY_GATEWAY_API_KEY"
     pub providers: BTreeMap<String, NamedProviderConfig>,
+
+    /// Headers, labelled keys and model prices for built-in API-key profiles.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub api_key_profiles: BTreeMap<String, ApiKeyProfileConfig>,
+
+    /// Account routing policy: priorities, limits and budgets.
+    #[serde(skip_serializing_if = "jcode_routing_policy::config::RoutingConfig::is_default")]
+    pub routing: jcode_routing_policy::config::RoutingConfig,
+
+    /// Named egress proxies referenced by `[[routing.accounts]] egress`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub egress: BTreeMap<String, jcode_routing_policy::config::EgressConfig>,
 
     /// Agent-specific model defaults
     pub agents: AgentsConfig,
@@ -735,12 +741,6 @@ pub struct Config {
     /// Auto-judge configuration
     pub autojudge: AutoJudgeConfig,
 
-    /// Partner discovery configuration. Skipped when it matches the shipped
-    /// default so saving config never bakes today's default into the file (see
-    /// [`sponsors_is_default`]).
-    #[serde(skip_serializing_if = "sponsors_is_default")]
-    pub sponsors: SponsorsConfig,
-
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
     pub launch_hotkeys: LaunchHotkeysConfig,
 
@@ -772,7 +772,7 @@ impl WakeMode {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
     /// Ownership model for autonomous wake requests.
@@ -780,6 +780,22 @@ pub struct ServerConfig {
     /// Send mobile push notifications through the Jcode API when an account
     /// key is available. `None` means enabled; set `false` to opt out.
     pub mobile_push: Option<bool>,
+    /// Days to keep finished background tasks and their output. Zero disables cleanup.
+    pub background_task_retention_days: u64,
+    /// Minutes between check-in wakes for a still-pending background swarm
+    /// await, so a long wait cannot silence its coordinator. Zero disables.
+    pub await_checkin_minutes: u64,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            wake_mode: WakeMode::default(),
+            mobile_push: None,
+            background_task_retention_days: 7,
+            await_checkin_minutes: 15,
+        }
+    }
 }
 
 /// Agent Client Protocol adapter configuration.
@@ -796,7 +812,7 @@ impl Default for AcpConfig {
     fn default() -> Self {
         Self {
             profile: "standard".to_string(),
-            tool_profile: "acp".to_string(),
+            tool_profile: "full".to_string(),
         }
     }
 }
@@ -845,7 +861,13 @@ pub struct ToolConfig {
     pub browser_handoff: bool,
     /// Foreground time before automatic tool handoff, in milliseconds. Zero disables it.
     pub auto_background_timeout_ms: u64,
-    /// Tool profile: "full" (default), "acp", "minimal"/"lite", or "none".
+    /// Tool profile: "full" (default), "minimal"/"lite", or "none".
+    ///
+    /// "acp" is a legacy name for "full". It used to be a nine-tool
+    /// allow-list, which left ACP clients without `todo`, `bg`, `swarm`, web
+    /// search, memory, and skills. The prompt and the auto-background handoff
+    /// still referred to those tools, and because the profile is server-wide,
+    /// TUI sessions attached to an ACP-started daemon were cut down too.
     pub profile: String,
     /// Explicit allow-list. When set, only these tools are exposed.
     /// Use "*" or "all" to expose all tools without an allow-list.
@@ -869,6 +891,8 @@ pub struct ToolConfig {
     /// JavaScript in an embedded QuickJS sandbox able to call every other
     /// tool (including MCP tools). Enabled by default.
     pub codemode: bool,
+    /// Offer version-checked line anchors in direct file reads and searches.
+    pub line_anchors: bool,
 }
 
 impl Default for ToolConfig {
@@ -883,6 +907,7 @@ impl Default for ToolConfig {
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
             codemode: true,
+            line_anchors: false,
         }
     }
 }
@@ -940,23 +965,6 @@ impl ToolConfig {
         } else if self.disable_base_tools || matches!(profile.as_str(), "none" | "off" | "disabled")
         {
             Some(HashSet::new())
-        } else if matches!(profile.as_str(), "acp") {
-            Some(
-                [
-                    "bash",
-                    "read",
-                    "write",
-                    "edit",
-                    "apply_patch",
-                    "agentgrep",
-                    "ls",
-                    "batch",
-                    "mcp",
-                ]
-                .into_iter()
-                .map(|name| name.to_string())
-                .collect(),
-            )
         } else if matches!(profile.as_str(), "minimal" | "lite" | "small") {
             Some(
                 [
@@ -1017,13 +1025,28 @@ pub struct CompanionConfig {
     pub voice_waveform: bool,
     /// Show desktop notifications for companion voice state.
     pub voice_notifications: bool,
+    /// Hold the laptop Fn key (Linux, `KEY_FN` on a `global_devices` keyboard)
+    /// to talk to the running always-on Jarvis session from any window.
+    /// Fn shortcuts (Fn+F-keys, Fn+arrows) never record. Off by default.
+    pub jarvis_fn_key: bool,
+    /// Key used by `jarvis_fn_key`: `"fn"` (default) or `"rightshift"`.
+    /// Right Shift helps on laptops whose Fn never reaches Linux. Tap and
+    /// hold work the same; Right Shift with another key types normally.
+    pub jarvis_key: String,
+    /// With `jarvis_fn_key`, an Fn hold while no always-on Jarvis runs opens
+    /// one in a new terminal, records meanwhile, and sends the words once it
+    /// is ready.
+    pub jarvis_fn_launch: bool,
+    /// Extra flags for a Jarvis opened by `jarvis_fn_launch`, after
+    /// `--jarvis-always-on`, e.g. `["--jarvis-screen"]`.
+    pub jarvis_fn_launch_args: Vec<String>,
     /// Open URLs and files for the server.
     pub open: bool,
     /// Open new terminal windows for the server.
     pub spawn_terminal: bool,
     /// Lid-close override while agents work (macOS/Windows).
     pub lid: bool,
-    /// Hourly browser bridge auto-update.
+    /// Browser bridge auto-update (opt-in; off by default).
     pub browser_updates: bool,
 }
 
@@ -1034,13 +1057,81 @@ impl Default for CompanionConfig {
             voice: true,
             voice_waveform: true,
             voice_notifications: true,
+            jarvis_fn_key: false,
+            jarvis_key: "fn".to_string(),
+            jarvis_fn_launch: true,
+            jarvis_fn_launch_args: Vec::new(),
             open: true,
             spawn_terminal: true,
             lid: true,
-            browser_updates: true,
+            browser_updates: false,
         }
     }
 }
+
+/// Jarvis speech-output configuration. Synthesis services and voice models
+/// remain external to Jcode.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct JarvisConfig {
+    /// Expand Jarvis requests into readable transcript, status, context and instruction sections.
+    pub show_raw_requests: bool,
+    /// Show the original user payload instead of the clean or expanded presentation.
+    pub show_exact_request_payload: bool,
+    pub speech: JarvisSpeechConfig,
+    pub listening: JarvisListeningConfig,
+}
+
+/// Bounds for the explicitly enabled always-listening client. These settings
+/// do not enable microphone access on their own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JarvisListeningConfig {
+    pub max_agent_turns_per_hour: u32,
+    pub action_probability: f64,
+    /// Sound played when speech triggers Jarvis. Empty string disables it.
+    pub trigger_sound: String,
+    /// Keep one idle Nari connection ready so speech onset skips the handshake.
+    /// It carries no audio while idle.
+    pub warm_nari: bool,
+}
+
+impl Default for JarvisListeningConfig {
+    fn default() -> Self {
+        Self {
+            max_agent_turns_per_hour: 0,
+            action_probability: 0.5,
+            trigger_sound: "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga".into(),
+            warm_nari: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JarvisSpeechConfig {
+    /// Full OpenAI-compatible POST endpoint returning WAV audio.
+    /// None selects the free local eSpeak placeholder.
+    pub endpoint: Option<String>,
+    pub model: String,
+    pub voice: String,
+    /// Name of an environment variable, never the secret itself.
+    pub api_key_env: Option<String>,
+}
+
+impl Default for JarvisSpeechConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            model: "piper-jarvis".into(),
+            voice: "jarvis".into(),
+            api_key_env: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod jarvis_config_tests;
 
 /// External dictation / speech-to-text integration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1048,7 +1139,9 @@ impl Default for CompanionConfig {
 pub struct DictationConfig {
     /// Shell command to run. Must print the transcript to stdout.
     pub command: String,
-    /// How to apply the resulting transcript.
+    /// How to apply the resulting transcript. `insert` (the default) puts it
+    /// at the composer caret and never sends: voice is an input method, so the
+    /// user edits and sends the words themselves. `send` is opt-in.
     pub mode: crate::protocol::TranscriptMode,
     /// Optional in-app hotkey to trigger dictation.
     pub key: String,
@@ -1075,6 +1168,10 @@ pub struct DictationConfig {
     /// Optional WebSocket URL override for the selected streaming backend
     /// (Nari or Soniox). Empty uses the provider's public endpoint.
     pub base_url: String,
+    /// Speech model requested from the selected streaming backend (for
+    /// example `stt-rt-v6` for Soniox). Empty uses that backend's default.
+    /// It belongs to `backend`, so changing the backend clears it.
+    pub model: String,
 }
 
 /// Built-in voice transcription backend selected by `[dictation] backend`.
@@ -1085,6 +1182,8 @@ pub enum DictationBackend {
     Auto,
     Nari,
     Soniox,
+    #[serde(rename = "elevenlabs")]
+    ElevenLabs,
     Subscription,
     Command,
 }
@@ -1093,21 +1192,23 @@ impl Default for DictationConfig {
     fn default() -> Self {
         Self {
             command: String::new(),
-            mode: crate::protocol::TranscriptMode::Send,
+            mode: crate::protocol::TranscriptMode::Insert,
             key: "off".to_string(),
-            timeout_secs: 90,
+            timeout_secs: 300,
             vocabulary: Vec::new(),
             recorder: String::new(),
             global_devices: Vec::new(),
             composer_preview: true,
             backend: DictationBackend::Auto,
             base_url: String::new(),
+            model: String::new(),
         }
     }
 }
 
 pub mod change_report;
 mod config_file;
+pub use config_file::desktop_hidden_models;
 mod default_file;
 mod display_summary;
 mod env_overrides;
@@ -1119,12 +1220,3 @@ mod tests;
 #[cfg(test)]
 #[path = "config_color_tests.rs"]
 mod color_tests;
-
-/// Whether integration discovery settings carry no information beyond the shipped
-/// default, so `[sponsors]` can be left out of written config files.
-///
-/// Explicit opt-ins must be serialized so unrelated preference saves cannot
-/// silently disable discovery on the next load.
-fn sponsors_is_default(sponsors: &SponsorsConfig) -> bool {
-    !sponsors.enabled && sponsors.endpoint == SponsorsConfig::default().endpoint
-}

@@ -312,6 +312,7 @@ struct SyncPipe {
 struct SyncPipeState {
     shutdown: bool,
     read_timeout: Option<std::time::Duration>,
+    write_timeout: Option<std::time::Duration>,
 }
 
 impl SyncStream {
@@ -350,6 +351,20 @@ impl SyncStream {
             ));
         }
         self.state()?.read_timeout = timeout;
+        Ok(())
+    }
+
+    /// Set the timeout for subsequent writes on this stream and all its
+    /// clones, mirroring `UnixStream::set_write_timeout`. A timed-out write is
+    /// canceled and drained before returning, like a timed-out read.
+    pub fn set_write_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        if timeout.is_some_and(|duration| duration.is_zero()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "write timeout must be nonzero",
+            ));
+        }
+        self.state()?.write_timeout = timeout;
         Ok(())
     }
 
@@ -408,7 +423,11 @@ impl SyncStream {
                 Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe shut down"))
             };
         }
-        let timeout = if reading { state.read_timeout } else { None };
+        let timeout = if reading {
+            state.read_timeout
+        } else {
+            state.write_timeout
+        };
         // The caller borrows its buffer for this entire blocking call. The
         // boxed OVERLAPPED and owned event remain stable through completion.
         let started = start(

@@ -107,10 +107,60 @@ impl App {
         );
     }
 
-    pub(super) fn start_background_client_update(&mut self, session_id: String) {
-        self.start_background_client_maintenance(
+    pub(super) fn parse_update_command_channel(
+        trimmed: &str,
+    ) -> Option<Result<Option<crate::config::UpdateChannel>, &'static str>> {
+        let rest = if trimmed == "/update" {
+            ""
+        } else {
+            let rest = trimmed.strip_prefix("/update ")?;
+            rest.trim()
+        };
+        if rest.is_empty() {
+            return Some(Ok(None));
+        }
+        match rest.to_ascii_lowercase().as_str() {
+            "prerelease" | "pre-release" | "preview" | "--prerelease" | "--preview" => {
+                Some(Ok(Some(crate::config::UpdateChannel::Preview)))
+            }
+            "stable" | "--stable" => Some(Ok(Some(crate::config::UpdateChannel::Stable))),
+            _ => Some(Err("Usage: /update [prerelease|preview|stable]")),
+        }
+    }
+
+    pub(super) fn start_background_client_update_with_channel(
+        &mut self,
+        session_id: String,
+        explicit_channel: Option<crate::config::UpdateChannel>,
+    ) {
+        if crate::tui::is_ssh_remote() {
+            self.set_status_notice("Update the client and SSH server separately, then reconnect");
+            return;
+        }
+        if let Some(channel) = explicit_channel {
+            if let Err(err) = crate::config::Config::set_update_channel(channel) {
+                let message = format!("Failed to save update channel '{channel}': {err}");
+                self.set_status_notice(&message);
+                self.push_display_message(DisplayMessage::error(message));
+                return;
+            }
+            let notice = match channel {
+                crate::config::UpdateChannel::Preview => {
+                    "Update channel set to preview. Checking for prereleases..."
+                }
+                crate::config::UpdateChannel::Stable => {
+                    "Update channel set to stable. Checking for stable release..."
+                }
+                crate::config::UpdateChannel::Main => {
+                    "Update channel set to main. Checking for updates..."
+                }
+            };
+            self.set_status_notice(notice);
+        }
+        self.start_background_client_maintenance_with_channel(
             crate::bus::ClientMaintenanceAction::Update,
             session_id,
+            explicit_channel,
         );
     }
 
@@ -118,6 +168,15 @@ impl App {
         &mut self,
         action: crate::bus::ClientMaintenanceAction,
         session_id: String,
+    ) {
+        self.start_background_client_maintenance_with_channel(action, session_id, None);
+    }
+
+    fn start_background_client_maintenance_with_channel(
+        &mut self,
+        action: crate::bus::ClientMaintenanceAction,
+        session_id: String,
+        explicit_channel: Option<crate::config::UpdateChannel>,
     ) {
         if crate::tui::is_ssh_remote() {
             self.set_status_notice("Update the client and SSH server separately, then reconnect");
@@ -138,7 +197,10 @@ impl App {
 
         match action {
             crate::bus::ClientMaintenanceAction::Update => {
-                crate::update::spawn_background_session_update(session_id);
+                crate::update::spawn_background_session_update_with_channel(
+                    session_id,
+                    explicit_channel,
+                );
             }
             crate::bus::ClientMaintenanceAction::Rebuild => {
                 self.set_status_notice("Starting background rebuild...");
@@ -172,7 +234,7 @@ impl App {
                         action,
                         format!("{} → {} available", current, latest),
                         format!(
-                            "Current: `{}`\nLatest: `{}`\n\nRun `/update` to install, or wait while auto-update continues if enabled.",
+                            "Current: `{}`\nLatest: `{}`\n\nRun `/update` (or `jcode update`) to install.",
                             current, latest
                         ),
                     ),
@@ -511,13 +573,19 @@ Do not force-push or discard local commits without confirming they are already u
         prompt: String,
         repo_dir: Option<&std::path::Path>,
     ) -> anyhow::Result<bool> {
-        let mut session = crate::session::Session::create(Some(self.session.id.clone()), None);
+        let mut session = crate::session::Session::create(Some(self.session.id().to_owned()), None);
         if let Some(dir) = repo_dir {
-            session.working_dir = Some(dir.display().to_string());
+            session.apply_workspace(crate::session::Workspace {
+                working_dir: Some(dir.display().to_string()),
+                ..session.workspace()
+            });
         } else {
-            session.working_dir = self.session.working_dir.clone();
+            session.apply_workspace(crate::session::Workspace {
+                working_dir: self.session.working_dir().map(str::to_owned),
+                ..session.workspace()
+            });
         }
-        let session_id = session.id.clone();
+        let session_id = session.id().to_owned();
         let _ = session.save();
         App::save_startup_submission_for_session(&session_id, prompt, Vec::new());
         self.spawn_merge_session_terminal(&session_id, repo_dir)
@@ -536,5 +604,41 @@ Do not force-push or discard local commits without confirming they are already u
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let socket = std::env::var("JCODE_SOCKET").ok();
         super::spawn_in_new_terminal(&exe, session_id, &cwd, socket.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod update_command_tests {
+    use super::*;
+    use crate::config::UpdateChannel;
+
+    #[test]
+    fn parse_update_command_channel_handles_default_prerelease_and_stable() {
+        assert_eq!(App::parse_update_command_channel("/update"), Some(Ok(None)));
+        assert_eq!(
+            App::parse_update_command_channel("/update prerelease"),
+            Some(Ok(Some(UpdateChannel::Preview)))
+        );
+        assert_eq!(
+            App::parse_update_command_channel("/update preview"),
+            Some(Ok(Some(UpdateChannel::Preview)))
+        );
+        assert_eq!(
+            App::parse_update_command_channel("/update --prerelease"),
+            Some(Ok(Some(UpdateChannel::Preview)))
+        );
+        assert_eq!(
+            App::parse_update_command_channel("/update stable"),
+            Some(Ok(Some(UpdateChannel::Stable)))
+        );
+        assert_eq!(
+            App::parse_update_command_channel("/update --stable"),
+            Some(Ok(Some(UpdateChannel::Stable)))
+        );
+        assert!(matches!(
+            App::parse_update_command_channel("/update nightly"),
+            Some(Err(_))
+        ));
+        assert_eq!(App::parse_update_command_channel("/update-sim"), None);
     }
 }

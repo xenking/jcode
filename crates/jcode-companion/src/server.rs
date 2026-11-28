@@ -28,6 +28,12 @@ pub struct CompanionOptions {
     pub voice_waveform: bool,
     /// Desktop notifications for push-to-talk state.
     pub voice_notifications: bool,
+    /// Bare Fn hold talks to the always-on Jarvis session.
+    pub jarvis_fn_key: bool,
+    /// `"fn"` or `"rightshift"`.
+    pub jarvis_key: String,
+    /// Fn opens an always-on Jarvis when none is running.
+    pub jarvis_fn_launch: bool,
     /// Handle `open` / `reveal` requests.
     pub open: bool,
     /// Handle `spawn_terminal` requests.
@@ -46,6 +52,9 @@ impl CompanionOptions {
             browser_updates: config.browser_updates,
             voice_waveform: config.voice_waveform,
             voice_notifications: config.voice_notifications,
+            jarvis_fn_key: config.jarvis_fn_key,
+            jarvis_key: config.jarvis_key.clone(),
+            jarvis_fn_launch: config.jarvis_fn_launch,
             open: config.open,
             spawn_terminal: config.spawn_terminal,
             lid: config.lid,
@@ -77,9 +86,12 @@ impl Default for CompanionOptions {
         Self {
             socket: socket_path(),
             voice: true,
-            browser_updates: true,
+            browser_updates: false,
             voice_waveform: true,
             voice_notifications: true,
+            jarvis_fn_key: false,
+            jarvis_key: "fn".to_string(),
+            jarvis_fn_launch: true,
             open: true,
             spawn_terminal: true,
             lid: true,
@@ -325,6 +337,7 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
     // loop back into the companion socket.
     jcode_base::env::set_var("JCODE_COMPANION", "1");
 
+    let _instance = lock_instance(&options.socket)?;
     let listener = bind(&options.socket)?;
     // Windows named-pipe acceptance replaces the listening pipe instance.
     #[cfg(windows)]
@@ -342,6 +355,9 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
         crate::voice::spawn(crate::voice::VoiceIndicators {
             notifications: options.voice_notifications,
             waveform: options.voice_waveform,
+            jarvis_fn_key: options.jarvis_fn_key,
+            jarvis_key: crate::voice::jarvis_key_code(&options.jarvis_key),
+            jarvis_fn_launch: options.jarvis_fn_launch,
         });
     }
     if options.browser_updates {
@@ -384,7 +400,7 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
     result
 }
 
-fn bind(path: &Path) -> Result<jcode_transport::Listener> {
+fn lock_instance(path: &Path) -> Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -393,29 +409,37 @@ fn bind(path: &Path) -> Result<jcode_transport::Listener> {
             )
         })?;
     }
-    if jcode_transport::is_socket_path(path) {
-        // A live companion answers. Only a stale socket file may be replaced.
-        if jcode_base::companion_client::request_at(
-            path,
-            &CompanionRequest::Status,
-            Duration::from_millis(500),
-        )
-        .is_ok()
-        {
-            anyhow::bail!("jcode companion is already running ({})", path.display());
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("sock.lock"))
+        .with_context(|| format!("failed to open companion lock for {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            anyhow::bail!("jcode companion is already running ({})", path.display())
         }
-        jcode_transport::remove_socket(path);
+        Err(std::fs::TryLockError::Error(err)) => Err(err).context("lock companion instance"),
     }
+}
+
+fn bind(path: &Path) -> Result<jcode_transport::Listener> {
     #[cfg(unix)]
-    {
-        jcode_transport::Listener::bind(path)
-            .with_context(|| format!("failed to bind {}", path.display()))
+    if jcode_transport::is_socket_path(path) {
+        // Older builds don't take the lock. A connection is enough to prove
+        // one owns the socket, even when its request handlers are stalled.
+        match jcode_transport::SyncStream::connect(path) {
+            Ok(_) => anyhow::bail!("jcode companion is already running ({})", path.display()),
+            Err(err) if err.kind() == std::io::ErrorKind::ConnectionRefused => {
+                jcode_transport::remove_socket(path);
+            }
+            Err(err) => return Err(err).context("probe existing companion socket"),
+        }
     }
-    #[cfg(windows)]
-    {
-        jcode_transport::Listener::bind(path)
-            .with_context(|| format!("failed to bind {}", path.display()))
-    }
+    jcode_transport::Listener::bind(path)
+        .with_context(|| format!("failed to bind {}", path.display()))
 }
 
 async fn serve(stream: jcode_transport::Stream, companion: &Companion) -> Result<()> {

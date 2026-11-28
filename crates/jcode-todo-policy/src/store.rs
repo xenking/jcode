@@ -50,6 +50,10 @@ pub fn todo_file_path(home: &Path, session_id: &str, file: TodoFile) -> PathBuf 
         .join(format!("{session_id}{}.json", file.suffix()))
 }
 
+/// Cancellation history is stored separately from the active plan.
+mod cancellation;
+pub use cancellation::{TodoCancellation, append_cancellations, load_cancellations};
+
 /// Persisted long-session review clock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoReviewState {
@@ -181,6 +185,9 @@ fn load_snapshot_with_background_dir(
         gate_observations: read_or_default(&path(TodoFile::GateObservations)),
         long_session_review_due: review.is_some_and(|state| state.is_due(chrono::Utc::now())),
         running_background_tasks,
+        pending_swarm_await: None,
+        session_id: session_id.to_string(),
+        running_swarm_members: Vec::new(),
     }
 }
 
@@ -516,7 +523,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(load_snapshot(&dir, "missing"), TodoSnapshot::default());
+        assert_eq!(
+            load_snapshot(&dir, "missing"),
+            TodoSnapshot {
+                session_id: "missing".into(),
+                ..TodoSnapshot::default()
+            }
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

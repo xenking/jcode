@@ -1,6 +1,9 @@
 pub mod account_picker;
 pub(crate) mod app;
+mod cross_swarm_dm;
+pub mod jarvis;
 pub mod justrust_status;
+pub(crate) mod screen_context;
 
 #[derive(Clone)]
 pub struct ContextSnapshot {
@@ -28,24 +31,36 @@ pub struct BackgroundTaskRow {
 }
 
 pub mod backend;
+pub(crate) mod clipboard;
 mod cloud_git;
 mod cloud_latency;
 mod cloud_status;
 pub(crate) mod color_support;
+mod command_registry;
+mod commit_log;
+mod composer_grammar;
+mod copy_badge_state;
 mod core;
+mod idle_donut;
+mod time_labels;
+mod picker_overlay;
+mod redraw_reason;
+pub(crate) use idle_donut::{REDRAW_DEEP_IDLE_AFTER, idle_donut_active};
+mod effort_labels;
 pub(crate) mod fuzzy;
+mod git_info;
+mod git_porcelain;
 pub mod herdr;
-mod info_widget_cloud;
-mod info_widget_cloud_directories;
+pub mod rex;
 // Terminal image display + metadata helpers now live in the dependency-free
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
 // so existing `crate::tui::image` paths keep working.
 pub use jcode_terminal_image::display as image;
+#[path = "tui_text_filter.rs"]
+mod text_filter;
+
 mod focus_carryover;
 pub mod info_widget;
-mod info_widget_layout;
-mod info_widget_overview;
-mod info_widget_settle;
 pub mod info_widget_stability;
 pub mod keybind;
 mod layout_utils;
@@ -56,13 +71,15 @@ pub mod mermaid;
 pub mod permissions {
     pub use jcode_tui_permissions::*;
 }
+mod progress_bar;
 mod redraw_schedule;
+mod secondary_render;
 #[allow(unused_imports)]
 pub(crate) use redraw_schedule::{
-    REDRAW_DEEP_IDLE, REDRAW_DEEP_IDLE_AFTER, REDRAW_IDLE, REDRAW_PASSIVE_LIVENESS,
+    REDRAW_DEEP_IDLE, REDRAW_IDLE, REDRAW_PASSIVE_LIVENESS,
     REDRAW_REMOTE_STARTUP, REDRAW_STATIC_STREAM, REDRAW_SWARM_SPINNER,
-    current_full_frame_redraw_reason, idle_donut_active, last_full_frame_redraw_reason,
-    periodic_redraw_required, periodic_redraw_required_excluding_idle_animation, redraw_interval,
+    current_full_frame_redraw_reason, periodic_redraw_required,
+    periodic_redraw_required_excluding_idle_animation, redraw_interval,
     redraw_interval_with_policy,
 };
 mod remote_diff;
@@ -74,6 +91,7 @@ mod terminal_events;
 pub mod terminal_setup;
 pub mod test_harness;
 pub mod theme_detect;
+mod todo_card_payload;
 mod ui;
 mod ui_diff;
 pub mod usage_overlay;
@@ -83,11 +101,13 @@ pub mod workspace_client;
 pub use jcode_tui_workspace::workspace_map;
 pub use jcode_tui_workspace::workspace_map_widget;
 
+pub use self::core::ProcessingStatus;
 pub use crate::generated_image::{
     generated_image_side_panel_markdown, generated_image_side_panel_page_id,
     write_generated_image_side_panel_page,
 };
-pub use app::{App, CloudHandoff, CopyBadgeUiState, ProcessingStatus, RunResult};
+pub use app::{App, CloudHandoff, RunResult};
+pub use copy_badge_state::CopyBadgeUiState;
 
 use crate::message::ToolCall;
 use ratatui::prelude::Frame;
@@ -118,543 +138,14 @@ pub use jcode_tui_core::{
 };
 pub use jcode_tui_messages::DisplayMessage;
 
-fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
-    use crossterm::event::KeyboardEnhancementFlags;
-
-    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-}
-
-/// Whether this process still owns an unbalanced entry on the terminal's
-/// Kitty keyboard-protocol stack.
-///
-/// The stack is shared with every program on the terminal: an editor spawned
-/// via `suspend_terminal_for_editor` may push its own entry after jcode popped
-/// ours. A later cleanup (signal handler, guard drop, picker exit) must not pop
-/// again, or it would remove the editor's entry instead of ours.
-static KITTY_KEYBOARD_PUSH_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// Whether an external editor currently owns the terminal.
-///
-/// During editor handoff jcode has already restored cooked input, left the
-/// alternate screen, and disabled its reporting modes. If jcode receives a
-/// process-only termination signal while the editor remains alive, cleanup must
-/// not write mode disables again because the editor may have enabled those modes
-/// for itself.
-static EDITOR_TERMINAL_OWNERSHIP: AtomicBool = AtomicBool::new(false);
-
-/// Whether a termination signal has already begun the process's final cleanup.
-///
-/// Once termination started, the process is exiting and the shell behind it
-/// must inherit a fully restored terminal. Re-arming any mode afterwards (an
-/// editor reclaim/resume that lost the race against the signal cleanup) would
-/// leave modes enabled after death because no further cleanup runs (greptile
-/// #4232838288). Recorded under the kitty state lock so it cannot interleave
-/// with the reclaim's ownership swap.
-static TERMINATION_STARTED: AtomicBool = AtomicBool::new(false);
-
-/// Serializes the terminal writes and the ownership flag transitions of the
-/// Kitty push/pop pair. A termination signal (tokio task, not a UNIX signal
-/// handler, so taking a lock is allowed) runs its terminal cleanup on the
-/// event loop; this lock makes that cleanup wait for an in-flight push or pop
-/// to finish instead of observing a half-applied state and skipping the pop.
-static KITTY_KEYBOARD_STATE_LOCK: Mutex<()> = Mutex::new(());
+#[path = "mod_parts/terminal_modes.rs"]
+mod terminal_modes;
+#[allow(unused_imports)]
+pub use terminal_modes::*;
 
 #[cfg(test)]
-pub(crate) static TERMINAL_OWNERSHIP_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-/// Request Kitty keyboard reporting and tmux's extended-key mode.
-///
-/// Intentionally avoid REPORT_ALL_KEYS_AS_ESCAPE_CODES for now. When that flag is enabled,
-/// terminals such as kitty/Alacritty/Warp can report printable keys as a base key plus
-/// modifiers instead of the final text produced by the active keyboard layout. Crossterm does
-/// not yet expose kitty's associated text / alternate key data, so we cannot safely reconstruct
-/// shifted symbols for every keyboard layout. Prefer the terminal-delivered printable character
-/// and only synthesize ASCII letter casing in the input fallback.
-///
-/// Returns whether the requests were written, not whether the terminal supports them.
-pub fn enable_keyboard_enhancement() -> bool {
-    let _guard = kitty_keyboard_state_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    if termination_started() {
-        crate::logging::info("Keyboard enhancement request skipped: termination already started");
-        return false;
-    }
-    let result = enable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux()).is_ok();
-    crate::logging::info(&format!(
-        "Keyboard enhancement request: {}",
-        if result { "sent" } else { "FAILED" }
-    ));
-    if result {
-        // Set while still holding the state lock so a signal cleanup cannot
-        // observe the push write without the ownership flag.
-        kitty_keyboard_push_active().store(true, Ordering::Release);
-    }
-    result
-}
-
-/// Adopt a Kitty keyboard entry the previous process left on the stack when
-/// it exec'd into this one (restart, reload, rebuild, update).
-///
-/// The exec handoff deliberately keeps the terminal in raw mode with all
-/// modes armed instead of popping and re-pushing, so this process must record
-/// that the inherited entry is ours to pop on exit. Otherwise every cleanup
-/// gate skips the pop and the following shell is left in CSI u mode.
-pub fn adopt_keyboard_enhancement_ownership() {
-    let _guard = kitty_keyboard_state_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    if termination_started() {
-        return;
-    }
-    kitty_keyboard_push_active().store(true, Ordering::Release);
-}
-
-fn inside_tmux() -> bool {
-    std::env::var_os("TMUX").is_some_and(|value| !value.is_empty())
-}
-
-fn enable_keyboard_enhancement_to(
-    writer: &mut impl std::io::Write,
-    inside_tmux: bool,
-) -> std::io::Result<()> {
-    use crossterm::event::PushKeyboardEnhancementFlags;
-    request_tmux_extended_keys_to(writer, inside_tmux)?;
-    crossterm::execute!(
-        writer,
-        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
-    )
-}
-
-/// Reset tmux extended keys and pop Kitty keyboard reporting.
-///
-/// The pop is skipped when this process has no unbalanced push on the
-/// terminal's stack (a suspended editor or the calling shell may own the top
-/// entry), so an extra pop cannot remove someone else's keyboard settings.
-pub fn disable_keyboard_enhancement() {
-    if !disable_keyboard_enhancement_if_owned() {
-        crate::logging::info("Keyboard enhancement pop skipped: no active push owned");
-    }
-}
-
-/// Pop the Kitty keyboard entry this process pushed, if it is still unbalanced.
-///
-/// Returns whether a pop was performed. The state lock orders this against
-/// a concurrent push or signal cleanup, so the flag swap and the pop write
-/// happen as one unit: termination waits for the pop instead of exiting with
-/// the entry still active.
-pub fn disable_keyboard_enhancement_if_owned() -> bool {
-    disable_keyboard_enhancement_if_owned_to(&mut std::io::stdout(), inside_tmux())
-}
-
-/// Writer-backed form of [`disable_keyboard_enhancement_if_owned`] so tests
-/// can verify the pop bytes without writing to the developer's terminal or
-/// resetting tmux extended keys.
-fn disable_keyboard_enhancement_if_owned_to(
-    writer: &mut impl std::io::Write,
-    inside_tmux: bool,
-) -> bool {
-    let _guard = kitty_keyboard_state_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    if !kitty_keyboard_push_active().swap(false, std::sync::atomic::Ordering::AcqRel) {
-        return false;
-    }
-    let _ = disable_keyboard_enhancement_to(writer, inside_tmux);
-    true
-}
-
-/// Test hook: reset the ownership flag without touching the terminal.
-#[cfg(test)]
-fn reset_keyboard_enhancement_ownership_for_test() {
-    kitty_keyboard_push_active().store(false, Ordering::Release);
-}
-
-fn kitty_keyboard_push_active() -> &'static AtomicBool {
-    &KITTY_KEYBOARD_PUSH_ACTIVE
-}
-
-fn kitty_keyboard_state_lock() -> &'static Mutex<()> {
-    &KITTY_KEYBOARD_STATE_LOCK
-}
-
-pub fn editor_owns_terminal() -> bool {
-    EDITOR_TERMINAL_OWNERSHIP.load(Ordering::Acquire)
-}
-
-pub fn set_editor_terminal_ownership(owns_terminal: bool) {
-    EDITOR_TERMINAL_OWNERSHIP.store(owns_terminal, Ordering::Release);
-}
-
-/// Publish that an external editor owns the terminal, atomically with the
-/// signal cleanup's ownership check (both take the kitty state lock).
-///
-/// Callers must only publish AFTER jcode's own terminal restores finished
-/// (`suspend_terminal_for_editor` completed): while the restores are in flight
-/// the flag must stay false so a termination signal in that window performs a
-/// full cleanup instead of skipping one and leaving the shell in raw mode
-/// (greptile #4230626960).
-pub fn publish_editor_terminal_handoff() {
-    with_kitty_state_lock(|| {
-        set_editor_terminal_ownership(true);
-    });
-}
-
-/// Reclaim the terminal after the editor exited, atomically with the signal
-/// cleanup's ownership check. Called before `resume_terminal_after_editor`
-/// re-arms jcode's own modes: a signal arriving after the editor exited must
-/// run the full cleanup against whatever state the resume loop has armed so
-/// far, not skip it.
-pub fn reclaim_editor_terminal_handoff() {
-    with_kitty_state_lock(|| {
-        // The signal cleanup released the lock but the process has not exited
-        // yet: this reclaim runs in that gap, and letting the subsequent resume
-        // re-arm modes would leave them enabled after death because no further
-        // cleanup runs (greptile #4232838288). Leave ownership set so the
-        // resume loop sees the terminating state and writes nothing.
-        if termination_started() {
-            return;
-        }
-        set_editor_terminal_ownership(false);
-    });
-}
-
-/// Run `cleanup` while holding the kitty state lock, so an in-flight editor
-/// handoff publication or reclaim (which takes the same lock) is ordered
-/// against it. A signal arriving mid-handoff then sees a consistent state:
-/// either jcode still owns the terminal (restore everything) or the editor
-/// does (skip).
-pub fn with_kitty_state_lock<R>(cleanup: impl FnOnce() -> R) -> R {
-    let lock = kitty_keyboard_state_lock();
-    let _state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    cleanup()
-}
-
-/// Record that termination has begun, under the kitty state lock.
-///
-/// Called by the termination-signal cleanup as soon as it decides what to do
-/// with the terminal. Recording under the same lock as the editor handoff's
-/// publish/reclaim closes the gap between this cleanup releasing the lock and
-/// the process actually exiting: a reclaim racing into that gap observes the
-/// flag and leaves the terminal modes alone, so the shell receives normal
-/// input after jcode dies instead of escape sequences (greptile #4232838288).
-pub fn record_termination_started() {
-    with_kitty_state_lock(|| {
-        TERMINATION_STARTED.store(true, Ordering::Release);
-    });
-}
-
-fn termination_started() -> bool {
-    TERMINATION_STARTED.load(Ordering::Acquire)
-}
-
-/// Test hook: clear the shared termination flag without touching the terminal.
-#[cfg(test)]
-fn reset_termination_started_for_test() {
-    TERMINATION_STARTED.store(false, Ordering::Release);
-}
-
-fn disable_keyboard_enhancement_to(
-    writer: &mut impl std::io::Write,
-    inside_tmux: bool,
-) -> std::io::Result<()> {
-    if inside_tmux {
-        writer.write_all(b"\x1b[>4;0m")?;
-    }
-    crossterm::execute!(writer, crossterm::event::PopKeyboardEnhancementFlags)
-}
-
-fn request_tmux_extended_keys_to(
-    writer: &mut impl std::io::Write,
-    inside_tmux: bool,
-) -> std::io::Result<()> {
-    if inside_tmux {
-        // `extended-keys on` needs modifyOtherKeys opt-in, not a Kitty push.
-        writer.write_all(b"\x1b[>4;2m")?;
-    }
-    Ok(())
-}
-
-fn reapply_keyboard_enhancement_to(
-    writer: &mut impl std::io::Write,
-    inside_tmux: bool,
-) -> std::io::Result<()> {
-    request_tmux_extended_keys_to(writer, inside_tmux)?;
-    write!(writer, "\x1b[={}u", keyboard_enhancement_flags().bits())
-}
-
-/// Reassert terminal modes that terminals may clear while the TUI remains alive.
-///
-/// Kitty keyboard enhancement uses its `set` form rather than the stack-based
-/// `push`, keeping the shutdown pop balanced. Enabling focus reporting may itself
-/// produce a focus event, so focus-event handlers must pass `focus_change = false`.
-pub(crate) fn reapply_terminal_modes_to(
-    writer: &mut impl std::io::Write,
-    mouse_capture: bool,
-    keyboard_enhanced: bool,
-    focus_change: bool,
-) -> std::io::Result<()> {
-    use crossterm::QueueableCommand;
-    use crossterm::event::{EnableBracketedPaste, EnableFocusChange, EnableMouseCapture};
-
-    writer.queue(EnableBracketedPaste)?;
-    if focus_change {
-        writer.queue(EnableFocusChange)?;
-    }
-    if mouse_capture {
-        writer.queue(EnableMouseCapture)?;
-        // Crossterm toggles Win32 console mouse input on Windows, but ConPTY
-        // hosts such as VS Code also need the VT tracking modes reasserted.
-        #[cfg(windows)]
-        writer.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h")?;
-    }
-    if keyboard_enhanced {
-        reapply_keyboard_enhancement_to(writer, inside_tmux())?;
-    }
-    writer.flush()
-}
-
-pub(crate) fn reapply_configured_terminal_modes_after_focus() {
-    let policy = crate::perf::tui_policy();
-    if let Err(error) = reapply_terminal_modes_after_focus_to(
-        &mut std::io::stdout(),
-        policy.enable_mouse_capture,
-        policy.enable_keyboard_enhancement,
-    ) {
-        crate::logging::warn(&format!("failed to reapply terminal modes: {error}"));
-    }
-}
-
-fn reapply_terminal_modes_after_focus_to(
-    writer: &mut impl std::io::Write,
-    mouse_capture: bool,
-    keyboard_enhanced: bool,
-) -> std::io::Result<()> {
-    reapply_terminal_modes_to(
-        writer,
-        mouse_capture,
-        keyboard_enhanced,
-        // Ghostty reports its current focus when mode 1004 is enabled. Re-arming
-        // it from FocusGained would feed that reply back into this handler forever.
-        // Startup and resume-after-editor still enable focus reporting normally.
-        false,
-    )
-}
-
-#[cfg(test)]
-mod terminal_mode_tests {
-    use super::{
-        disable_keyboard_enhancement_to, enable_keyboard_enhancement_to,
-        kitty_keyboard_push_active, reapply_keyboard_enhancement_to,
-        reapply_terminal_modes_after_focus_to, reapply_terminal_modes_to,
-        reset_keyboard_enhancement_ownership_for_test,
-    };
-
-    #[test]
-    fn disable_skips_kitty_pop_when_no_push_is_owned() {
-        let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        reset_keyboard_enhancement_ownership_for_test();
-
-        // Greptile #4228191597: suspend_terminal_for_editor already popped our
-        // entry while the editor runs, so an extra pop (signal handler firing in
-        // that window) must be a no-op instead of removing the editor's own
-        // stack entry.
-        assert!(!super::disable_keyboard_enhancement_if_owned());
-        assert!(!kitty_keyboard_push_active().load(std::sync::atomic::Ordering::Acquire));
-
-        reset_keyboard_enhancement_ownership_for_test();
-    }
-
-    #[test]
-    fn disable_pops_kitty_entry_exactly_once_then_ownership_is_released() {
-        let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        reset_keyboard_enhancement_ownership_for_test();
-
-        // Greptile #4228894633: run the pop against a buffer so the test never
-        // writes the pop (or the tmux extended-keys reset) to the developer's
-        // real terminal.
-        kitty_keyboard_push_active().store(true, std::sync::atomic::Ordering::Release);
-        let mut output = Vec::new();
-        assert!(super::disable_keyboard_enhancement_if_owned_to(
-            &mut output,
-            false
-        ));
-        assert!(!output.is_empty());
-        assert!(!kitty_keyboard_push_active().load(std::sync::atomic::Ordering::Acquire));
-
-        // A second cleanup (SIGTERM during the editor window, or a duplicated
-        // teardown) must not pop again now that the ownership is released.
-        let mut second = Vec::new();
-        assert!(!super::disable_keyboard_enhancement_if_owned_to(
-            &mut second,
-            false
-        ));
-        assert!(second.is_empty());
-
-        reset_keyboard_enhancement_ownership_for_test();
-    }
-
-    #[test]
-    fn adopt_records_inherited_entry_without_pushing() {
-        let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        reset_keyboard_enhancement_ownership_for_test();
-
-        // Greptile #4228894613: after an exec handoff the entry is already on
-        // the stack, so adopting must only record ownership — no push bytes —
-        // and the pop must then balance the inherited entry.
-        super::adopt_keyboard_enhancement_ownership();
-        assert!(kitty_keyboard_push_active().load(std::sync::atomic::Ordering::Acquire));
-
-        let mut output = Vec::new();
-        assert!(super::disable_keyboard_enhancement_if_owned_to(
-            &mut output,
-            false
-        ));
-        assert_eq!(output, b"\x1b[<1u");
-
-        reset_keyboard_enhancement_ownership_for_test();
-    }
-
-    #[test]
-    fn cleanup_waits_for_in_flight_kitty_push_to_finish() {
-        let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        reset_keyboard_enhancement_ownership_for_test();
-
-        // Greptile #4228894626: a termination cleanup must not observe the
-        // half-applied state between the push write and the ownership flag,
-        // so the disable waits for the state lock instead of racing it. Hold
-        // the lock, set the flag as if a push just completed, and confirm a
-        // concurrent cleanup stays blocked until the lock is released.
-        let state_guard = super::kitty_keyboard_state_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        kitty_keyboard_push_active().store(true, std::sync::atomic::Ordering::Release);
-
-        let cleanup = std::thread::spawn(|| {
-            // Buffer-backed so the blocked cleanup writes no bytes to the
-            // developer's terminal; the flag swap is the observable effect.
-            let mut sink = Vec::new();
-            super::disable_keyboard_enhancement_if_owned_to(&mut sink, false)
-        });
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        // The cleanup is still blocked on the state lock we hold, so the flag
-        // must be untouched and the thread must not have returned yet.
-        assert!(!cleanup.is_finished());
-        assert!(kitty_keyboard_push_active().load(std::sync::atomic::Ordering::Acquire));
-
-        drop(state_guard);
-        assert!(cleanup.join().expect("cleanup thread"));
-        assert!(!kitty_keyboard_push_active().load(std::sync::atomic::Ordering::Acquire));
-
-        reset_keyboard_enhancement_ownership_for_test();
-    }
-
-    #[test]
-    fn tmux_keyboard_lifecycle_requests_and_resets_extended_keys() {
-        let mut output = Vec::new();
-        enable_keyboard_enhancement_to(&mut output, true).unwrap();
-        assert_eq!(output, b"\x1b[>4;2m\x1b[>7u");
-
-        output.clear();
-        reapply_keyboard_enhancement_to(&mut output, true).unwrap();
-        assert_eq!(output, b"\x1b[>4;2m\x1b[=7u");
-
-        output.clear();
-        disable_keyboard_enhancement_to(&mut output, true).unwrap();
-        assert_eq!(output, b"\x1b[>4;0m\x1b[<1u");
-    }
-
-    #[test]
-    fn outside_tmux_keyboard_lifecycle_keeps_kitty_protocol_only() {
-        let mut output = Vec::new();
-        enable_keyboard_enhancement_to(&mut output, false).unwrap();
-        assert_eq!(output, b"\x1b[>7u");
-
-        output.clear();
-        reapply_keyboard_enhancement_to(&mut output, false).unwrap();
-        assert_eq!(output, b"\x1b[=7u");
-
-        output.clear();
-        disable_keyboard_enhancement_to(&mut output, false).unwrap();
-        assert_eq!(output, b"\x1b[<1u");
-    }
-
-    #[test]
-    fn reapply_omits_keyboard_protocols_when_disabled() {
-        let mut output = Vec::new();
-        reapply_terminal_modes_to(&mut output, false, false, false).unwrap();
-        assert_eq!(output, b"\x1b[?2004h");
-    }
-
-    #[test]
-    fn reapply_omits_mouse_sequences_when_capture_is_disabled() {
-        let mut output = Vec::new();
-        reapply_terminal_modes_to(&mut output, false, true, true).unwrap();
-
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.starts_with("\x1b[?2004h\x1b[?1004h"));
-        assert!(!output.contains("\x1b[?1000h"));
-        assert!(output.contains("\x1b[="));
-    }
-
-    #[test]
-    fn reapply_emits_configured_idempotent_modes_without_keyboard_push() {
-        let mut output = Vec::new();
-        reapply_terminal_modes_to(&mut output, true, true, true).unwrap();
-
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("\x1b[?2004h"));
-        assert!(output.contains("\x1b[?1004h"));
-        assert!(output.contains("\x1b[?1000h"));
-        assert!(output.contains("\x1b[="), "must set Kitty keyboard flags");
-        assert!(
-            !output.contains("\x1b[>7u"),
-            "must not push the Kitty keyboard stack"
-        );
-    }
-
-    #[test]
-    fn focus_reapply_preserves_other_modes_without_rearming_focus_reporting() {
-        for mouse_capture in [false, true] {
-            for keyboard_enhanced in [false, true] {
-                let mut output = Vec::new();
-                reapply_terminal_modes_after_focus_to(
-                    &mut output,
-                    mouse_capture,
-                    keyboard_enhanced,
-                )
-                .unwrap();
-
-                let output = String::from_utf8(output).unwrap();
-                assert!(output.starts_with("\x1b[?2004h"));
-                assert!(
-                    !output.contains("\x1b[?1004h"),
-                    "must not trigger a focus reply"
-                );
-                assert!(
-                    !output.contains("\x1b[?1004l"),
-                    "must keep focus reporting enabled"
-                );
-                assert_eq!(output.contains("\x1b[?1000h"), mouse_capture);
-                assert_eq!(output.contains("\x1b[=7u"), keyboard_enhanced);
-                assert!(
-                    !output.contains("\x1b[>7u"),
-                    "must not push the Kitty keyboard stack (tmux modifyOtherKeys is allowed)"
-                );
-            }
-        }
-    }
-}
+#[path = "mod_parts/terminal_mode_tests.rs"]
+mod terminal_mode_tests;
 
 /// Hash a rendered image's transcript anchor into `hasher`. Shared by the
 /// default and `App` implementations of `side_pane_images_signature` so both
@@ -691,6 +182,13 @@ pub(crate) fn hash_rendered_image_signature_fields(
     image.data.hash(hasher);
     image.label.hash(hasher);
     hash_rendered_image_anchor(image.anchor.as_ref(), hasher);
+}
+
+#[derive(Debug, Clone)]
+pub struct JarvisCaption {
+    pub id: u64,
+    pub text: String,
+    pub score: Option<(f64, bool)>,
 }
 
 /// Trait for TUI state consumed by the shared renderer.
@@ -737,9 +235,13 @@ pub trait TuiState {
     /// Version counter for display_messages (monotonic, increments on mutation)
     fn display_messages_version(&self) -> u64;
     fn streaming_text(&self) -> &str;
+    /// Content signature for the prepare cache. Views without tracked mutations
+    /// hash on demand so even same-length replacements invalidate correctly.
+    fn streaming_text_hash(&self) -> u64 {
+        ui::hash_text_for_cache(self.streaming_text())
+    }
     /// JSON payload for the pinned todo band rendered at the top of the chat
-    /// viewport when `display.pin_todos` is enabled. `None` when the feature
-    /// is off or the session has no todos.
+    /// viewport. None when the header is off or the session has no todos.
     fn pinned_todos_payload(&self) -> Option<&str> {
         None
     }
@@ -748,7 +250,7 @@ pub trait TuiState {
         false
     }
     /// Live build telemetry displayed below the pinned todo band.
-    fn justrust_status(&self) -> Option<&justrust_status::StatusRow> {
+    fn justrust_status(&self) -> Option<justrust_status::StatusRow> {
         None
     }
     /// Running and recently completed background tasks for the session.
@@ -760,6 +262,10 @@ pub trait TuiState {
     /// Authentication input is never an AI prompt, including async exchanges.
     fn login_input_hint(&self) -> Option<&'static str> {
         None
+    }
+    /// Whether the active login prompt captures a secret (API key) that should be masked.
+    fn login_input_is_secret(&self) -> bool {
+        false
     }
     fn input(&self) -> &str;
     /// Whether the one-based composer image tag has a pending payload.
@@ -777,6 +283,13 @@ pub trait TuiState {
     fn interleave_message(&self) -> Option<&str>;
     /// Messages sent as soft interrupt but not yet injected (shown in queue preview)
     fn pending_soft_interrupts(&self) -> &[String];
+    /// Snapshot of prompts owned by the remote daemon, not a second dispatch queue.
+    fn server_queued_prompts(&self) -> &[crate::protocol::QueuedPrompt] {
+        &[]
+    }
+    fn selected_queued_prompt(&self) -> Option<usize> {
+        None
+    }
 
     // ---- Scroll ----
     fn scroll_offset(&self) -> usize;
@@ -819,6 +332,10 @@ pub trait TuiState {
     fn provider_model(&self) -> String;
     /// Upstream provider (e.g., which provider OpenRouter routed to)
     fn upstream_provider(&self) -> Option<String>;
+    /// The routed account for this session, when the daemon reported one.
+    fn routing_chip(&self) -> Option<RoutingChip> {
+        None
+    }
     /// Active transport/connection type (websocket/https/etc.)
     fn connection_type(&self) -> Option<String>;
     /// Provider-supplied human-readable status detail for the current stream.
@@ -863,6 +380,12 @@ pub trait TuiState {
     }
     fn status(&self) -> ProcessingStatus;
     fn command_suggestions(&self) -> Vec<(String, &'static str)>;
+    /// Live details for a suggestion row that stands for a skill: its real
+    /// description, whether it is a session mode, and whether it is pinned.
+    /// `None` for ordinary commands, which keep their registered help text.
+    fn command_suggestion_info(&self, _command: &str) -> Option<CommandSuggestionInfo> {
+        None
+    }
     /// Invalidate any per-frame memo backing [`Self::command_suggestions`].
     ///
     /// Called once at the top of each rendered frame. The suggestion list is
@@ -934,6 +457,7 @@ pub trait TuiState {
     fn voice_input_status(&self) -> Option<(bool, String)> {
         None
     }
+    fn visit_jarvis_captions(&self, _visit: &mut dyn FnMut(&JarvisCaption)) {}
     /// Voice input rendered in the composer instead of the status line.
     fn voice_composer_preview(&self) -> Option<VoiceComposerPreview> {
         None
@@ -1026,13 +550,9 @@ pub trait TuiState {
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         Vec::new()
     }
-    /// Members available for cards embedded beneath swarm spawn tool calls.
-    ///
-    /// This may be broader than `inline_swarm_members`: the gallery is scoped by
-    /// the current ownership tree, while a transcript card can be matched safely
-    /// using the exact spawned session ID recorded in the tool result.
-    fn swarm_members_for_transcript(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
-        self.inline_swarm_members()
+    /// Whether ownership-scoped gallery members exist, without requiring a list.
+    fn has_inline_swarm_members(&self) -> bool {
+        !self.inline_swarm_members().is_empty()
     }
     /// Selected agent index in the inline swarm panel (display order).
     fn swarm_panel_selected(&self) -> usize {
@@ -1149,6 +669,11 @@ pub trait TuiState {
     fn inline_view_state(&self) -> Option<&InlineViewState> {
         None
     }
+    /// True while the `/btw` side-question card owns the inline view. The card
+    /// gets a taller view than a one-shot notice because its answer streams.
+    fn btw_card_open(&self) -> bool {
+        false
+    }
     /// General inline UI state shown above input.
     fn inline_ui_state(&self) -> Option<InlineUiStateRef<'_>> {
         self.inline_interactive_state()
@@ -1164,12 +689,19 @@ pub trait TuiState {
     fn model_status_overlay(&self) -> Option<(usize, &str)> {
         None
     }
+    /// Border title of that overlay when it shows something other than the
+    /// provider test coverage report (empty: the coverage report).
+    fn model_status_overlay_title(&self) -> &str {
+        ""
+    }
     /// Project commit log overlay (None = not showing)
-    fn commit_log_overlay(&self) -> Option<&app::CommitLogOverlay> {
+    fn commit_log_overlay(&self) -> Option<&commit_log::CommitLogOverlay> {
         None
     }
     /// Session picker overlay for /resume command
-    fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>>;
+    fn session_picker_overlay(
+        &self,
+    ) -> Option<&std::cell::RefCell<dyn picker_overlay::SessionPickerOverlay>>;
     /// Login picker overlay for /login command
     fn login_picker_overlay(&self) -> Option<&std::cell::RefCell<login_picker::LoginPicker>>;
     /// Account picker overlay for /account command
@@ -1419,6 +951,16 @@ mod cache_diagnostics;
 use cache_diagnostics::cache_expected_warm;
 pub(crate) use cache_diagnostics::detect_kv_cache_problem;
 
+/// What the command palette knows about a skill row beyond its static help.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSuggestionInfo {
+    pub description: String,
+    /// The skill acts as a session mode (see `skill::name_implies_mode`).
+    pub mode: bool,
+    /// The skill is currently pinned to this session.
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerKind {
     Model,
@@ -1449,6 +991,47 @@ pub struct PromptHistorySearchView {
     pub selected: usize,
 }
 
+/// Choice highlighted on the fresh-install login screen (when no importable
+/// external logins were found).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnboardingLoginChoice {
+    OpenAi,
+    Claude,
+    ApiKey,
+    Skip,
+}
+
+impl OnboardingLoginChoice {
+    pub const ALL: [Self; 4] = [Self::OpenAi, Self::Claude, Self::ApiKey, Self::Skip];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI",
+            Self::Claude => "Claude",
+            Self::ApiKey => "API key",
+            Self::Skip => "Skip",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::OpenAi => Self::Claude,
+            Self::Claude => Self::ApiKey,
+            Self::ApiKey => Self::Skip,
+            Self::Skip => Self::OpenAi,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::OpenAi => Self::Skip,
+            Self::Claude => Self::OpenAi,
+            Self::ApiKey => Self::Claude,
+            Self::Skip => Self::ApiKey,
+        }
+    }
+}
+
 /// What the first-run onboarding welcome screen should render in its body,
 /// driven by the active onboarding flow phase. `Suggestions` is the default
 /// resting state (the starter prompt cards).
@@ -1475,11 +1058,9 @@ pub enum OnboardingWelcomeKind {
         /// option.
         repair_agent_label: Option<String>,
     },
-    /// Ask the user whether to log in to OpenAI (no detected imports). A
-    /// highlightable Yes/No selector; `yes_highlighted` reflects the current
-    /// choice. Yes starts the OpenAI sign-in, No skips login and finishes
-    /// onboarding (the user can run `/login` later).
-    LoginOpenAi { yes_highlighted: bool },
+    /// Ask the user how they want to log in (no detected imports): OpenAI,
+    /// Claude, API key, or Skip.
+    LoginOpenAi { choice: OnboardingLoginChoice },
     /// "Continue where you left off in <cli>?" with a highlightable Yes/No
     /// selector and a live decision countdown (seconds remaining).
     ContinuePrompt {
@@ -1533,7 +1114,7 @@ pub enum ImportSummaryPill {
 }
 
 /// The telemetry settings sub-page: a Continue button (row 0) followed by one
-/// checkbox per [`crate::telemetry::TelemetryCategory`].
+/// checkbox per telemetry category (informational only; telemetry is removed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TelemetryPage {
     /// 0 = Continue, 1.. = category rows.
@@ -1571,11 +1152,23 @@ pub struct InlineInteractiveSchema {
     pub preview_activation_column: usize,
 }
 
+/// What the header shows about account routing: where the session runs, why,
+/// how many warnings the daemon raised, and where a pending move goes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct RoutingChip {
+    pub account: String,
+    pub reason: String,
+    pub warnings: usize,
+    pub pending: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InlineViewState {
     pub title: String,
     pub status: Option<String>,
     pub lines: Vec<String>,
+    /// Wrap the first line (an approval's arguments) instead of cutting it.
+    pub wrap_head: bool,
 }
 
 impl InlineViewState {
@@ -1656,64 +1249,6 @@ impl PickerKind {
     pub fn uses_compact_navigation(&self) -> bool {
         self.schema().layout == InlineInteractiveLayout::Compact
     }
-
-    pub fn filter_text(&self, entry: &PickerEntry) -> String {
-        match self {
-            Self::Account => {
-                let provider = entry
-                    .active_option()
-                    .map(|option| option.provider.as_str())
-                    .unwrap_or("");
-                let state = entry.account_state_label().unwrap_or("");
-                format!("{} {} {}", entry.name, provider, state)
-            }
-            Self::Login => {
-                let auth_kind = entry
-                    .active_option()
-                    .map(|option| option.provider.as_str())
-                    .unwrap_or("");
-                let state = entry
-                    .active_option()
-                    .map(|option| option.api_method.as_str())
-                    .unwrap_or("");
-                let detail = entry
-                    .active_option()
-                    .map(|option| option.detail.as_str())
-                    .unwrap_or("");
-                format!("{} {} {} {}", entry.name, auth_kind, state, detail)
-            }
-            Self::Usage => {
-                let status = entry
-                    .active_option()
-                    .map(|option| option.provider.as_str())
-                    .unwrap_or("");
-                let window = entry
-                    .active_option()
-                    .map(|option| option.api_method.as_str())
-                    .unwrap_or("");
-                let detail = entry
-                    .active_option()
-                    .map(|option| option.detail.as_str())
-                    .unwrap_or("");
-                format!("{} {} {} {}", entry.name, status, window, detail)
-            }
-            Self::Model => {
-                let route = entry.active_option();
-                let provider = route.map(|option| option.provider.as_str()).unwrap_or("");
-                let method = route.map(|option| option.api_method.as_str()).unwrap_or("");
-                let detail = route.map(|option| option.detail.as_str()).unwrap_or("");
-                // Include the pretty name so a query like "opus 4.8" matches
-                // the row even though the underlying id is `claude-opus-4-8`.
-                let pretty =
-                    crate::tui::app::helpers::model_names::pretty_known_model_family(&entry.name)
-                        .unwrap_or_default();
-                format!(
-                    "{} {} {} {} {}",
-                    entry.name, pretty, provider, method, detail
-                )
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1738,6 +1273,10 @@ pub enum PickerAction {
     Model,
     Account(AccountPickerAction),
     Login(crate::provider_catalog::LoginProviderDescriptor),
+    /// Prompt to paste any API key and auto-detect the provider from its prefix.
+    AutoApiKey,
+    /// Expand the collapsed `/login` starter list to show all remaining providers.
+    ExpandLoginProviders,
     /// Native SSH actions never dispatch through laptop-local authentication.
     RemoteLogin {
         provider: &'static str,
@@ -1804,6 +1343,8 @@ impl InlineInteractiveState {
 fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
     match action {
         PickerAction::Model
+        | PickerAction::AutoApiKey
+        | PickerAction::ExpandLoginProviders
         | PickerAction::RemoteLogin { .. }
         | PickerAction::RemoteImportDecision { .. }
         | PickerAction::AgentTarget(_)
@@ -2086,6 +1627,8 @@ pub struct PickerOption {
     pub available: bool,
     pub detail: String,
     pub estimated_reference_cost_micros: Option<u64>,
+    /// The account's resolved icon when the route names one.
+    pub icon: Option<String>,
 }
 
 /// An SSH-backed socket is not a shared-filesystem local daemon. Keep this
@@ -2248,271 +1791,4 @@ pub fn prewarm_focused_side_panel(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        CacheTtlInfo, KvCacheProblemKind, connection_type_icon, detect_kv_cache_problem,
-        keyboard_enhancement_flags, resolve_subscribe_metadata, scheduled_notification_text,
-    };
-    use crate::ambient::AmbientStatus;
-    use crate::tui::info_widget::AmbientWidgetData;
-    use crossterm::event::KeyboardEnhancementFlags;
-
-    fn warm_cache_ttl() -> CacheTtlInfo {
-        CacheTtlInfo {
-            is_estimate: false,
-            remaining_secs: 240,
-            ttl_secs: 300,
-            is_cold: false,
-            cold_for_secs: 0,
-            cached_tokens: Some(12_000),
-        }
-    }
-
-    fn cold_cache_ttl() -> CacheTtlInfo {
-        CacheTtlInfo {
-            is_estimate: false,
-            remaining_secs: 0,
-            ttl_secs: 300,
-            is_cold: true,
-            cold_for_secs: 90,
-            cached_tokens: Some(12_000),
-        }
-    }
-
-    #[test]
-    fn cache_estimate_is_not_evidence_of_an_expected_warm_hit() {
-        let mut timer = warm_cache_ttl();
-        assert!(super::cache_expected_warm(Some(&timer)));
-        timer.is_estimate = true;
-        assert!(!super::cache_expected_warm(Some(&timer)));
-    }
-
-    #[test]
-    fn subscribe_metadata_prefers_remote_working_dir_override() {
-        let local_dir = std::path::Path::new("/client/project");
-        let (working_dir, selfdev) =
-            resolve_subscribe_metadata(Some(local_dir), Some("/server/project"), false);
-
-        assert_eq!(working_dir.as_deref(), Some("/server/project"));
-        assert_eq!(selfdev, None);
-    }
-
-    #[test]
-    fn subscribe_metadata_uses_client_cwd_without_override() {
-        let local_dir = std::path::Path::new("/client/project");
-        let (working_dir, _selfdev) = resolve_subscribe_metadata(Some(local_dir), None, false);
-
-        assert_eq!(working_dir.as_deref(), Some("/client/project"));
-    }
-
-    #[test]
-    fn format_compact_age_is_glanceable() {
-        use super::format_compact_age;
-        assert_eq!(format_compact_age(0), "0s");
-        assert_eq!(format_compact_age(45), "45s");
-        assert_eq!(format_compact_age(60), "1m");
-        assert_eq!(format_compact_age(3_660), "1h 1m");
-        assert_eq!(format_compact_age(7_200), "2h");
-        assert_eq!(format_compact_age(90_000), "1d 1h");
-        assert_eq!(format_compact_age(172_800), "2d");
-    }
-
-    #[test]
-    fn anthropic_cache_creation_on_turn_two_is_warmup_not_problem() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem(
-                "anthropic",
-                None,
-                2,
-                12_000,
-                Some(0),
-                Some(12_000),
-                Some(&ttl)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn anthropic_cache_creation_without_read_on_warm_later_turn_is_problem() {
-        let ttl = warm_cache_ttl();
-        let problem = detect_kv_cache_problem(
-            "anthropic",
-            None,
-            3,
-            12_000,
-            Some(0),
-            Some(12_000),
-            Some(&ttl),
-        )
-        .expect("expected explicit cache creation without read to warn");
-        assert_eq!(problem.kind, KvCacheProblemKind::UnexpectedCacheCreation);
-        assert_eq!(problem.affected_tokens, Some(12_000));
-    }
-
-    #[test]
-    fn cache_read_suppresses_cache_creation_warning() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem(
-                "anthropic",
-                None,
-                3,
-                12_000,
-                Some(8_000),
-                Some(4_000),
-                Some(&ttl)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn cold_cache_suppresses_cache_warning() {
-        let ttl = cold_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem(
-                "anthropic",
-                None,
-                3,
-                12_000,
-                Some(0),
-                Some(12_000),
-                Some(&ttl)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn openai_explicit_zero_cache_read_on_warm_cacheable_turn_is_problem() {
-        let ttl = warm_cache_ttl();
-        let problem = detect_kv_cache_problem("openai", None, 3, 8_000, Some(0), None, Some(&ttl))
-            .expect("expected explicit zero cached tokens to warn");
-        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
-        assert_eq!(problem.affected_tokens, Some(8_000));
-    }
-
-    #[test]
-    fn missing_cache_read_metric_is_not_a_warning() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("openai", None, 3, 8_000, None, None, Some(&ttl)),
-            None
-        );
-    }
-
-    #[test]
-    fn read_only_warning_requires_cacheable_input_size() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("openai", None, 3, 800, Some(0), None, Some(&ttl)),
-            None
-        );
-    }
-
-    #[test]
-    fn openrouter_zero_cache_read_requires_known_cache_capable_upstream() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("openrouter", None, 3, 8_000, Some(0), None, Some(&ttl)),
-            None
-        );
-
-        let problem = detect_kv_cache_problem(
-            "openrouter",
-            Some("OpenAI"),
-            3,
-            8_000,
-            Some(0),
-            None,
-            Some(&ttl),
-        )
-        .expect("known OpenAI upstream should make explicit zero read actionable");
-        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
-    }
-
-    #[test]
-    fn unsupported_provider_zero_cache_read_does_not_warn_even_if_metric_present() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("copilot", None, 3, 8_000, Some(0), None, Some(&ttl)),
-            None
-        );
-    }
-
-    #[test]
-    fn gemini_zero_cache_read_uses_conservative_minimum() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("gemini", None, 3, 3_000, Some(0), None, Some(&ttl)),
-            None
-        );
-
-        let problem = detect_kv_cache_problem("gemini", None, 3, 5_000, Some(0), None, Some(&ttl))
-            .expect("large Gemini prompt with explicit zero cached content should warn");
-        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
-    }
-
-    #[test]
-    fn connection_type_icon_uses_protocol_specific_icons() {
-        assert_eq!(connection_type_icon(Some("websocket")), Some("🔌"));
-        assert_eq!(connection_type_icon(Some("wss")), Some("🔌"));
-        assert_eq!(connection_type_icon(Some("https")), Some("🌐"));
-        assert_eq!(connection_type_icon(Some("https/sse")), Some("🌐"));
-        assert_eq!(connection_type_icon(Some("http")), Some("🌐"));
-        assert_eq!(connection_type_icon(Some("unknown")), None);
-        assert_eq!(connection_type_icon(None), None);
-    }
-
-    #[test]
-    fn connection_type_icons_avoid_vs16_sequences() {
-        // macOS window/tab title fonts ignore the VS16 emoji-presentation
-        // selector, so title icons must be single emoji-default codepoints.
-        for connection in ["websocket", "wss", "https", "https/sse", "http"] {
-            let icon = connection_type_icon(Some(connection)).unwrap();
-            assert_eq!(
-                icon.chars().count(),
-                1,
-                "connection icon for '{connection}' must be a single codepoint, got {icon:?}"
-            );
-            assert!(
-                !icon.contains('\u{FE0F}'),
-                "connection icon for '{connection}' must not need VS16, got {icon:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn scheduled_notification_text_uses_session_reminder_count_only() {
-        let info = AmbientWidgetData {
-            show_widget: false,
-            status: AmbientStatus::Disabled,
-            queue_count: 88,
-            next_queue_preview: Some("ambient backlog".to_string()),
-            reminder_count: 2,
-            next_reminder_preview: Some("follow up".to_string()),
-            last_run_ago: None,
-            last_summary: None,
-            next_wake: Some("in 0s".to_string()),
-            next_reminder_wake: Some("in 5m".to_string()),
-            budget_percent: None,
-        };
-
-        assert_eq!(
-            scheduled_notification_text(Some(&info)).as_deref(),
-            Some("⏰ next scheduled task in 5m · 2 queued")
-        );
-    }
-
-    #[test]
-    fn keyboard_enhancement_flags_avoid_report_all_keys_escape_mode() {
-        let flags = keyboard_enhancement_flags();
-
-        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
-        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
-        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
-        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
-    }
-}
+mod tests;

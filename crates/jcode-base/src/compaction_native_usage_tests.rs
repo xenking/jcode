@@ -22,6 +22,10 @@ impl Provider for VisionNativeProvider {
     fn supports_image_input(&self) -> bool {
         true
     }
+    fn supports_explicit_native_compaction(&self) -> bool {
+        true
+    }
+
     async fn native_compact(
         &self,
         _: &[Message],
@@ -43,6 +47,8 @@ async fn native_compaction_precedes_snapcompact_for_vision_provider() {
         vec![make_text_message(Role::User, "hello")],
         None,
         true,
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -86,6 +92,10 @@ impl Provider for UsageOnlyNativeProvider {
         Arc::new(Self {
             accounting_attributions: self.accounting_attributions.clone(),
         })
+    }
+
+    fn supports_explicit_native_compaction(&self) -> bool {
+        true
     }
 
     async fn native_compact(
@@ -138,6 +148,8 @@ async fn usage_only_native_compaction_accounts_attempt_then_falls_back() {
         vec![make_text_message(Role::User, "hello")],
         None,
         false,
+        None,
+        None,
     )
     .await
     .unwrap();

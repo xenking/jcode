@@ -37,7 +37,7 @@ struct EnvGuard {
     prev_socket: Option<OsString>,
 }
 
-struct ScopedEnvVar {
+pub(super) struct ScopedEnvVar {
     key: &'static str,
     prev: Option<OsString>,
 }
@@ -51,6 +51,8 @@ fn file_access_with_summary(summary: Option<&str>) -> FileAccess {
         intent: None,
         summary: summary.map(str::to_string),
         detail: None,
+        added: 0,
+        removed: 0,
     }
 }
 
@@ -62,6 +64,8 @@ fn file_touch_with_summary(summary: Option<&str>) -> FileTouch {
         intent: None,
         summary: summary.map(str::to_string),
         detail: None,
+        added: 0,
+        removed: 0,
     }
 }
 
@@ -135,7 +139,7 @@ async fn removing_server_session_clears_active_pid_marker() {
 
     assert!(Arc::ptr_eq(&removed.unwrap(), &agent));
     assert!(crate::session_env::session_env(session_id).is_empty());
-    assert!(!sessions.read().await.contains_key(session_id));
+    assert!(!sessions.contains(session_id).await);
     assert!(
         !crate::storage::active_session_ids()
             .iter()
@@ -209,7 +213,7 @@ impl Drop for EnvGuard {
 }
 
 impl ScopedEnvVar {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+    pub(super) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(key);
         crate::env::set_var(key, value);
         // Config is cached with a recheck interval; config-backed env vars
@@ -248,8 +252,18 @@ fn configure_test_env(root: &tempfile::TempDir) -> EnvGuard {
     }
 }
 
+/// Mark this process as the continuation of a reload exec, which keeps the pid.
+fn simulate_reload_exec() {
+    crate::reload_state::write_reload_state(
+        "reload-test",
+        "new-build",
+        crate::reload_state::ReloadPhase::SocketReady,
+        None,
+    );
+}
+
 #[derive(Default, Clone)]
-struct StreamingMockProvider {
+pub(super) struct StreamingMockProvider {
     responses: Arc<StdMutex<Vec<Vec<StreamEvent>>>>,
 }
 
@@ -434,7 +448,7 @@ async fn swarm_worker_report_wakes_idle_root_and_queues_for_busy_root() {
             .await
             .expect("idle root should wake and finish a real tracked turn");
             let guard = agent.lock().await;
-            assert!(guard.messages().iter().any(|message| {
+            assert!(guard.iter_messages().any(|message| {
                 message.content.iter().any(|block| matches!(block,
                     crate::message::ContentBlock::Text { text, .. } if text.contains(&report.notification)))
             }), "worker report must reach model context, not just UI");
@@ -571,7 +585,7 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
     assert!(streamed.contains("Build result processed."));
 
     let guard = agent.lock().await;
-    assert!(guard.messages().iter().any(|message| {
+    assert!(guard.iter_messages().any(|message| {
         message.role == Role::User
             && message
                 .content_preview()
@@ -591,7 +605,7 @@ async fn external_background_task_wake_emits_request_without_starting_turn() {
     let provider_dyn: Arc<dyn Provider> = provider;
     let agent = test_agent(provider_dyn).await;
     let session_id = agent.lock().await.session_id().to_string();
-    let initial_message_count = agent.lock().await.messages().len();
+    let initial_message_count = agent.lock().await.message_count();
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::from([(session_id.clone(), agent.clone())]),
     ));
@@ -660,7 +674,7 @@ async fn external_background_task_wake_emits_request_without_starting_turn() {
             .is_err(),
         "external mode must not stream an autonomous model turn"
     );
-    assert_eq!(agent.lock().await.messages().len(), initial_message_count);
+    assert_eq!(agent.lock().await.message_count(), initial_message_count);
     assert!(soft_interrupt_queues.read().await.is_empty());
 }
 
@@ -736,6 +750,34 @@ async fn idle_live_agent_reservation_blocks_a_second_wake_until_released() {
 }
 
 #[tokio::test]
+async fn idle_live_agent_waits_out_a_brief_non_turn_lock_holder() {
+    // A freshly attached client takes the agent lock for bootstrap requests. A
+    // wake in that window must still reserve the agent, because the fallback
+    // soft interrupt is never drained by an idle agent.
+    let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
+    let agent = test_agent(provider).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
+    let (member_event_tx, _member_event_rx) = mpsc::unbounded_channel();
+    let member = attached_swarm_member(&session_id, member_event_tx);
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
+
+    let holder = agent.clone().lock_owned().await;
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        drop(holder);
+    });
+    let reserved = super::live_turn::idle_live_agent(&session_id, &sessions, &swarm_members).await;
+    release.await.unwrap();
+    assert!(
+        reserved.is_some(),
+        "a brief non-turn lock holder must not turn a wake into a lost soft interrupt"
+    );
+}
+
+#[tokio::test]
 async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
     // Greptile review on #1166: releasing the guard before the terminal status
     // write let a newer wake's `running` be overwritten by this turn's `ready`.
@@ -746,7 +788,11 @@ async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
     ]);
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let agent = test_agent(provider_dyn).await;
-    let session_id = agent.lock().await.session_id().to_string();
+    let session_id = {
+        let mut agent = agent.lock().await;
+        agent.set_debug(true);
+        agent.session_id().to_string()
+    };
     let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
         HashMap::from([(session_id.clone(), agent.clone())]),
     ));
@@ -1029,8 +1075,87 @@ async fn background_task_progress_notifies_attached_clients() {
     }
 }
 
-#[path = "startup_recovery_tests.rs"]
+#[path = "runtime_support/recovery/startup_recovery_tests.rs"]
 mod startup_recovery;
 
-#[path = "mobile_local_tests.rs"]
+#[path = "services/integrations/mobile_local_tests.rs"]
 mod mobile_local;
+
+#[tokio::test]
+async fn wake_during_a_drain_waits_and_starts_once_after_release() {
+    let _env_lock = crate::storage::lock_test_env();
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("Woken.".into()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let agent = test_agent(provider).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let members = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        attached_swarm_member(&session_id, tx),
+    )])));
+    let (swarms, history, counter, events) = empty_swarm_status_state();
+
+    // An update is draining: the wake must not start a turn the drain waits on.
+    let hold = crate::turn_activity::global()
+        .hold_new_turns_for(&[&session_id])
+        .unwrap();
+    let wake = super::live_turn::run_live_turn_if_idle(
+        &session_id,
+        "wake me",
+        None,
+        &sessions,
+        super::live_turn::LiveTurnSwarmContext::new(&members, &swarms, &history, &counter, &events),
+    );
+    tokio::pin!(wake);
+    assert!(
+        timeout(Duration::from_millis(300), &mut wake)
+            .await
+            .is_err(),
+        "a wake must wait for the drain"
+    );
+    assert!(
+        crate::turn_activity::global()
+            .snapshot()
+            .session(&session_id)
+            .is_none_or(|session| !session.is_busy()),
+        "a waiting wake must not look like a running turn"
+    );
+
+    drop(hold);
+    assert!(
+        timeout(Duration::from_secs(5), &mut wake)
+            .await
+            .expect("released wake must start"),
+        "the released wake starts its turn"
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                rx.recv().await.map(unwrap_test_turn_event),
+                Some(ServerEvent::Done { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("released wake must finish its turn");
+    let woken = agent
+        .lock()
+        .await
+        .iter_messages()
+        .filter(|message| {
+            message.content.iter().any(|block| {
+                matches!(block,
+                crate::message::ContentBlock::Text { text, .. } if text.contains("wake me"))
+            })
+        })
+        .count();
+    assert_eq!(woken, 1, "the wake is delivered exactly once");
+}

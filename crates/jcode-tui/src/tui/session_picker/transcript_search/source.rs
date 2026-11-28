@@ -234,7 +234,7 @@ impl SourceBuckets {
     }
 
     pub(crate) fn push(&mut self, source: Source, text: &str, total: usize) {
-        crate::tui::session_picker::loading::push_sampled_search_text(
+        crate::tui::session_picker::search_terms::push_sampled_search_text(
             &mut self.text[source.slot()],
             text,
             Self::budget(source, total),

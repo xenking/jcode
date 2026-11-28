@@ -5,10 +5,10 @@
     Downloads the latest jcode release and installs it to %LOCALAPPDATA%\jcode\bin.
 
     One-liner install:
-      irm https://jcode.sh/install.ps1 | iex
+      irm https://raw.githubusercontent.com/xenking/jcode/master/scripts/install.ps1 | iex
 
     Or download and run (allows parameters):
-      & ([scriptblock]::Create((irm https://jcode.sh/install.ps1)))
+      & ([scriptblock]::Create((irm https://raw.githubusercontent.com/xenking/jcode/master/scripts/install.ps1)))
 .PARAMETER InstallDir
     Override the installation directory (default: $env:LOCALAPPDATA\jcode\bin)
 .PARAMETER Version
@@ -48,12 +48,7 @@ if ($PSVersionTable.PSVersion.Major -lt 5) {
     exit 1
 }
 
-$Repo = "1jehuang/jcode"
-$ReleaseMetadataBase = if ($env:JCODE_RELEASE_METADATA_BASE) {
-    $env:JCODE_RELEASE_METADATA_BASE.TrimEnd('/')
-} else {
-    "https://jcode.sh/releases"
-}
+$Repo = "xenking/jcode"
 
 if (-not $InstallDir) {
     $localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData) }
@@ -80,8 +75,8 @@ function ConvertFrom-JcodeWebContent($Content) {
     if ($null -eq $Content) { return "" }
 
     # Windows PowerShell 5.1 returns Byte[] for some text responses when the
-    # server uses application/octet-stream (including jcode.sh metadata and
-    # GitHub release checksum manifests). Casting Byte[] directly to [string]
+    # server uses application/octet-stream (including GitHub release checksum
+    # manifests). Casting Byte[] directly to [string]
     # produces a space-separated list of decimal bytes instead of the text.
     if ($Content -is [byte[]]) {
         return [System.Text.Encoding]::UTF8.GetString($Content)
@@ -105,13 +100,6 @@ function Resolve-JcodeReleaseTagFromUri([string]$Uri) {
 function Get-LatestJcodeReleaseTag {
     # Avoid api.github.com here. Its unauthenticated limit is only 60 requests
     # per public IP per hour, so installs are unreliable behind shared NAT/VPNs.
-    $metadataTag = $null
-    try {
-        $metadataResponse = Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseMetadataBase/latest/version"
-        $candidate = (ConvertFrom-JcodeWebContent -Content $metadataResponse.Content).Trim()
-        if (Test-JcodeReleaseTag $candidate) { $metadataTag = $candidate }
-    } catch {}
-
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://github.com/$Repo/releases/latest"
         $baseResponse = $response.BaseResponse
@@ -134,33 +122,67 @@ function Get-LatestJcodeReleaseTag {
         $tag = Resolve-JcodeReleaseTagFromUri $resolvedUri
         if ($tag) { return $tag }
     } catch {
-        if (-not $metadataTag) {
-            Write-Err "Failed to determine latest version: $_"
-        }
-    }
-
-    if ($metadataTag) {
-        Write-Warn "GitHub release lookup unavailable; using cached jcode.sh metadata ($metadataTag)."
-        return $metadataTag
+        Write-Err "Failed to determine latest version: $_"
     }
     Write-Err "Failed to determine latest version"
 }
 
-function Get-JcodeReleaseDownloadBases([string]$ReleaseTag) {
-    $bases = New-Object System.Collections.Generic.List[string]
+function Test-JcodeReleaseHasArtifact([string]$ReleaseTag, [string]$ArtifactName) {
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri "$ReleaseMetadataBase/$ReleaseTag/download-bases"
-        foreach ($line in ((ConvertFrom-JcodeWebContent -Content $response.Content) -split "`r?`n")) {
-            $candidate = $line.Trim().TrimEnd('/')
-            if ($candidate -match '^https://\S+$' -and -not $bases.Contains($candidate)) {
-                $bases.Add($candidate)
+        $sumsUrl = "https://github.com/$Repo/releases/download/$ReleaseTag/SHA256SUMS"
+        $resp = Invoke-WebRequest -UseBasicParsing -Uri $sumsUrl
+        $text = ConvertFrom-JcodeWebContent -Content $resp.Content
+        if (-not $text) { return $false }
+        $pattern = [regex]::Escape($ArtifactName) + '\.(zip|tar\.gz|exe)\b'
+        return [regex]::IsMatch($text, $pattern)
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-JcodeFallbackReleaseTag([string]$LatestTag, [string]$ArtifactName, [string]$ExistingVersion) {
+    if (Test-JcodeReleaseHasArtifact $LatestTag $ArtifactName) {
+        return $LatestTag
+    }
+    Write-Info "Release $LatestTag has no published $ArtifactName asset yet; looking for the newest release that does..."
+    $existingVer = $null
+    if ($ExistingVersion -and ($ExistingVersion -match '(\d+\.\d+\.\d+)')) {
+        try { $existingVer = [version]$Matches[1] } catch {}
+    }
+    for ($page = 1; $page -le 5; $page++) {
+        try {
+            $url = "https://api.github.com/repos/$Repo/releases?per_page=100&page=$page"
+            $releases = Invoke-RestMethod -UseBasicParsing -Uri $url -Headers @{ 'User-Agent' = 'jcode-installer' }
+        } catch {
+            break
+        }
+        if (-not $releases -or $releases.Count -eq 0) { break }
+        $reachedExisting = $false
+        foreach ($rel in $releases) {
+            if ($rel.draft -or $rel.prerelease) { continue }
+            $tag = [string]$rel.tag_name
+            if ($tag -eq $LatestTag) { continue }
+            if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') { continue }
+            if ($existingVer) {
+                try {
+                    if ([version]$Matches[1] -le $existingVer) {
+                        $reachedExisting = $true
+                        break
+                    }
+                } catch {}
+            }
+            if (Test-JcodeReleaseHasArtifact $tag $ArtifactName) {
+                Write-Info "Using $tag (newest release with a published $ArtifactName asset)."
+                return $tag
             }
         }
-    } catch {}
+        if ($reachedExisting -or $releases.Count -lt 100) { break }
+    }
+    return $LatestTag
+}
 
-    $githubBase = "https://github.com/$Repo/releases/download/$ReleaseTag"
-    if (-not $bases.Contains($githubBase)) { $bases.Add($githubBase) }
-    return $bases.ToArray()
+function Get-JcodeReleaseDownloadBases([string]$ReleaseTag) {
+    return @("https://github.com/$Repo/releases/download/$ReleaseTag")
 }
 
 function Get-JcodeSha256FromManifest {
@@ -183,10 +205,7 @@ function Get-JcodeSha256FromManifest {
 
 function Get-ReleaseChecksum([string]$ReleaseTag, [string]$AssetName) {
     $lastError = $null
-    foreach ($checksumUrl in @(
-        "$ReleaseMetadataBase/$ReleaseTag/SHA256SUMS",
-        "https://github.com/$Repo/releases/download/$ReleaseTag/SHA256SUMS"
-    )) {
+    foreach ($checksumUrl in @("https://github.com/$Repo/releases/download/$ReleaseTag/SHA256SUMS")) {
         try {
             $response = Invoke-WebRequest -UseBasicParsing -Uri $checksumUrl
             $expected = Get-JcodeSha256FromManifest -ManifestText (ConvertFrom-JcodeWebContent -Content $response.Content) -AssetName $AssetName
@@ -949,6 +968,14 @@ if (-not $Version) {
     } else {
         Write-Info "Fetching latest release..."
         $Version = Get-LatestJcodeReleaseTag
+        if ($Version) {
+            $existingLauncher = Join-Path $InstallDir "jcode.exe"
+            $existingVerText = ""
+            if (Test-Path $existingLauncher) {
+                try { $existingVerText = & $existingLauncher --version 2>$null | Select-Object -First 1 } catch {}
+            }
+            $Version = Resolve-JcodeFallbackReleaseTag $Version $Artifact $existingVerText
+        }
     }
 }
 

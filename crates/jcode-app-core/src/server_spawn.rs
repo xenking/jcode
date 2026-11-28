@@ -39,8 +39,8 @@ pub fn register_default_server_spawner(spawner: ServerSpawner) {
 
 /// Returns true if a shared server is currently reachable on the default socket.
 pub async fn is_running() -> bool {
-    let socket = crate::server::socket_path();
-    crate::server::is_server_ready(&socket).await || crate::server::has_live_listener(&socket).await
+    let socket = crate::server_endpoint::socket_path();
+    crate::server_client::is_server_ready(&socket).await || crate::server_endpoint::has_live_listener(&socket).await
 }
 
 /// Spawn a replacement shared server using the registered default spawner.

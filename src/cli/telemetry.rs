@@ -54,16 +54,7 @@ fn run_status(json: bool) -> Result<()> {
 }
 
 fn run_enable() -> Result<()> {
-    if !crate::telemetry::set_usage_telemetry_enabled(true) {
-        bail!("failed to persist telemetry setting");
-    }
-
-    if crate::telemetry::opt_out_forced_by_env() {
-        println!("Telemetry remains disabled because JCODE_NO_TELEMETRY or DO_NOT_TRACK is set.");
-    } else {
-        println!("Telemetry enabled.");
-    }
-    Ok(())
+    bail!("telemetry is removed in this build and cannot be enabled")
 }
 
 fn run_disable() -> Result<()> {

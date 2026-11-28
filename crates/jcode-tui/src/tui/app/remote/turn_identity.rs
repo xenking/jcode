@@ -9,10 +9,26 @@ pub(in crate::tui::app) struct TurnFence {
     retired: HashSet<String>,
     latest: u64,
     completed: u64,
-    pub(super) active: Option<TurnIdentity>,
+    active: Option<TurnIdentity>,
 }
 
 impl TurnFence {
+    /// Runtime generation of the active turn, for failover diagnostics.
+    pub(in crate::tui::app) fn active_runtime_generation(&self) -> Option<String> {
+        self.active
+            .as_ref()
+            .map(|turn| turn.runtime_generation.clone())
+    }
+
+    /// Id of the active turn, for failover diagnostics.
+    pub(in crate::tui::app) fn active_turn_id(&self) -> Option<String> {
+        self.active.as_ref().map(|turn| turn.turn_id.to_string())
+    }
+
+    pub(super) fn has_active_turn(&self) -> bool {
+        self.active.is_some()
+    }
+
     pub(super) fn scoped(&self) -> bool {
         self.generation.is_some()
     }

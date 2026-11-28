@@ -67,7 +67,7 @@ fn prewarm_request(request: &Value) -> Value {
 }
 
 struct PrewarmJob {
-    request: Value,
+    request: Arc<Value>,
     started_at: Instant,
     ready: oneshot::Receiver<PersistentWsState>,
     task: tokio::task::JoinHandle<()>,
@@ -146,23 +146,31 @@ impl PrewarmSlot {
         self: &Arc<Self>,
         credentials: Arc<RwLock<CodexCredentials>>,
         request: &Value,
+        turn_state: Arc<StdMutex<Option<String>>>,
+        premium_route: Option<String>,
     ) {
         let request = prewarm_request(request);
         let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if guard
-            .as_ref()
-            .is_some_and(|job| job.request == request && job.started_at.elapsed() < PREWARM_TTL)
-        {
+        if guard.as_ref().is_some_and(|job| {
+            job.request.as_ref() == &request && job.started_at.elapsed() < PREWARM_TTL
+        }) {
             return;
         }
+        let request = Arc::new(request);
         let (tx, ready) = oneshot::channel();
         let started_at = Instant::now();
         let weak = Arc::downgrade(self);
-        let payload = request.clone();
+        let payload = Arc::clone(&request);
         let task = tokio::spawn(async move {
             let model = openai_request_model(&payload);
             let result = tokio::time::timeout(PREWARM_TIMEOUT, async {
                 let creds = credentials.read().await;
+                if let Some(route) = premium_route.as_deref() {
+                    anyhow::ensure!(
+                        OpenAIProvider::speed_route_for(&creds).as_deref() == Some(route),
+                        "OpenAI speed route changed before prewarm"
+                    );
+                }
                 // Speculation is cancellable at any instant. Never rotate an
                 // OAuth refresh token here: cancellation after server-side
                 // rotation could lose the replacement credentials. Leave
@@ -186,21 +194,43 @@ impl PrewarmSlot {
                     payload.get("model").and_then(Value::as_str),
                     payload.get("service_tier").and_then(Value::as_str),
                 );
+                // Egress follows the account these credentials belong to.
+                let account_label =
+                    jcode_base::auth::codex::list_accounts()
+                        .ok()
+                        .and_then(|accounts| {
+                            jcode_base::auth::codex::account_label_for_credentials(
+                                &accounts, &creds,
+                            )
+                        });
+                let account_label = OpenAIProvider::egress_label(&creds, account_label.as_deref())
+                    .map(str::to_owned);
                 drop(creds);
-                let (socket, _) = connect_ws(handshake).await?;
-                warm_socket(socket, &payload, identity).await
+                let egress =
+                    jcode_base::egress::transport("openai", account_label.as_deref()).await?;
+                let (socket, response) = connect_ws_via(handshake, &egress).await?;
+                capture_turn_state(
+                    &turn_state,
+                    response
+                        .headers()
+                        .get("x-codex-turn-state")
+                        .and_then(|value| value.to_str().ok()),
+                );
+                warm_socket(socket, &payload, identity, turn_state).await
             })
             .await;
             match result {
                 Ok(Ok(state)) => {
                     log_openai_stream_lifecycle(
-                        jcode_base::logging::LogLevel::Info,
+                        jcode_base::logging::LogLevel::Debug,
                         "ws_prewarm_ready",
-                        vec![
-                            ("model", model),
-                            ("elapsed_ms", started_at.elapsed().as_millis().to_string()),
-                            ("protocol", WEBSOCKET_V2_BETA.to_string()),
-                        ],
+                        || {
+                            vec![
+                                ("model", model),
+                                ("elapsed_ms", started_at.elapsed().as_millis().to_string()),
+                                ("protocol", WEBSOCKET_V2_BETA.to_string()),
+                            ]
+                        },
                     );
                     let _ = tx.send(state);
                 }
@@ -209,9 +239,9 @@ impl PrewarmSlot {
                     // poison the foreground request's transport cooldown.
                     drop(tx);
                     log_openai_stream_lifecycle(
-                        jcode_base::logging::LogLevel::Info,
+                        jcode_base::logging::LogLevel::Debug,
                         "ws_prewarm_unavailable",
-                        vec![("model", model)],
+                        || vec![("model", model)],
                     );
                 }
             }
@@ -241,8 +271,8 @@ impl PrewarmSlot {
         credentials: &CodexCredentials,
     ) -> Option<PersistentWsState> {
         let mut job = self.0.lock().unwrap_or_else(|e| e.into_inner()).take()?;
-        let compatible =
-            job.request == prewarm_request(request) && job.started_at.elapsed() < PREWARM_TTL;
+        let compatible = job.request.as_ref() == &prewarm_request(request)
+            && job.started_at.elapsed() < PREWARM_TTL;
         let state = compatible
             .then(|| job.ready.try_recv().ok())
             .flatten()
@@ -255,17 +285,19 @@ impl PrewarmSlot {
                     )
             });
         log_openai_stream_lifecycle(
-            jcode_base::logging::LogLevel::Info,
+            jcode_base::logging::LogLevel::Debug,
             if state.is_some() {
                 "ws_prewarm_hit"
             } else {
                 "ws_prewarm_miss"
             },
-            vec![
-                ("model", openai_request_model(request)),
-                ("compatible", compatible.to_string()),
-                ("age_ms", job.started_at.elapsed().as_millis().to_string()),
-            ],
+            || {
+                vec![
+                    ("model", openai_request_model(request)),
+                    ("compatible", compatible.to_string()),
+                    ("age_ms", job.started_at.elapsed().as_millis().to_string()),
+                ]
+            },
         );
         state
     }
@@ -275,16 +307,26 @@ async fn warm_socket(
     mut socket: openai_ws_connect::OpenAIWs,
     request: &Value,
     identity: (String, Option<String>, String, Option<String>),
+    turn_state: Arc<StdMutex<Option<String>>>,
 ) -> Result<PersistentWsState> {
     let connected_at = Instant::now();
+    let mut request = request.clone();
+    if let Some(value) = turn_state
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+    {
+        request["client_metadata"]["x-codex-turn-state"] = Value::String(value.clone());
+    }
     socket
-        .send(WsMessage::Text(serde_json::to_string(request)?))
+        .send(WsMessage::Text(serde_json::to_string(&request)?))
         .await?;
     let mut created_id = None;
     while let Some(message) = socket.next().await {
         match message? {
             WsMessage::Text(text) => {
                 let event: Value = serde_json::from_str(&text)?;
+                observe_turn_state(&event, &turn_state);
                 match event.get("type").and_then(Value::as_str) {
                     Some("response.created") => {
                         created_id = event["response"]["id"].as_str().map(str::to_owned);
@@ -324,9 +366,11 @@ async fn warm_socket(
                             last_input_item_count: 0,
                             last_response_output: Vec::new(),
                             last_input_item_hashes: Vec::new(),
+                            last_request_options: None,
+                            turn_state,
                         });
                     }
-                    Some("response.in_progress") => {}
+                    Some("response.in_progress" | "response.metadata") => {}
                     _ => anyhow::bail!("unexpected warmup event"),
                 }
             }
@@ -400,7 +444,7 @@ mod tests {
             let (sender, ready) = oneshot::channel();
             assert!(sender.send(state).is_ok());
             *slot.0.lock().unwrap() = Some(PrewarmJob {
-                request: prewarm_request(&request),
+                request: Arc::new(prewarm_request(&request)),
                 started_at: Instant::now(),
                 ready,
                 task: tokio::spawn(std::future::pending()),
@@ -455,7 +499,7 @@ mod tests {
         });
         let abort = task.abort_handle();
         *slot.0.lock().unwrap() = Some(PrewarmJob {
-            request: prewarm_request(&request),
+            request: Arc::new(prewarm_request(&request)),
             started_at: Instant::now(),
             ready,
             task,
@@ -464,6 +508,80 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(abort.is_finished(), "cancelled warmup must not detach");
         assert!(slot.0.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn large_prewarm_settings_share_task_backing_and_isolate_caller_mutations() {
+        let mut request = serde_json::json!({
+            "model": "test-model",
+            "instructions": "static instructions ".repeat(32_768),
+            "tools": [{"type": "function", "name": "large_schema", "parameters": {
+                "type": "object", "properties": {"data": {
+                    "type": "string", "description": "schema description ".repeat(32_768)
+                }}
+            }}],
+            "input": [{"role": "user", "content": "private conversation"}]
+        });
+        let expected_wire = serde_json::to_string(&prewarm_request(&request)).unwrap();
+        let credentials = Arc::new(RwLock::new(credentials()));
+        // Keep the task suspended before any network activity.
+        let _credentials_guard = credentials.write().await;
+        let slot = Arc::new(PrewarmSlot::default());
+        slot.start(
+            Arc::clone(&credentials),
+            &request,
+            Arc::new(StdMutex::new(None)),
+            None,
+        );
+        tokio::task::yield_now().await;
+        let (backing, abort) = {
+            let guard = slot.0.lock().unwrap();
+            let job = guard.as_ref().unwrap();
+            assert_eq!(
+                Arc::strong_count(&job.request),
+                2,
+                "job and task must share one Value"
+            );
+            (Arc::clone(&job.request), job.task.abort_handle())
+        };
+        assert_eq!(
+            serde_json::to_string(backing.as_ref()).unwrap(),
+            expected_wire
+        );
+
+        slot.start(
+            Arc::clone(&credentials),
+            &request,
+            Arc::new(StdMutex::new(None)),
+            None,
+        );
+        assert!(
+            Arc::ptr_eq(&slot.0.lock().unwrap().as_ref().unwrap().request, &backing),
+            "equivalent settings must retain the original job"
+        );
+        request["instructions"] = serde_json::json!("changed instructions");
+        request["tools"][0]["parameters"]["properties"]["data"]["description"] =
+            serde_json::json!("changed schema");
+        assert_eq!(
+            serde_json::to_string(backing.as_ref()).unwrap(),
+            expected_wire
+        );
+        assert_ne!(backing.as_ref(), &prewarm_request(&request));
+
+        slot.start(
+            Arc::clone(&credentials),
+            &request,
+            Arc::new(StdMutex::new(None)),
+            None,
+        );
+        assert!(
+            !Arc::ptr_eq(&slot.0.lock().unwrap().as_ref().unwrap().request, &backing),
+            "changed settings must replace the job"
+        );
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished(), "replacement must cancel the old task");
+        assert_eq!(Arc::strong_count(&backing), 1);
+        slot.clear();
     }
 
     #[tokio::test]
@@ -476,6 +594,8 @@ mod tests {
         slot.start(
             Arc::clone(&credentials),
             &serde_json::json!({"model":"gpt-5.6-sol"}),
+            Arc::new(StdMutex::new(None)),
+            None,
         );
         tokio::task::yield_now().await;
         let mut job = slot.0.lock().unwrap().take().unwrap();
@@ -498,7 +618,7 @@ mod tests {
         let (sender, ready) = oneshot::channel();
         assert!(sender.send(state).is_ok());
         *slot.0.lock().unwrap() = Some(PrewarmJob {
-            request: prewarm_request(&request),
+            request: Arc::new(prewarm_request(&request)),
             started_at: Instant::now() - PREWARM_TTL,
             ready,
             task: tokio::spawn(std::future::pending()),

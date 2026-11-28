@@ -32,7 +32,7 @@ where
 /// Effort rows are only rendered for these routes; other routes (Copilot,
 /// Bedrock, Antigravity CLI, remote-catalog placeholders, ...) get one plain
 /// row per model because a picked effort could not actually be applied.
-pub(super) fn route_supports_reasoning_effort(api_method: &str) -> bool {
+pub(crate) fn route_supports_reasoning_effort(api_method: &str) -> bool {
     use crate::provider::ModelRouteApiMethod as Method;
     match Method::parse(api_method) {
         Method::ClaudeOAuth
@@ -43,13 +43,16 @@ pub(super) fn route_supports_reasoning_effort(api_method: &str) -> bool {
         // Named OpenAI-compatible profiles expose effort through `/effort`.
         // Expanding them here creates one duplicate picker row per effort.
         Method::OpenAiCompatible { .. } => false,
+        // Antigravity encodes effort in sibling model IDs already listed as
+        // distinct routes in `/model`; effort switching uses `/effort` and
+        // Alt+Left/Right rather than expanding sub-rows per route.
+        Method::AntigravityHttps => false,
         Method::JcodeSubscription
         | Method::GrokBuild
         | Method::Copilot
         | Method::Cursor
         | Method::Bedrock
         | Method::CodeAssistOAuth
-        | Method::AntigravityHttps
         | Method::RemoteCatalog
         | Method::Current
         | Method::Other(_) => false,

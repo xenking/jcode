@@ -18,6 +18,7 @@
 //! Session history is intentionally excluded from onboarding and remains
 //! available later through `/resume`.
 
+use crossterm::event::KeyCode;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -27,90 +28,32 @@ use std::time::{Duration, Instant};
 /// read the prompt.
 pub(crate) const DECISION_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Which external CLI an OAuth login was detected for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ExternalCli {
-    Codex,
-    ClaudeCode,
-    Pi,
-    OpenCode,
-    Cursor,
+pub(crate) use crate::tui::session_picker::ExternalCli;
+
+/// Result of applying a key to the import walkthrough.
+pub(crate) enum ReviewKey {
+    /// The screen does not use this key.
+    Ignored,
+    /// The key changed the walkthrough.
+    Handled,
+    /// The user committed the import.
+    Commit,
 }
 
-impl ExternalCli {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            ExternalCli::Codex => "Codex",
-            ExternalCli::ClaudeCode => "Claude Code",
-            ExternalCli::Pi => "Pi",
-            ExternalCli::OpenCode => "OpenCode",
-            ExternalCli::Cursor => "Cursor",
-        }
-    }
-}
-
-/// State of the "Telemetry settings" page: a "Continue" button on top
-/// (focused by default) followed by one checkbox per telemetry category.
+/// State of the informational "Telemetry" page (telemetry is removed in this
+/// build): just the focused "Continue" button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TelemetrySettings {
-    /// 0 = the Continue button, 1.. = category rows in
-    /// [`crate::telemetry::TelemetryCategory::ALL`] order.
     pub(crate) cursor: usize,
     pub(crate) checked: [bool; 6],
 }
 
 impl TelemetrySettings {
-    pub(crate) const ROWS: usize = 1 + 6;
-
-    /// Open with the persisted choices, Continue focused.
     pub(crate) fn current() -> Self {
         Self {
             cursor: 0,
-            checked: crate::telemetry::category_settings(),
+            checked: [false; 6],
         }
-    }
-
-    pub(crate) fn step(&mut self, forward: bool) {
-        self.cursor = if forward {
-            (self.cursor + 1) % Self::ROWS
-        } else {
-            (self.cursor + Self::ROWS - 1) % Self::ROWS
-        };
-    }
-
-    /// Toggle the focused checkbox. Returns false on the Continue row.
-    pub(crate) fn toggle(&mut self) -> bool {
-        match self.cursor.checked_sub(1) {
-            Some(i) => {
-                self.checked[i] = !self.checked[i];
-                true
-            }
-            None => false,
-        }
-    }
-
-    pub(crate) fn set_all(&mut self, on: bool) {
-        self.checked = [on; 6];
-    }
-
-    pub(crate) fn persist(&self) {
-        crate::telemetry::set_category_settings(self.checked);
-    }
-
-    pub(crate) fn status_label(&self) -> String {
-        status_label_for(self.checked)
-    }
-}
-
-/// Short status-line summary of a set of category choices.
-pub(crate) fn status_label_for(checked: [bool; 6]) -> String {
-    let on = checked.iter().filter(|c| **c).count();
-    if on == 0 {
-        "Telemetry: off".to_string()
-    } else if on == checked.len() {
-        "Telemetry: sharing everything, thank you".to_string()
-    } else {
-        format!("Telemetry: {on} of {} categories on", checked.len())
     }
 }
 
@@ -357,6 +300,144 @@ impl ImportReview {
             .as_secs()
     }
 
+    /// Apply one key to the walkthrough.
+    pub(crate) fn handle_key(&mut self, code: KeyCode) -> ReviewKey {
+        if self.telemetry.is_some() {
+            // Telemetry sub-page: informational only (telemetry is removed
+            // in this build). Esc/Enter/Space return to the summary.
+            match code {
+                KeyCode::Esc => self.close_telemetry(),
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.close_telemetry();
+                    self.summary_pill = SummaryPill::Continue;
+                    self.continue_focused = true;
+                }
+                _ => return ReviewKey::Ignored,
+            }
+        } else if !self.choosing {
+            // Summary: Continue, Import less, and Telemetry pills.
+            // Arrows/Tab move; Enter/Space commits the focused one.
+            match code {
+                KeyCode::Left
+                | KeyCode::Up
+                | KeyCode::BackTab
+                | KeyCode::Char('h')
+                | KeyCode::Char('k') => self.summary_step(false),
+                KeyCode::Right
+                | KeyCode::Down
+                | KeyCode::Tab
+                | KeyCode::Char('j')
+                | KeyCode::Char('l') => self.summary_step(true),
+                // c is a direct shortcut into choose mode.
+                KeyCode::Char('c') | KeyCode::Char('C') => self.enter_choose_mode(),
+                // t jumps straight to the telemetry page.
+                KeyCode::Char('t') | KeyCode::Char('T') => self.open_telemetry(),
+                // y = "yes, import everything" regardless of pill focus, so
+                // the timeout is never a forced wait.
+                KeyCode::Char('y') | KeyCode::Char('Y') => return ReviewKey::Commit,
+                KeyCode::Enter | KeyCode::Char(' ') => match self.summary_pill {
+                    SummaryPill::Continue => return ReviewKey::Commit,
+                    SummaryPill::ImportLess => self.enter_choose_mode(),
+                    SummaryPill::Telemetry => self.open_telemetry(),
+                },
+                _ => return ReviewKey::Ignored,
+            }
+        } else {
+            match code {
+                KeyCode::Up | KeyCode::Char('k') => self.cursor_up(),
+                KeyCode::Down | KeyCode::Char('j') => self.cursor_down(),
+                // Left = Yes (import), Right = No (skip), for the highlighted row.
+                KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.set_current(true)
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.set_current(false)
+                }
+                // Space toggles the highlighted row between Yes and No.
+                KeyCode::Char(' ') => self.toggle_current(),
+                // Enter on a login row selects/deselects that row, so
+                // "picking an option" never commits the whole import out
+                // from under the user. Only Enter on the Continue pill
+                // (or `c`) commits.
+                KeyCode::Enter if !self.continue_focused => self.toggle_current(),
+                KeyCode::Enter | KeyCode::Char('c') | KeyCode::Char('C') => {
+                    return ReviewKey::Commit;
+                }
+                _ => return ReviewKey::Ignored,
+            }
+        }
+        ReviewKey::Handled
+    }
+
+    /// Status-line text for the current screen of the walkthrough.
+    pub(crate) fn status_notice(&self) -> String {
+        let checked = self.checked_count();
+        let total = self.total();
+        let secs = self.seconds_remaining();
+        if !self.choosing {
+            if self.telemetry.is_some() {
+                "Telemetry is disabled in this build - Enter or Esc goes back".to_string()
+            } else {
+                format!(
+                    "Found {total} login{} - Enter imports all (auto in {secs}s), or pick \"Import less\"",
+                    if total == 1 { "" } else { "s" },
+                )
+            }
+        } else {
+            format!(
+                "Import {checked} of {total} login{} - Enter/Space toggles, arrows move, Continue imports",
+                if total == 1 { "" } else { "s" },
+            )
+        }
+    }
+
+    /// Whether the telemetry sub-page is showing.
+    pub(crate) fn telemetry_page_open(&self) -> bool {
+        self.telemetry.is_some()
+    }
+
+    /// The candidates and the indices the user approved, for running the import.
+    pub(crate) fn approved_candidates(
+        &self,
+    ) -> (
+        Vec<crate::external_auth::ExternalAuthReviewCandidate>,
+        Vec<usize>,
+    ) {
+        (self.candidates.clone(), self.approved_indices())
+    }
+
+    /// What the welcome card renders for this walkthrough.
+    pub(crate) fn welcome_prompt(&self) -> crate::tui::LoginImportPrompt {
+        let rows = self
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(i, candidate)| crate::tui::LoginImportRow {
+                provider_summary: candidate.provider_summary().to_string(),
+                source_name: candidate.source_name().to_string(),
+                checked: self.checked.get(i).copied().unwrap_or(false),
+            })
+            .collect();
+        crate::tui::LoginImportPrompt {
+            rows,
+            cursor: self.cursor,
+            continue_focused: self.continue_focused,
+            choosing: self.choosing,
+            summary_pill: match self.summary_pill {
+                SummaryPill::Continue => crate::tui::ImportSummaryPill::Continue,
+                SummaryPill::ImportLess => crate::tui::ImportSummaryPill::ImportLess,
+                SummaryPill::Telemetry => crate::tui::ImportSummaryPill::Telemetry,
+            },
+            telemetry: self.telemetry.map(|t| crate::tui::TelemetryPage {
+                cursor: t.cursor,
+                checked: t.checked,
+            }),
+            telemetry_env_forced_off: crate::telemetry::opt_out_forced_by_env(),
+            checked_count: self.checked_count(),
+            seconds_left: self.seconds_remaining(),
+        }
+    }
+
     /// Whether the decision countdown has elapsed. Paused while the telemetry
     /// settings sub-page or the per-login "Import less" list is open, so the
     /// screen never commits the import out from under a user who is choosing.
@@ -377,17 +458,14 @@ pub(crate) enum OnboardingPhase {
     /// When `None`, there was nothing to import and we prompt the user to pick a
     /// provider manually (Enter opens the login picker).
     Login { import: Option<ImportReview> },
-    /// Ask the user whether to log in to OpenAI. Shown on a fresh install when
-    /// no importable external logins were detected. A highlightable Yes/No
-    /// selector (default "Yes") matching the import walkthrough: Yes starts the
-    /// OpenAI sign-in, No exits onboarding to the normal new-session screen with
-    /// a system message telling the user to run `/login` when ready (we avoid the
-    /// inline provider picker here). Unlike the import/telemetry prompts this one
-    /// has no auto-timeout: logging in is a meaningful first step, so we wait for
-    /// the user rather than opening a browser on a countdown.
+    /// Ask the user how to log in on a fresh install when no importable
+    /// external logins were detected: OpenAI, Claude, API key, or Skip.
+    /// Defaults to OpenAI. Unlike the import/telemetry prompts this one has no
+    /// auto-timeout: logging in is a meaningful first step, so we wait for the
+    /// user rather than opening a browser on a countdown.
     LoginOpenAi {
-        /// Which option is highlighted (true = "Yes, log in to OpenAI").
-        yes_highlighted: bool,
+        /// Which sign-in option is highlighted (default `OpenAi`).
+        choice: crate::tui::OnboardingLoginChoice,
     },
     /// Legacy phase kept for compatibility with older replay/test fixtures.
     /// New onboarding skips explicit model selection and uses the default route;
@@ -500,7 +578,7 @@ impl OnboardingFlow {
                 import: Some(review),
             },
             None => OnboardingPhase::LoginOpenAi {
-                yes_highlighted: true,
+                choice: crate::tui::OnboardingLoginChoice::OpenAi,
             },
         };
         Self { phase }

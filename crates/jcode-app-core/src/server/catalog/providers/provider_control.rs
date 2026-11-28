@@ -1,0 +1,1641 @@
+#![cfg_attr(test, allow(clippy::items_after_test_module))]
+
+use crate::agent::Agent;
+use crate::auth::lifecycle::{AuthActivationRequest, AuthActivationResult};
+use crate::protocol::{AuthChanged, NotificationType, ServerEvent};
+use crate::provider::{ModelCatalogRefreshSummary, ModelRoute, Provider, RouteSelection};
+use jcode_provider_core::ModelCatalogSnapshot;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::Instant;
+use tokio::sync::{Mutex, mpsc};
+
+use super::SessionAgents;
+static AUTH_REFRESH_GENERATIONS: OnceLock<StdMutex<HashMap<String, u64>>> = OnceLock::new();
+static NEXT_AUTH_REFRESH_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+struct AuthRefreshTargets {
+    providers: Vec<Arc<dyn Provider>>,
+    session_providers: Vec<Arc<dyn Provider>>,
+    deferred_agents: Vec<Arc<Mutex<Agent>>>,
+}
+
+fn begin_auth_refresh(session_id: &str) -> u64 {
+    let generation = NEXT_AUTH_REFRESH_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let mut generations = AUTH_REFRESH_GENERATIONS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    generations.insert(session_id.to_string(), generation);
+    generation
+}
+
+fn auth_refresh_is_current(session_id: &str, generation: u64) -> bool {
+    let generations = AUTH_REFRESH_GENERATIONS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    generations.get(session_id).copied() == Some(generation)
+}
+
+fn finish_auth_refresh(session_id: &str, generation: u64) {
+    let mut generations = AUTH_REFRESH_GENERATIONS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if generations.get(session_id).copied() == Some(generation) {
+        generations.remove(session_id);
+    }
+}
+
+fn available_models_snapshot_into_event(snapshot: ModelCatalogSnapshot) -> ServerEvent {
+    ServerEvent::AvailableModelsUpdated {
+        provider_name: snapshot.provider_name,
+        provider_model: snapshot.provider_model,
+        available_models: snapshot.available_models,
+        available_model_routes: snapshot.model_routes,
+    }
+}
+
+async fn available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> ModelCatalogSnapshot {
+    let agent_guard = agent.lock().await;
+    super::available_models_cache::for_agent(&agent_guard).snapshot()
+}
+
+fn available_models_snapshot_from_provider(provider: &Arc<dyn Provider>) -> ModelCatalogSnapshot {
+    let mut snapshot = ModelCatalogSnapshot::from_provider(provider.as_ref());
+    crate::model_usage::enrich_routes(&mut snapshot.model_routes);
+    snapshot
+}
+
+pub(super) async fn available_models_updated_event(agent: &Arc<Mutex<Agent>>) -> ServerEvent {
+    let agent_guard = agent.lock().await;
+    super::available_models_cache::for_agent(&agent_guard)
+        .event
+        .clone()
+}
+
+pub(super) async fn try_available_models_catalog_offloaded(
+    agent: &Arc<Mutex<Agent>>,
+) -> Option<Arc<super::available_models_cache::Catalog>> {
+    match super::available_models_cache::try_for_agent(agent, |_| ()).await {
+        Ok(catalog) => catalog.map(|(catalog, ())| catalog),
+        Err(error) => {
+            crate::logging::warn(&format!("Model catalog build task failed: {error}"));
+            None
+        }
+    }
+}
+
+#[path = "provider_control/catalog_activity.rs"]
+mod catalog_activity;
+use catalog_activity::format_auth_catalog_refresh_complete;
+
+#[path = "provider_control/pending_model_switch.rs"]
+mod pending_model_switch;
+pub(super) use pending_model_switch::handle_cancel_pending_model_change;
+#[cfg(test)]
+use pending_model_switch::has_pending_model_switch;
+use pending_model_switch::{defer_model_switch, lock_unless_turn_running};
+
+#[path = "provider_control/refresh_auth.rs"]
+mod refresh_auth;
+pub(super) use refresh_auth::handle_refresh_auth;
+
+#[path = "provider_control/deferred_operations.rs"]
+mod deferred_operations;
+use deferred_operations::{
+    apply_auth_route_to_agent, apply_auth_runtime_model_to_agent, auth_refresh_targets,
+    log_provider_control_completed, log_provider_control_deferred,
+    log_provider_control_lock_acquired, spawn_deferred_agent_mutation,
+    spawn_deferred_auth_refreshes, spawn_deferred_provider_operation,
+};
+
+fn send_model_changed_result(
+    id: u64,
+    result: anyhow::Result<(
+        String,
+        String,
+        Option<jcode_provider_core::ResolvedCredential>,
+        Option<String>,
+    )>,
+    fallback_model: String,
+    agent: &Agent,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    match result {
+        Ok((updated, provider_name, resolved_credential, reasoning_effort)) => {
+            crate::telemetry::record_model_switch();
+            crate::logging::event_info(
+                "server_model_changed",
+                vec![
+                    ("id", id.to_string()),
+                    ("model", updated.clone()),
+                    ("provider", provider_name.clone()),
+                ],
+            );
+            let _ = client_event_tx.send(ServerEvent::ModelChanged {
+                id,
+                model: updated,
+                provider_name: Some(provider_name),
+                context_window: Some(agent.provider_context_window() as u64),
+                error: None,
+                resolved_credential,
+                provider_oauth_email: super::provider_oauth_email(agent.provider_handle().as_ref()),
+                provider_oauth_account_label: agent.provider_handle().serving_oauth_account_label(),
+                reasoning_effort,
+            });
+        }
+        Err(error) => {
+            crate::logging::event_error(
+                "server_model_change_failed",
+                vec![
+                    ("id", id.to_string()),
+                    ("fallback_model", fallback_model.clone()),
+                    ("error", error.to_string()),
+                ],
+            );
+            let _ = client_event_tx.send(ServerEvent::ModelChanged {
+                id,
+                model: fallback_model,
+                provider_name: None,
+                context_window: Some(agent.provider_context_window() as u64),
+                error: Some(error.to_string()),
+                resolved_credential: None,
+                provider_oauth_email: None,
+                provider_oauth_account_label: None,
+                reasoning_effort: None,
+            });
+        }
+    }
+}
+
+fn apply_cycle_model(
+    id: u64,
+    direction: i8,
+    agent: &mut Agent,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let models = agent.available_models_for_switching();
+    if models.is_empty() {
+        let _ = client_event_tx.send(ServerEvent::ModelChanged {
+            id,
+            model: agent.provider_model(),
+            provider_name: None,
+            context_window: Some(agent.provider_context_window() as u64),
+            error: Some("Model switching is not available for this provider.".to_string()),
+            resolved_credential: None,
+            provider_oauth_email: None,
+            provider_oauth_account_label: None,
+            reasoning_effort: None,
+        });
+        return;
+    }
+
+    let current = agent.provider_model();
+    let current_index = models.iter().position(|m| *m == current).unwrap_or(0);
+    let len = models.len();
+    let next_index = if direction >= 0 {
+        (current_index + 1) % len
+    } else {
+        (current_index + len - 1) % len
+    };
+    let next_model = models[next_index].clone();
+    crate::logging::event_info(
+        "server_cycle_model_request",
+        vec![
+            ("id", id.to_string()),
+            ("direction", (direction as i64).to_string()),
+            ("current_model", current.clone()),
+            ("next_model", next_model.clone()),
+            ("available_models", len.to_string()),
+        ],
+    );
+    let result = {
+        let result = agent.set_model(&next_model);
+        if result.is_ok() {
+            agent.reset_provider_session();
+        }
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
+            )
+        })
+    };
+    send_model_changed_result(id, result, current, agent, client_event_tx);
+}
+
+pub(super) async fn handle_cycle_model(
+    id: u64,
+    direction: i8,
+    turn_running: bool,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    if let Some(mut agent_guard) = lock_unless_turn_running(agent, turn_running).await {
+        apply_cycle_model(id, direction, &mut agent_guard, client_event_tx);
+    } else {
+        defer_model_switch(
+            "cycle_model",
+            id,
+            if direction >= 0 {
+                "next model"
+            } else {
+                "previous model"
+            }
+            .to_string(),
+            agent,
+            client_event_tx,
+            move |agent_guard, client_event_tx| {
+                apply_cycle_model(id, direction, agent_guard, client_event_tx);
+            },
+        );
+    }
+}
+
+#[path = "premium_mode_control.rs"]
+mod premium_mode_control;
+pub(super) use premium_mode_control::handle_set_premium_mode;
+
+fn apply_set_model(
+    id: u64,
+    model: String,
+    agent: &mut Agent,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    crate::logging::event_info(
+        "server_set_model_request",
+        vec![
+            ("id", id.to_string()),
+            ("requested_model", model.clone()),
+            ("current_model", agent.provider_model()),
+            ("current_provider", agent.provider_name()),
+        ],
+    );
+
+    let current = agent.provider_model();
+    let result = {
+        let result = switch_session_model(agent, &model);
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
+            )
+        })
+    };
+    send_model_changed_result(id, result, current, agent, client_event_tx);
+}
+
+pub(super) fn switch_session_model(agent: &mut Agent, model: &str) -> anyhow::Result<()> {
+    agent.set_model(model)?;
+    agent.reset_provider_session();
+    Ok(())
+}
+
+pub(super) fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
+    let provider = agent.provider_handle();
+    let name = provider.name().to_ascii_lowercase();
+    let name = match name.as_str() {
+        "anthropic" | "claude" => "claude",
+        "openai" => "openai",
+        "copilot" | "gemini" | "cursor" | "antigravity" | "bedrock" | "openrouter" => name.as_str(),
+        _ => return false,
+    };
+    let key = match (name, provider.active_resolved_credential()) {
+        ("claude" | "openai", Some(jcode_provider_core::ResolvedCredential::Oauth)) => {
+            // Unpinned sessions run on the global active login, which is
+            // exactly the account the router just proposed leaving.
+            let Some(label) = provider.oauth_account_label().or_else(|| {
+                if name == "openai" {
+                    crate::auth::codex::active_account_label()
+                } else {
+                    crate::auth::claude::active_account_label()
+                }
+            }) else {
+                return false;
+            };
+            let exists = if name == "openai" {
+                crate::auth::codex::list_accounts()
+                    .unwrap_or_else(|error| {
+                        crate::logging::warn(&format!(
+                            "Failed to inspect OpenAI accounts for pool routing: {error}"
+                        ));
+                        Vec::new()
+                    })
+                    .iter()
+                    .any(|account| account.label == label)
+            } else {
+                crate::auth::claude::list_accounts()
+                    .unwrap_or_else(|error| {
+                        crate::logging::warn(&format!(
+                            "Failed to inspect Claude accounts for pool routing: {error}"
+                        ));
+                        Vec::new()
+                    })
+                    .iter()
+                    .any(|account| account.label == label)
+            };
+            if !exists {
+                return false;
+            }
+            crate::auth::account_pool::account_key(name, Some(&label))
+        }
+        ("claude", Some(jcode_provider_core::ResolvedCredential::ApiKey)) => {
+            "anthropic-api".to_string()
+        }
+        ("openai", Some(jcode_provider_core::ResolvedCredential::ApiKey)) => {
+            "openai-api".to_string()
+        }
+        ("claude" | "openai", _) => return false,
+        _ => name.to_string(),
+    };
+    let api_key = key.ends_with("-api")
+        || provider.active_resolved_credential()
+            == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+        || crate::provider_catalog::login_providers()
+            .iter()
+            .any(|login| {
+                login.id == key
+                    && login.auth_kind == crate::provider_catalog::LoginProviderAuthKind::ApiKey
+            });
+    let pool = crate::auth::account_pool::AccountPool::load();
+    pool.auto_switch()
+        && !pool.excluded.contains(&key)
+        && pool.is_member(
+            &key,
+            crate::auth::account_pool::default_member(&key, api_key),
+        )
+}
+
+fn apply_set_route(
+    id: u64,
+    selection: crate::provider::RouteSelection,
+    automatic_failover: bool,
+    agent: &mut Agent,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    crate::logging::event_info(
+        "server_set_route_request",
+        vec![
+            ("id", id.to_string()),
+            ("requested_model", selection.model.clone()),
+            ("requested_provider", selection.provider_label.clone()),
+            ("requested_api_method", selection.api_method.clone()),
+            ("current_model", agent.provider_model()),
+            ("current_provider", agent.provider_name()),
+        ],
+    );
+
+    let current = agent.provider_model();
+    let result = {
+        let ineligible = if !automatic_failover {
+            None
+        } else if crate::config::Config::load()
+            .provider
+            .cross_provider_failover
+            != crate::config::CrossProviderFailoverMode::Countdown
+        {
+            Some("countdown auto-switch is disabled")
+        } else if !automatic_failover_source_is_pool_member(agent) {
+            Some("source account is not in the auto-switch group")
+        } else if !crate::provider::MultiProvider::is_failover_route_pool_approved(
+            &selection.routed_model_spec(),
+        ) {
+            Some("target account is not eligible in the auto-switch group")
+        } else {
+            None
+        };
+        let result = if let Some(why) = ineligible {
+            Err(anyhow::anyhow!("Auto-switch canceled: {why}."))
+        } else {
+            agent.set_route_selection(&selection)
+        };
+        if result.is_ok() {
+            agent.reset_provider_session();
+            if !automatic_failover
+                && selection.account_label().is_some()
+                && let Some(account) = jcode_provider_core::route_pool_key(&selection.api_method)
+            {
+                jcode_base::routing_service::global()
+                    .keep_manual_account(agent.session_id(), &account);
+            }
+        }
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
+            )
+        })
+    };
+    send_model_changed_result(id, result, current, agent, client_event_tx);
+}
+
+pub(super) async fn handle_set_model(
+    id: u64,
+    model: String,
+    turn_running: bool,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    if let Some(mut agent_guard) = lock_unless_turn_running(agent, turn_running).await {
+        apply_set_model(id, model, &mut agent_guard, client_event_tx);
+    } else {
+        defer_model_switch(
+            "set_model",
+            id,
+            model.clone(),
+            agent,
+            client_event_tx,
+            move |agent_guard, client_event_tx| {
+                apply_set_model(id, model, agent_guard, client_event_tx);
+            },
+        );
+    }
+}
+
+pub(super) async fn handle_set_route(
+    id: u64,
+    selection: crate::provider::RouteSelection,
+    automatic_failover: bool,
+    turn_running: bool,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    if let Some(mut agent_guard) = lock_unless_turn_running(agent, turn_running).await {
+        apply_set_route(
+            id,
+            selection,
+            automatic_failover,
+            &mut agent_guard,
+            client_event_tx,
+        );
+    } else {
+        defer_model_switch(
+            "set_route",
+            id,
+            selection.model.clone(),
+            agent,
+            client_event_tx,
+            move |agent_guard, client_event_tx| {
+                apply_set_route(
+                    id,
+                    selection,
+                    automatic_failover,
+                    agent_guard,
+                    client_event_tx,
+                );
+            },
+        );
+    }
+}
+
+pub(super) async fn handle_refresh_models(
+    id: u64,
+    provider: &Arc<dyn Provider>,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let provider_clone = provider.clone();
+    let agent_clone = agent.clone();
+    let client_event_tx_clone = client_event_tx.clone();
+    crate::runtime_activity::spawn(async move {
+        send_catalog_activity(
+            &client_event_tx_clone,
+            &crate::message::format_model_refresh_progress_markdown(
+                "Starting provider model catalog refresh",
+                Some(5),
+            ),
+        );
+
+        let refresh_started = Instant::now();
+        let refresh_future = provider_clone.refresh_model_catalog();
+        tokio::pin!(refresh_future);
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let result = loop {
+            tokio::select! {
+                result = &mut refresh_future => break result,
+                _ = heartbeat.tick() => {
+                    let elapsed_secs = refresh_started.elapsed().as_secs();
+                    if elapsed_secs > 0 {
+                        send_catalog_activity(
+                            &client_event_tx_clone,
+                            &crate::message::format_model_refresh_progress_markdown(
+                                &format!("Waiting on provider APIs ({elapsed_secs}s elapsed)"),
+                                None,
+                            ),
+                        );
+                    }
+                }
+            }
+        };
+        // Unified refresh can return an error after publishing fresh catalogs
+        // for other providers. Send the current snapshot on both paths.
+        crate::bus::Bus::global().publish_models_updated();
+        let event = available_models_updated_event(&agent_clone).await;
+        let _ = client_event_tx_clone.send(event);
+        match result {
+            Ok(_) => {
+                send_catalog_activity(
+                    &client_event_tx_clone,
+                    &crate::message::format_model_refresh_progress_markdown(
+                        "Updating model picker",
+                        Some(95),
+                    ),
+                );
+                send_catalog_activity(
+                    &client_event_tx_clone,
+                    &crate::message::format_model_refresh_progress_markdown(
+                        "Model list refresh complete",
+                        Some(100),
+                    ),
+                );
+            }
+            Err(err) => {
+                send_catalog_activity(
+                    &client_event_tx_clone,
+                    &crate::message::format_model_refresh_progress_markdown(
+                        "Model list refresh failed",
+                        None,
+                    ),
+                );
+                let _ = client_event_tx_clone.send(ServerEvent::Error {
+                    id,
+                    message: format!("Failed to refresh models: {}", err),
+                    retry_after_secs: None,
+                });
+            }
+        }
+    });
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+fn send_catalog_activity(client_event_tx: &mpsc::UnboundedSender<ServerEvent>, message: &str) {
+    let _ = client_event_tx.send(ServerEvent::Notification {
+        from_session: "jcode".to_string(),
+        from_name: Some("Jcode".to_string()),
+        notification_type: NotificationType::Message {
+            scope: Some("catalog_activity".to_string()),
+            channel: None,
+            tldr: None,
+        },
+        message: message.to_string(),
+    });
+}
+
+/// Apply at a turn boundary, without blocking the connection's request reader.
+pub(super) async fn handle_set_context_cap(
+    id: u64,
+    session_id: String,
+    max_context_tokens: Option<usize>,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let agent = Arc::clone(agent);
+    let client_event_tx = client_event_tx.clone();
+    crate::runtime_activity::spawn(async move {
+        let mut agent = agent.lock().await;
+        if agent.session_id() != session_id {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!(
+                    "target session changed before context cap could be applied: {session_id}"
+                ),
+                retry_after_secs: None,
+            });
+            return;
+        }
+        match agent.set_context_cap(max_context_tokens).await {
+            Ok(effective_budget) => {
+                let _ = client_event_tx.send(ServerEvent::ContextCapChanged {
+                    id,
+                    session_id: agent.session_id().to_string(),
+                    max_context_tokens: max_context_tokens.filter(|cap| *cap > 0),
+                    effective_budget,
+                });
+            }
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: crate::util::format_error_chain(&error),
+                    retry_after_secs: None,
+                });
+            }
+        }
+    });
+}
+
+pub(super) async fn handle_set_reasoning_effort(
+    id: u64,
+    effort: String,
+    is_swarm_worker: bool,
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    provider: Option<Arc<dyn Provider>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let (result, updated_model) = if let Ok(mut agent_guard) = agent.try_lock() {
+        let prev_model = agent_guard.provider_model();
+        let result = apply_reasoning_effort(&mut agent_guard, &effort, is_swarm_worker);
+        let updated_model = result
+            .is_ok()
+            .then(|| agent_guard.provider_model())
+            .filter(|model| model != &prev_model);
+        (result, updated_model)
+    } else if let Some(provider) = provider.filter(|provider| {
+        !is_swarm_worker
+            || (provider.speed_mode() == jcode_provider_core::SpeedMode::Standard
+                && !crate::session::WorkerModelApproval::required_for(&provider.model()))
+    }) {
+        let requested = if is_swarm_worker {
+            let session_id = session_id.to_owned();
+            let provider = Arc::clone(&provider);
+            let effort = effort.clone();
+            tokio::task::spawn_blocking(move || {
+                let session = crate::session::Session::load_for_remote_startup(&session_id)
+                    .or_else(|_| crate::session::Session::load_startup_stub(&session_id))?;
+                Agent::worker_effort_for_provider(
+                    provider.as_ref(),
+                    session.provider_key(),
+                    &effort,
+                )
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.into()))
+        } else {
+            Ok(effort)
+        };
+        let prev_model = provider.model();
+        let result = requested
+            .and_then(|requested| provider.set_reasoning_effort(&requested))
+            .map(|()| provider.reasoning_effort());
+        if let Ok(current) = &result {
+            // The provider already uses it, but the session file is only written
+            // once the turn frees the agent, and a reload before that would
+            // restore the old effort. The durable pending slot carries it: the
+            // next request boundary or a restored agent saves it. This also
+            // replaces any older unapplied choice.
+            crate::session_effort::queue_pending_effort(
+                session_id,
+                current.as_deref().unwrap_or(""),
+            );
+            crate::session_effort::record_session_effort(session_id, current.as_deref());
+            let agent = Arc::clone(agent);
+            crate::runtime_activity::spawn(async move {
+                let mut agent = agent.lock().await;
+                let result = if is_swarm_worker {
+                    agent.mark_swarm_worker()
+                } else {
+                    Ok(())
+                }
+                .and_then(|()| {
+                    agent.apply_pending_reasoning_effort();
+                    agent.persist_current_reasoning_effort()
+                });
+                if let Err(error) = result {
+                    crate::logging::warn(&format!("Could not persist reasoning effort: {error}"));
+                }
+            });
+        }
+        let updated_model = result
+            .is_ok()
+            .then(|| provider.model())
+            .filter(|model| model != &prev_model);
+        send_reasoning_effort_result(id, result, updated_model, client_event_tx);
+        return;
+    } else {
+        // The running turn holds the agent lock, and the out-of-band provider
+        // registration can be a stale weak reference that no longer upgrades.
+        // A long agentic turn can hold the lock for many requests, and a daemon
+        // reload can end the process first, so the choice goes to the durable
+        // pending slot: the turn applies it before its next provider request,
+        // and a restored agent adopts it. The lock-waiting task below covers an
+        // idle-after-turn agent; whichever runs first takes the slot.
+        let current = (!effort.trim().is_empty()).then_some(effort.as_str());
+        crate::session_effort::record_session_effort(session_id, current);
+        crate::session_effort::queue_pending_effort(session_id, &effort);
+        spawn_deferred_agent_mutation(
+            "set_reasoning_effort",
+            id,
+            Arc::clone(agent),
+            client_event_tx.clone(),
+            move |agent_guard, _| {
+                if is_swarm_worker && let Err(error) = agent_guard.mark_swarm_worker() {
+                    crate::logging::warn(&format!("Could not mark swarm worker: {error}"));
+                }
+                agent_guard.apply_pending_reasoning_effort();
+            },
+        );
+        send_reasoning_effort_result(id, Ok(current.map(str::to_owned)), None, client_event_tx);
+        return;
+    };
+
+    send_reasoning_effort_result(id, result, updated_model, client_event_tx);
+}
+
+fn apply_reasoning_effort(
+    agent: &mut Agent,
+    effort: &str,
+    is_swarm_worker: bool,
+) -> anyhow::Result<Option<String>> {
+    if is_swarm_worker {
+        agent.mark_swarm_worker()?;
+    }
+    agent.set_reasoning_effort(effort)
+}
+
+fn send_reasoning_effort_result(
+    id: u64,
+    result: anyhow::Result<Option<String>>,
+    model: Option<String>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    match result {
+        Ok(effort) => {
+            let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
+                id,
+                effort,
+                model,
+                error: None,
+            });
+        }
+        Err(e) => {
+            let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
+                id,
+                effort: None,
+                model: None,
+                error: Some(e.to_string()),
+            });
+        }
+    }
+}
+
+pub(super) async fn handle_set_service_tier(
+    id: u64,
+    service_tier: String,
+    agent: &Arc<Mutex<Agent>>,
+    provider: Option<Arc<dyn Provider>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    if let Some(provider) = provider.as_ref()
+        && crate::agent::provider::legacy_speed_mode(provider.as_ref(), &service_tier).is_some()
+    {
+        let result = match agent.try_lock() {
+            Ok(mut agent) => agent.set_legacy_session_speed(&service_tier),
+            Err(_) => Err(anyhow::anyhow!(
+                "Cannot change speed during an active turn; try again when the session is idle"
+            )),
+        };
+        let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
+            id,
+            pending: false,
+            service_tier: provider.service_tier(),
+            error: result.err().map(|error| error.to_string()),
+        });
+        return;
+    }
+    let apply = move |provider: Arc<dyn Provider>,
+                      client_event_tx: &mpsc::UnboundedSender<ServerEvent>| {
+        match provider.set_service_tier(&service_tier) {
+            Ok(()) => {
+                let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
+                    id,
+                    pending: false,
+                    service_tier: provider.service_tier(),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
+                    id,
+                    pending: false,
+                    service_tier: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    };
+
+    if let Some(provider) = provider {
+        // Configures the next provider request, even while the turn owns Agent.
+        // The provider cannot rewrite a request already accepted upstream.
+        apply(provider, client_event_tx);
+    } else if let Ok(agent_guard) = agent.try_lock() {
+        apply(agent_guard.provider_handle(), client_event_tx);
+    } else {
+        let _ = client_event_tx.send(ServerEvent::ServiceTierChanged {
+            id,
+            pending: true,
+            service_tier: None,
+            error: None,
+        });
+        spawn_deferred_provider_operation(
+            "set_service_tier",
+            id,
+            Arc::clone(agent),
+            client_event_tx.clone(),
+            apply,
+        );
+    }
+}
+
+pub(super) async fn handle_set_transport(
+    id: u64,
+    transport: String,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let apply = move |provider: Arc<dyn Provider>,
+                      client_event_tx: &mpsc::UnboundedSender<ServerEvent>| {
+        match provider.set_transport(&transport) {
+            Ok(()) => {
+                let _ = client_event_tx.send(ServerEvent::TransportChanged {
+                    id,
+                    transport: provider.transport(),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                let _ = client_event_tx.send(ServerEvent::TransportChanged {
+                    id,
+                    transport: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    };
+
+    if let Ok(agent_guard) = agent.try_lock() {
+        apply(agent_guard.provider_handle(), client_event_tx);
+    } else {
+        spawn_deferred_provider_operation(
+            "set_transport",
+            id,
+            Arc::clone(agent),
+            client_event_tx.clone(),
+            apply,
+        );
+    }
+}
+
+pub(super) async fn handle_set_compaction_mode(
+    id: u64,
+    mode: crate::config::CompactionMode,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    if let Ok(agent_guard) = agent.try_lock() {
+        let registry = agent_guard.registry();
+        drop(agent_guard);
+        apply_set_compaction_mode(id, mode, registry, client_event_tx).await;
+    } else {
+        spawn_deferred_set_compaction_mode(id, mode, Arc::clone(agent), client_event_tx.clone());
+    }
+}
+
+async fn apply_set_compaction_mode(
+    id: u64,
+    mode: crate::config::CompactionMode,
+    registry: crate::tool::Registry,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let result = {
+        let compaction = registry.compaction();
+        let mut manager = compaction.write().await;
+        manager.set_mode(mode);
+        Ok::<(), anyhow::Error>(())
+    };
+
+    match result {
+        Ok(()) => {
+            let updated_mode = registry.compaction().read().await.mode();
+            let _ = client_event_tx.send(ServerEvent::CompactionModeChanged {
+                id,
+                mode: updated_mode,
+                error: None,
+            });
+        }
+        Err(e) => {
+            let fallback_mode = registry.compaction().read().await.mode();
+            let _ = client_event_tx.send(ServerEvent::CompactionModeChanged {
+                id,
+                mode: fallback_mode,
+                error: Some(e.to_string()),
+            });
+        }
+    }
+}
+
+fn spawn_deferred_set_compaction_mode(
+    id: u64,
+    mode: crate::config::CompactionMode,
+    agent: Arc<Mutex<Agent>>,
+    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
+) {
+    let queued_at = log_provider_control_deferred("set_compaction_mode", id);
+    crate::runtime_activity::spawn(async move {
+        let registry = {
+            let agent_guard = agent.lock().await;
+            log_provider_control_lock_acquired("set_compaction_mode", id, queued_at);
+            agent_guard.registry()
+        };
+        apply_set_compaction_mode(id, mode, registry, &client_event_tx).await;
+        log_provider_control_completed("set_compaction_mode", id, queued_at);
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn handle_notify_auth_changed(
+    id: u64,
+    provider_hint: Option<String>,
+    auth: Option<AuthChanged>,
+    prefer_strongest: bool,
+    provider: &Arc<dyn Provider>,
+    provider_template: &Arc<dyn Provider>,
+    sessions: &SessionAgents,
+    client_session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let refresh_started = Instant::now();
+    crate::auth::AuthStatus::invalidate_cache();
+    let (session_id, before_snapshot) = if let Ok(agent_guard) = agent.try_lock() {
+        (
+            agent_guard.session_id().to_string(),
+            super::available_models_cache::for_agent(&agent_guard).snapshot(),
+        )
+    } else {
+        crate::logging::event_warn(
+            "SERVER_PROVIDER_CONTROL_DEFERRED",
+            vec![
+                ("phase", "fallback_snapshot".to_string()),
+                ("operation", "notify_auth_changed".to_string()),
+                ("request_id", id.to_string()),
+                ("session_id", client_session_id.to_string()),
+                ("reason", "agent_busy".to_string()),
+            ],
+        );
+        (
+            client_session_id.to_string(),
+            available_models_snapshot_from_provider(provider),
+        )
+    };
+    let auth_refresh_generation = begin_auth_refresh(&session_id);
+    let activation_request = AuthActivationRequest::new(provider_hint, auth);
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+        crate::bus::UiActivity::auth(
+            Some(session_id.clone()),
+            "",
+            Some("Auth: refreshing providers..."),
+        ),
+    ));
+    let targets = auth_refresh_targets(provider_template, provider, agent, sessions).await;
+    let client_event_tx_clone = client_event_tx.clone();
+    let agent_clone = agent.clone();
+    crate::runtime_activity::spawn(async move {
+        if !auth_refresh_is_current(&session_id, auth_refresh_generation) {
+            return;
+        }
+        let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
+        // A standard Claude login restores access, it is not consent to move
+        // an existing session (and its next prompt) to another model.
+        let require_model_confirmation =
+            !prefer_strongest && activation.provider_id.as_deref() == Some("claude");
+        super::account_usage::request_after_auth_change(id, client_event_tx_clone.clone());
+        if let Some(provider_id) = activation.provider_id.as_deref() {
+            // A renewed login must get a real request instead of inheriting the
+            // previous credential's cached runtime failure.
+            crate::provider::clear_provider_unavailable_for_account(provider_id);
+        }
+        // Snapshot which providers jcode now believes are configured right after
+        // an auth change activates. This is the cornerstone for diagnosing
+        // "logged in but model picker still empty / only OpenAI+Anthropic" and
+        // "paste key silently returns to menu" reports (#312, #292, #304): if a
+        // provider the user just configured is not Available here, the failure is
+        // upstream of the picker.
+        crate::auth::AuthStatus::check_fast().log_snapshot("auth_changed");
+        let mut bus_rx = crate::bus::Bus::global().subscribe();
+        let AuthRefreshTargets {
+            providers,
+            session_providers,
+            deferred_agents,
+        } = targets;
+        let mut refresh_providers = providers.clone();
+        for candidate in &session_providers {
+            if !refresh_providers
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, candidate))
+            {
+                refresh_providers.push(Arc::clone(candidate));
+            }
+        }
+        for provider in providers {
+            provider.on_auth_changed();
+        }
+        for provider in session_providers {
+            provider.on_auth_changed_preserve_current_provider();
+        }
+
+        // Auth refresh is global so every live session learns about newly
+        // configured credentials, but the automatic post-login model switch is
+        // session-local. A user logging Groq/Cerebras into one workspace should
+        // not silently move unrelated sessions off their chosen provider/model.
+        if !require_model_confirmation
+            && auth_refresh_is_current(&session_id, auth_refresh_generation)
+        {
+            apply_auth_runtime_model_to_agent(
+                &activation,
+                activation.activated_model.as_deref(),
+                &agent_clone,
+                None,
+                &client_event_tx_clone,
+            )
+            .await;
+        }
+        let auth_selection_generation = {
+            let agent_guard = agent_clone.lock().await;
+            agent_guard.provider_model_selection_generation()
+        };
+
+        crate::bus::Bus::global().publish_models_updated();
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::UiActivity(
+            crate::bus::UiActivity::catalog(
+                Some(session_id.clone()),
+                "",
+                Some("Auth: model routes updating..."),
+            ),
+        ));
+
+        spawn_deferred_auth_refreshes(deferred_agents);
+
+        // Hot-initializing providers is synchronous, while dynamic catalogs may
+        // continue refreshing in the background. Push an immediate snapshot so
+        // the model picker/header stop looking stale right after login, then
+        // push another snapshot when the background refresh announces itself.
+        let mut latest_snapshot = available_models_snapshot(&agent_clone).await;
+        let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
+            latest_snapshot.clone(),
+        ));
+
+        // Wait for the catalog work that providers actually launched. The old
+        // implementation waited for two stacked 750 ms debounce windows even
+        // when every provider had already finished. Tracking real work removes
+        // that fixed tax while retaining the 10 s safety ceiling.
+        let settle_started = Instant::now();
+        let max_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut model_update_events = 0_u64;
+        while refresh_providers
+            .iter()
+            .any(|provider| provider.auth_model_refresh_pending())
+            && tokio::time::Instant::now() < max_deadline
+        {
+            tokio::select! {
+                event = bus_rx.recv() => {
+                    if matches!(event, Ok(crate::bus::BusEvent::ModelsUpdated)) {
+                        model_update_events = model_update_events.saturating_add(1);
+                        latest_snapshot = available_models_snapshot(&agent_clone).await;
+                        let _ = client_event_tx_clone.send(available_models_snapshot_into_event(latest_snapshot.clone()));
+                    }
+                }
+                // ModelsUpdated is a catalog-change hint, not a completion wake:
+                // MultiProvider's PendingGuard clears pending without publishing
+                // on failure, and success publishes before the guard drops. An
+                // event-only wait could therefore stall until the 10 s ceiling,
+                // even after successful work. Keep polling until providers expose
+                // a completion notification ordered after clearing pending on
+                // every exit path (including failures and cancellation).
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
+        }
+        let refresh_timed_out = refresh_providers
+            .iter()
+            .any(|provider| provider.auth_model_refresh_pending());
+        latest_snapshot = available_models_snapshot(&agent_clone).await;
+        let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
+            latest_snapshot.clone(),
+        ));
+        let settle_ms = settle_started.elapsed().as_millis();
+
+        if !auth_refresh_is_current(&session_id, auth_refresh_generation) {
+            crate::logging::event_info(
+                "SERVER_AUTH_MODEL_REFRESH_SUPERSEDED",
+                vec![
+                    ("session_id", session_id.clone()),
+                    ("generation", auth_refresh_generation.to_string()),
+                    (
+                        "total_ms",
+                        refresh_started.elapsed().as_millis().to_string(),
+                    ),
+                ],
+            );
+            finish_auth_refresh(&session_id, auth_refresh_generation);
+            return;
+        }
+
+        let manual_model_selected_during_auth_refresh = {
+            let agent_guard = agent_clone.lock().await;
+            agent_guard.user_selected_provider_model_after(auth_selection_generation)
+        };
+        let mut restored_model = None;
+        if manual_model_selected_during_auth_refresh {
+            crate::logging::auth_event(
+                "auth_changed_auto_model_skipped_after_manual_switch",
+                activation.provider_id.as_deref().unwrap_or("auth"),
+                &[("reason", "user_selected_provider_model_during_refresh")],
+            );
+            latest_snapshot = available_models_snapshot(&agent_clone).await;
+            let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
+                latest_snapshot.clone(),
+            ));
+        } else {
+            if prefer_strongest {
+                if let Some(route) = crate::auth::lifecycle::globally_preferred_default_route(
+                    &latest_snapshot.model_routes,
+                ) {
+                    apply_auth_route_to_agent(
+                        &route,
+                        &agent_clone,
+                        Some(auth_selection_generation),
+                        &client_event_tx_clone,
+                    )
+                    .await;
+                }
+            } else if let Some(model_to_select) =
+                crate::auth::lifecycle::provider_model_to_select_after_auth_with_configured_default(
+                    &activation,
+                    crate::config::config().provider.default_model.as_deref(),
+                    latest_snapshot.provider_model.as_deref(),
+                    &latest_snapshot.model_routes,
+                )
+            {
+                if require_model_confirmation {
+                    restored_model = Some(model_to_select);
+                } else {
+                    apply_auth_runtime_model_to_agent(
+                        &activation,
+                        Some(&model_to_select),
+                        &agent_clone,
+                        Some(auth_selection_generation),
+                        &client_event_tx_clone,
+                    )
+                    .await;
+                }
+            }
+            latest_snapshot = available_models_snapshot(&agent_clone).await;
+            let _ = client_event_tx_clone.send(available_models_snapshot_into_event(
+                latest_snapshot.clone(),
+            ));
+        }
+
+        let summary = crate::provider::summarize_model_catalog_refresh(
+            before_snapshot.available_models,
+            latest_snapshot.available_models.clone(),
+            before_snapshot.model_routes,
+            latest_snapshot.model_routes.clone(),
+        );
+        let catalog_invariants = crate::auth::lifecycle::validate_catalog_invariants(
+            &activation,
+            latest_snapshot.provider_model.as_deref(),
+            &latest_snapshot.model_routes,
+        );
+        let catalog_warning = catalog_invariants.warning_message().filter(|_| {
+            !require_model_confirmation || catalog_invariants.selectable_provider_routes == 0
+        });
+        let mut catalog_message = format_auth_catalog_refresh_complete(
+            activation
+                .provider_label
+                .as_deref()
+                .or(latest_snapshot.provider_name.as_deref()),
+            latest_snapshot.provider_model.as_deref(),
+            &summary,
+            catalog_warning.is_some(),
+        );
+        if let Some(model) = restored_model {
+            catalog_message.push_str(&format!(
+                "\nClaude model `{model}` is available. Use `/model` to switch."
+            ));
+        }
+        if let Some(warning) = catalog_warning.as_deref() {
+            crate::logging::warn(&format!("Auth catalog invariant warning: {warning}"));
+        }
+        crate::logging::event_info(
+            "SERVER_AUTH_MODEL_REFRESH_COMPLETED",
+            vec![
+                (
+                    "total_ms",
+                    refresh_started.elapsed().as_millis().to_string(),
+                ),
+                ("settle_ms", settle_ms.to_string()),
+                ("models_before", summary.model_count_before.to_string()),
+                ("models_after", summary.model_count_after.to_string()),
+                ("routes_before", summary.route_count_before.to_string()),
+                ("routes_after", summary.route_count_after.to_string()),
+                ("model_update_events", model_update_events.to_string()),
+                ("timed_out", refresh_timed_out.to_string()),
+            ],
+        );
+        send_catalog_activity(&client_event_tx_clone, &catalog_message);
+        finish_auth_refresh(&session_id, auth_refresh_generation);
+    });
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+/// A one-shot client (the SDK login flow, `jcode login` from another shell)
+/// reports new credentials without subscribing to a session. Refresh every
+/// live session's provider so subscribed clients, including Desktop chats and
+/// drafts that never asked for a session-local switch, receive the new catalog
+/// through `ModelsUpdated`. The post-login model switch stays session-local.
+pub(super) async fn handle_unbound_notify_auth_changed(
+    id: u64,
+    provider_hint: Option<String>,
+    auth: Option<AuthChanged>,
+    provider_template: &Arc<dyn Provider>,
+    sessions: &SessionAgents,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    crate::auth::AuthStatus::invalidate_cache();
+    let activation = crate::auth::lifecycle::activate_auth_change(&AuthActivationRequest::new(
+        provider_hint,
+        auth,
+    ));
+    super::account_usage::request_after_auth_change(id, client_event_tx.clone());
+    if let Some(provider_id) = activation.provider_id.as_deref() {
+        crate::provider::clear_provider_unavailable_for_account(provider_id);
+    }
+    provider_template.on_auth_changed();
+    let agents: Vec<Arc<Mutex<Agent>>> = sessions.handles().await;
+    let mut idle = Vec::new();
+    let mut busy = Vec::new();
+    for agent in agents {
+        let handle = agent.try_lock().map(|guard| guard.provider_handle());
+        match handle {
+            Ok(provider) => idle.push(provider),
+            Err(_) => busy.push(agent),
+        }
+    }
+    let mut seen: Vec<Arc<dyn Provider>> = vec![Arc::clone(provider_template)];
+    for provider in idle {
+        if !seen.iter().any(|existing| Arc::ptr_eq(existing, &provider)) {
+            provider.on_auth_changed_preserve_current_provider();
+            seen.push(provider);
+        }
+    }
+    spawn_deferred_auth_refreshes(busy);
+    crate::bus::Bus::global().publish_models_updated();
+    // Catalogs that refresh in the background announce themselves again with
+    // their own ModelsUpdated once the network fetch completes.
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+#[cfg(test)]
+#[path = "provider_control_tests.rs"]
+mod provider_control_tests;
+
+pub(super) async fn handle_switch_anthropic_account(
+    id: u64,
+    label: String,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    match crate::auth::claude::set_active_account(&label) {
+        Ok(()) => {
+            crate::auth::AuthStatus::invalidate_cache();
+            spawn_account_switch_refresh(
+                id,
+                "anthropic",
+                label,
+                Arc::clone(agent),
+                client_event_tx.clone(),
+            );
+        }
+        Err(e) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Failed to switch Anthropic account: {}", e),
+                retry_after_secs: None,
+            });
+        }
+    }
+}
+
+pub(super) async fn handle_switch_openai_account(
+    id: u64,
+    label: String,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    match crate::auth::codex::set_active_account(&label) {
+        Ok(()) => {
+            crate::auth::AuthStatus::invalidate_cache();
+            spawn_account_switch_refresh(
+                id,
+                "openai",
+                label,
+                Arc::clone(agent),
+                client_event_tx.clone(),
+            );
+        }
+        Err(e) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Failed to switch OpenAI account: {}", e),
+                retry_after_secs: None,
+            });
+        }
+    }
+}
+
+pub(super) async fn handle_invalidate_openai_usage(
+    id: u64,
+    account_label: Option<String>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    // Only local state changes here. A retry of this request is harmless and
+    // cannot spend another reset. Acknowledge after invalidation so a following
+    // prompt cannot be rejected by the pre-reset quota cooldown.
+    crate::usage::invalidate_openai_usage_reset_state(account_label.as_deref()).await;
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+pub(super) async fn handle_invalidate_anthropic_usage(
+    id: u64,
+    account_label: Option<String>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    // Local cache and cooldown state only, so retries cannot spend a reset.
+    crate::usage::invalidate_anthropic_usage_reset_state(account_label.as_deref());
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+fn account_switch_selection(
+    agent: &Agent,
+    provider_kind: &str,
+    account_label: &str,
+) -> anyhow::Result<RouteSelection> {
+    use jcode_provider_core::{ActiveProvider, RuntimeKey};
+    let (target, runtime_key, method, provider_label, provider_id) = match provider_kind {
+        "anthropic" => (
+            ActiveProvider::Claude,
+            RuntimeKey::ClaudeOAuth,
+            "claude-oauth",
+            "Claude",
+            "claude",
+        ),
+        "openai" => (
+            ActiveProvider::OpenAI,
+            RuntimeKey::OpenAIOAuth,
+            "openai-oauth",
+            "OpenAI",
+            "openai",
+        ),
+        _ => anyhow::bail!("Unsupported account provider: {provider_kind}"),
+    };
+    let provider = agent.provider_handle();
+    let model = if jcode_provider_core::parse_provider_hint(provider.name()) == Some(target) {
+        // A same-provider account switch must not silently select another model.
+        provider.model()
+    } else {
+        let routes = provider.model_routes();
+        let models: Vec<_> = routes
+            .iter()
+            .filter(|route| {
+                route.available
+                    && RouteSelection::from_model_route(route).runtime_key == runtime_key
+            })
+            .map(|route| route.model.as_str())
+            .collect();
+        crate::auth::lifecycle::preferred_model_for_provider(provider_id, &models)
+            .or_else(|| models.first().map(|model| (*model).to_string()))
+            .or_else(|| {
+                crate::auth::lifecycle::default_model_for_provider(provider_id).map(str::to_owned)
+            })
+            .ok_or_else(|| anyhow::anyhow!("No OAuth model is available for {provider_label}"))?
+    };
+    Ok(RouteSelection {
+        model,
+        runtime_key,
+        api_method: format!("{method}@{account_label}"),
+        provider_label: provider_label.to_string(),
+        detail: String::new(),
+    })
+}
+
+fn apply_account_switch(
+    id: u64,
+    provider_kind: &str,
+    account_label: &str,
+    agent: &mut Agent,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let current = agent.provider_model();
+    let result = account_switch_selection(agent, provider_kind, account_label)
+        .and_then(|selection| agent.set_route_selection(&selection))
+        .map(|_| {
+            agent.reset_provider_session();
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
+            )
+        });
+    // A global login preference is not this session's credential. The explicit
+    // route binds a replacement runtime to the requested account and persists
+    // that pin. Acknowledge it even when the model itself did not change.
+    send_model_changed_result(id, result, current, agent, client_event_tx);
+}
+
+fn spawn_account_switch_refresh(
+    id: u64,
+    provider_kind: &'static str,
+    account_label: String,
+    agent: Arc<Mutex<Agent>>,
+    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
+) {
+    // Clear the selected login's failure before waiting for a busy agent. The
+    // global active account can change while the asynchronous refresh waits.
+    match provider_kind {
+        "anthropic" => {
+            crate::provider::clear_claude_provider_unavailability_for_account_label(Some(
+                &account_label,
+            ));
+        }
+        "openai" => {
+            crate::provider::clear_openai_provider_unavailability_for_account_label(Some(
+                &account_label,
+            ));
+            crate::provider::clear_all_model_unavailability_for_account();
+        }
+        _ => {}
+    }
+    crate::runtime_activity::spawn(async move {
+        let started = Instant::now();
+        crate::logging::event_info(
+            "SERVER_PROVIDER_CONTROL_ACCOUNT_SWITCH",
+            vec![
+                ("phase", "refresh_start".to_string()),
+                ("provider", provider_kind.to_string()),
+                ("request_id", id.to_string()),
+            ],
+        );
+        if let Ok(mut agent_guard) = agent.try_lock() {
+            apply_account_switch(
+                id,
+                provider_kind,
+                &account_label,
+                &mut agent_guard,
+                &client_event_tx,
+            );
+        } else {
+            let queued_at = log_provider_control_deferred("account_switch_refresh", id);
+            let mut agent_guard = agent.lock().await;
+            log_provider_control_lock_acquired("account_switch_refresh", id, queued_at);
+            apply_account_switch(
+                id,
+                provider_kind,
+                &account_label,
+                &mut agent_guard,
+                &client_event_tx,
+            );
+            log_provider_control_completed("account_switch_refresh", id, queued_at);
+        }
+
+        match provider_kind {
+            "anthropic" => {
+                tokio::spawn(async {
+                    let _ = crate::usage::get().await;
+                });
+            }
+            "openai" => {
+                tokio::spawn(async {
+                    let _ = crate::usage::get_openai_usage().await;
+                });
+            }
+            _ => {}
+        }
+
+        crate::bus::Bus::global().publish_models_updated();
+        let event = available_models_updated_event(&agent).await;
+        // Account activation remains valid if its requesting client disconnected.
+        if let Err(error) = client_event_tx.send(event) {
+            crate::logging::debug(&format!(
+                "Account switch catalog notification was not delivered: {error}"
+            ));
+        }
+        if let Err(error) = client_event_tx.send(ServerEvent::Done { id }) {
+            crate::logging::debug(&format!(
+                "Account switch completion was not delivered: {error}"
+            ));
+        }
+        crate::logging::event_info(
+            "SERVER_PROVIDER_CONTROL_ACCOUNT_SWITCH",
+            vec![
+                ("phase", "refresh_done".to_string()),
+                ("provider", provider_kind.to_string()),
+                ("request_id", id.to_string()),
+                ("elapsed_ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
+    });
+}
+
+#[cfg(test)]
+#[path = "provider_control_busy_tests.rs"]
+mod tests;
+
+/// Binds this session to a saved OAuth login for the routing service, without
+/// touching the global login. Announces the new credential like a manual
+/// account switch, and stays silent when the account cannot be bound.
+pub(super) fn bind_oauth_account(
+    agent: &mut Agent,
+    provider_kind: &str,
+    account_label: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<()> {
+    match provider_kind {
+        "anthropic" => {
+            crate::provider::clear_claude_provider_unavailability_for_account_label(Some(
+                account_label,
+            ));
+        }
+        "openai" => {
+            crate::provider::clear_openai_provider_unavailability_for_account_label(Some(
+                account_label,
+            ));
+            crate::provider::clear_all_model_unavailability_for_account();
+        }
+        _ => {}
+    }
+    let current = agent.provider_model();
+    let selection = account_switch_selection(agent, provider_kind, account_label)?;
+    agent.set_route_selection(&selection)?;
+    agent.reset_provider_session();
+    let summary = (
+        agent.provider_model(),
+        agent.provider_name(),
+        agent.active_resolved_credential(),
+        agent.provider_reasoning_effort(),
+    );
+    send_model_changed_result(0, Ok(summary), current, agent, client_event_tx);
+    Ok(())
+}
+
+/// Binds this session to the provider's API-key route (`claude`, `openai` in
+/// the routing policy) for the routing service, without touching the global
+/// credential choice. The session keeps its model and moves like an account
+/// switch: same announcement, fresh provider session.
+pub(super) fn bind_api_key_route(
+    agent: &mut Agent,
+    provider_kind: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<()> {
+    use jcode_provider_core::{ActiveProvider, RuntimeKey};
+    let (target, runtime_key, method, provider_label) = match provider_kind {
+        "anthropic" => (
+            ActiveProvider::Claude,
+            RuntimeKey::AnthropicApiKey,
+            "claude-api",
+            "Claude",
+        ),
+        "openai" => (
+            ActiveProvider::OpenAI,
+            RuntimeKey::OpenAIApiKey,
+            "openai-api",
+            "OpenAI",
+        ),
+        _ => anyhow::bail!("{provider_kind} has no API-key route to move onto"),
+    };
+    let provider = agent.provider_handle();
+    anyhow::ensure!(
+        jcode_provider_core::parse_provider_hint(provider.name()) == Some(target),
+        "this session does not run on {provider_label}, cannot move onto its API-key route"
+    );
+    let current = agent.provider_model();
+    // A same-provider move must not silently select another model.
+    let selection = RouteSelection {
+        model: provider.model(),
+        runtime_key,
+        api_method: method.to_string(),
+        provider_label: provider_label.to_string(),
+        detail: String::new(),
+    };
+    agent.set_route_selection(&selection)?;
+    agent.reset_provider_session();
+    let summary = (
+        agent.provider_model(),
+        agent.provider_name(),
+        agent.active_resolved_credential(),
+        agent.provider_reasoning_effort(),
+    );
+    send_model_changed_result(0, Ok(summary), current, agent, client_event_tx);
+    Ok(())
+}

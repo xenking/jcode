@@ -5,7 +5,7 @@ use jcode_session_types::{ResponseStats, StoredMessage};
 
 fn is_user_prompt(message: &StoredMessage) -> bool {
     matches!(message.role, Role::User)
-        && message.display_role.is_none()
+        && !message.has_context_display_role()
         && !super::is_internal_system_reminder(message)
         && !super::is_auto_poke_user_message(message)
         && !super::super::is_scheduled_task_message(message)
@@ -68,17 +68,33 @@ fn attach_turn(
             total.checked_add(field(messages[i].token_usage.as_ref()?)?)
         })
     };
+    let calls: std::collections::HashSet<_> = assistants
+        .iter()
+        .flat_map(|&i| {
+            messages[i].content.iter().filter_map(|block| match block {
+                ContentBlock::ToolUse { id, .. } => Some(id),
+                _ => None,
+            })
+        })
+        .collect();
     let stats = ResponseStats {
         duration_secs: None,
+        prompt_tokens: assistants
+            .iter()
+            .rev()
+            .find_map(|&i| messages[i].token_usage.as_ref()?.prompt_tokens),
+        tool_calls: (!calls.is_empty()).then_some(calls.len() as u64),
         input_tokens: sum(|usage| Some(usage.input_tokens)),
         output_tokens: sum(|usage| Some(usage.output_tokens)),
         cache_read_tokens: sum(|usage| usage.cache_read_input_tokens),
         cache_creation_tokens: sum(|usage| usage.cache_creation_input_tokens),
     };
-    if stats.input_tokens.is_some()
+    if stats.prompt_tokens.is_some()
+        || stats.input_tokens.is_some()
         || stats.output_tokens.is_some()
         || stats.cache_read_tokens.is_some()
         || stats.cache_creation_tokens.is_some()
+        || stats.tool_calls.is_some()
     {
         row.response_stats = Some(stats);
     }
@@ -91,12 +107,16 @@ mod tests {
 
     fn text(role: Role, text: &str, usage: Option<StoredTokenUsage>) -> StoredMessage {
         StoredMessage {
+            codemode: None,
+            ask: None,
+            attachment_data: None,
             id: String::new(),
             role,
             content: vec![ContentBlock::Text {
                 text: text.into(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -110,10 +130,14 @@ mod tests {
             output_tokens: 2,
             cache_read_input_tokens: Some(3),
             cache_creation_input_tokens: Some(4),
+            request_elapsed_ms: None,
         })
     }
     fn row(index: usize) -> RenderedMessage {
         RenderedMessage {
+            codemode: None,
+            ask: None,
+            attachments: Vec::new(),
             role: "assistant".into(),
             content: "answer".into(),
             stored_index: Some(index),
@@ -121,6 +145,7 @@ mod tests {
             tool_data: None,
             response_stats: None,
             tool_duration_ms: None,
+            timestamp_ms: None,
         }
     }
     fn tool_call(message: &mut StoredMessage) {
@@ -129,7 +154,8 @@ mod tests {
             name: "read".into(),
             input: serde_json::json!({}),
             thought_signature: None,
-        }];
+        }]
+        .into();
     }
 
     #[test]
@@ -147,7 +173,8 @@ mod tests {
             tool_use_id: "tool".into(),
             content: "result".into(),
             is_error: None,
-        }];
+        }]
+        .into();
         messages[2].tool_duration_ms = Some(1234);
         let mut rows = vec![row(3), row(5)];
         attach(&messages, &mut rows);
@@ -157,6 +184,7 @@ mod tests {
         assert_eq!(first.cache_read_tokens, Some(6));
         assert_eq!(first.cache_creation_tokens, Some(8));
         assert_eq!(first.duration_secs, None);
+        assert_eq!(serde_json::to_value(first).unwrap()["tool_calls"], 1);
         assert_eq!(
             rows[1].response_stats.as_ref().unwrap().input_tokens,
             Some(40)
@@ -165,6 +193,28 @@ mod tests {
         let mut tail = vec![row(3)];
         attach(&messages, &mut tail);
         assert_eq!(tail[0].response_stats, rows[0].response_stats);
+    }
+
+    #[test]
+    fn jarvis_user_starts_a_separate_historical_turn() {
+        let mut messages = vec![
+            text(Role::User, "typed", None),
+            text(Role::Assistant, "first", usage(10)),
+            text(Role::User, "voice", None),
+            text(Role::Assistant, "second", usage(20)),
+        ];
+        messages[2].display_role = Some(jcode_session_types::StoredDisplayRole::JarvisUser);
+        assert!(super::super::stored_message_is_user_turn(&messages[2]));
+        let mut rows = vec![row(1), row(3)];
+        attach(&messages, &mut rows);
+        assert_eq!(
+            rows[0].response_stats.as_ref().unwrap().input_tokens,
+            Some(10)
+        );
+        assert_eq!(
+            rows[1].response_stats.as_ref().unwrap().input_tokens,
+            Some(20)
+        );
     }
 
     #[test]
@@ -224,6 +274,39 @@ mod tests {
         assert_eq!(wire["response_stats"]["input_tokens"], 30);
         assert!(wire["response_stats"].get("duration_secs").is_none());
     }
+    #[test]
+    fn response_stats_prompt_tokens_describe_the_final_call_not_round_sums() {
+        let mut first = usage(10);
+        first.as_mut().unwrap().prompt_tokens = Some(9_000);
+        let mut final_round = usage(20);
+        final_round.as_mut().unwrap().prompt_tokens = Some(12_500);
+        let messages = vec![
+            text(Role::User, "prompt", None),
+            text(Role::Assistant, "", first),
+            text(Role::Assistant, "answer", final_round),
+        ];
+        let mut rows = vec![row(2)];
+        attach(&messages, &mut rows);
+        let stats = rows[0].response_stats.as_ref().unwrap();
+        assert_eq!(stats.input_tokens, Some(30));
+        assert_eq!(
+            stats.prompt_tokens,
+            Some(12_500),
+            "restored context is the last call's prompt size, not the turn sum"
+        );
+    }
+
+    #[test]
+    fn response_stats_legacy_records_without_prompt_tokens_stay_unknown() {
+        let messages = vec![
+            text(Role::User, "prompt", None),
+            text(Role::Assistant, "answer", usage(20)),
+        ];
+        let mut rows = vec![row(1)];
+        attach(&messages, &mut rows);
+        assert_eq!(rows[0].response_stats.as_ref().unwrap().prompt_tokens, None);
+    }
+
     #[test]
     fn response_stats_internal_rows_do_not_split_and_overflow_is_unknown() {
         let mut internal = text(Role::User, "internal continuation", None);

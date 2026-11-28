@@ -101,7 +101,7 @@ fn quoted_and_code_known_slash_commands_remain_prompt_text() {
             .any(|message| { message.role == "user" && message.content == prompt })
     );
     assert!(matches!(
-        app.session.messages.last().and_then(|message| message.content.last()),
+        app.session.last_message().and_then(|message| message.content.last()),
         Some(crate::message::ContentBlock::Text { text, .. }) if text == prompt
     ));
     assert!(
@@ -149,7 +149,7 @@ fn parser_handles_unicode_and_fenced_code_boundaries() {
     );
     assert_eq!(
         super::slash_command_parser::find_known_commands("```\n/help\n``` /review", &commands),
-        vec![super::slash_command_parser::SlashCommandMatch {
+        vec![super::slash_command_parser::Match {
             start: "```\n/help\n``` ".len(),
             name_end: "```\n/help\n``` /review".len(),
         }]

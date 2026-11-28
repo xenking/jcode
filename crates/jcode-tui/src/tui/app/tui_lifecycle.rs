@@ -4,8 +4,15 @@ mod keybindings;
 mod reload_input;
 
 use super::state_ui::RestoredReloadInput;
+#[path = "tui_lifecycle_remote_startup.rs"]
+mod remote_startup;
+
 use super::*;
 use crate::tui::{backend, keybind};
+
+#[cfg(test)]
+#[path = "tui_lifecycle_terminal_retry_tests.rs"]
+mod terminal_retry_tests;
 
 impl App {
     pub(super) async fn begin_remote_send(
@@ -45,10 +52,20 @@ impl App {
         force: bool,
     ) -> bool {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            self.log_recovery_event(
+                crate::logging::LogLevel::Warn,
+                "RECOVERY_NETWORK_WAIT_SKIPPED",
+                "no_pending_turn",
+            );
             return false;
         };
         if force {
             if pending.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Warn,
+                    "RECOVERY_NETWORK_WAIT_STOPPED",
+                    "retry_budget_exhausted",
+                );
                 return false;
             }
             pending.retry_attempts = pending.retry_attempts.saturating_add(1);
@@ -57,6 +74,11 @@ impl App {
             if force {
                 pending.auto_retry = true;
             } else {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Info,
+                    "RECOVERY_NETWORK_WAIT_SKIPPED",
+                    "auto_retry_disabled",
+                );
                 return false;
             }
         }
@@ -70,6 +92,15 @@ impl App {
             listener: plan.listener_summary.clone(),
         };
         self.status_detail = Some("offline; waiting for network before retry".to_string());
+        self.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_NETWORK_WAIT_ARMED",
+            if force {
+                "provider_network_failure"
+            } else {
+                "offline_probe"
+            },
+        );
 
         let content = format!(
             "📡 Network appears offline - waiting to retry automatically. {} - {}",
@@ -94,89 +125,11 @@ impl App {
                 duration_secs: None,
                 title: Some("Connection".to_string()),
                 tool_data: None,
+                codemode: None,
+                ask: None,
             });
         }
         true
-    }
-
-    pub(super) fn schedule_pending_remote_retry_with_limit(
-        &mut self,
-        reason: &str,
-        max_attempts: u8,
-    ) -> bool {
-        let Some(pending) = self.rate_limit_pending_message.as_mut() else {
-            return false;
-        };
-        if !pending.auto_retry {
-            return false;
-        }
-        let outcome = {
-            let current_attempts = pending.retry_attempts;
-            if current_attempts >= max_attempts {
-                Err(current_attempts)
-            } else {
-                pending.retry_attempts += 1;
-                let retry_attempts = pending.retry_attempts;
-                let backoff_secs = Self::AUTO_RETRY_BASE_DELAY_SECS * u64::from(retry_attempts);
-                let retry_at = Instant::now() + Duration::from_secs(backoff_secs);
-                pending.retry_at = Some(retry_at);
-                Ok((retry_attempts, backoff_secs, retry_at))
-            }
-        };
-
-        match outcome {
-            Err(current_attempts) => {
-                self.rate_limit_pending_message = None;
-                self.rate_limit_reset = None;
-                self.push_display_message(DisplayMessage::error(format!(
-                    "{} Auto-retry limit reached after {} attempt{}. Use `/poke` again to retry manually.",
-                    reason,
-                    current_attempts,
-                    if current_attempts == 1 { "" } else { "s" }
-                )));
-                false
-            }
-            Ok((retry_attempts, backoff_secs, retry_at)) => {
-                self.rate_limit_reset = Some(retry_at);
-                let content = format!(
-                    "⚡ Connection lost - retrying (attempt {}/{}, in {}s) - {}",
-                    retry_attempts,
-                    max_attempts,
-                    backoff_secs,
-                    reason
-                        .trim()
-                        .trim_start_matches("⚡ ")
-                        .trim_start_matches("Connection lost")
-                        .trim_start_matches('(')
-                        .trim_end_matches('.')
-                        .trim()
-                );
-                if let Some(idx) = self.display_messages.iter().rposition(|message| {
-                    message.role == "system"
-                        && (message.title.as_deref() == Some("Connection")
-                            || message
-                                .content
-                                .starts_with("⚡ Server reload in progress - waiting for handoff")
-                            || message.content.starts_with("⚡ Connection lost"))
-                }) {
-                    self.replace_display_message_title_and_content(
-                        idx,
-                        Some("Connection".to_string()),
-                        content,
-                    );
-                } else {
-                    self.push_display_message(DisplayMessage {
-                        role: "system".to_string(),
-                        content,
-                        tool_calls: Vec::new(),
-                        duration_secs: None,
-                        title: Some("Connection".to_string()),
-                        tool_data: None,
-                    });
-                }
-                true
-            }
-        }
     }
 
     pub(super) fn clear_pending_remote_retry(&mut self) {
@@ -190,10 +143,16 @@ impl App {
     /// the same loop again at turn end), puts the user's prompt back in the
     /// input box, and explains why the turn paused.
     pub(super) fn pause_exhausted_auto_resume(&mut self, message: String, notice: &str) {
+        self.record_rex_turn_outcome(Some(crate::tui::rex::TurnOutcome::Error));
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_AUTO_RESUME_STOPPED",
+            "retry_budget_exhausted",
+        );
+        self.restore_terminal_remote_retry_input();
         self.clear_pending_remote_retry();
         super::commands::disable_auto_poke(self);
         self.overnight_auto_poke = None;
-        self.restore_failed_input_to_box();
         self.push_display_message(DisplayMessage::system(format!("🛑 {message}")));
         self.set_status_notice(notice);
     }
@@ -229,7 +188,13 @@ impl App {
     /// auto-poke/queued-retry loops logged thousands of 401s in a single
     /// session (one failed turn per resend) until the user noticed.
     pub(super) fn trip_credential_failure_breaker(&mut self, message: &str) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_CREDENTIAL_BREAKER_STOPPED",
+            "repeated_auth_failure",
+        );
         let failures = self.consecutive_credential_failures;
+        self.restore_terminal_remote_retry_input();
         self.clear_pending_remote_retry();
         let cleared_pokes = if self.auto_poke_incomplete_todos {
             super::commands::disable_auto_poke(self)
@@ -256,7 +221,6 @@ impl App {
             }
         )));
         self.set_status_notice("Stopped: repeated auth failures");
-        self.restore_failed_input_to_box();
         self.consecutive_credential_failures = 0;
     }
 
@@ -272,19 +236,25 @@ impl App {
         let mcp_manager = Arc::new(RwLock::new(McpManager::with_config(
             crate::mcp::McpConfig::default(),
         )));
-        if session.model.is_none() {
-            session.model = Some(provider.model());
+        if session.model().is_none() {
+            session.apply_route(crate::session::Route {
+                model: Some(provider.model()),
+                ..session.route()
+            });
         }
-        if session.provider_key.is_none() {
-            session.provider_key = crate::session::derive_session_provider_key(provider.name());
+        if session.provider_key().is_none() {
+            session.apply_route(crate::session::Route {
+                provider_key: crate::session::derive_session_provider_key(provider.name()),
+                ..session.route()
+            });
         }
         let display = config().display.clone();
         let features = config().features.clone();
         let autoreview_enabled = session
-            .autoreview_enabled
+            .autoreview_enabled()
             .unwrap_or(config().autoreview.enabled);
         let autojudge_enabled = session
-            .autojudge_enabled
+            .autojudge_enabled()
             .unwrap_or(config().autojudge.enabled);
         let context_limit = provider.context_window() as u64;
         let mut runtime_memory_log = if crate::runtime_memory_log::client_logging_enabled() {
@@ -297,11 +267,11 @@ impl App {
         if let Some(controller) = runtime_memory_log.as_mut() {
             controller.defer_event(
                 crate::runtime_memory_log::RuntimeMemoryLogEvent::new("startup", "client_started")
-                    .with_session_id(session.id.clone())
+                    .with_session_id(session.id().to_owned())
                     .force_attribution(),
             );
         }
-        let improve_mode = session.improve_mode.map(|mode| match mode {
+        let improve_mode = session.improve_mode().map(|mode| match mode {
             crate::session::SessionImproveMode::ImproveRun => ImproveMode::ImproveRun,
             crate::session::SessionImproveMode::ImprovePlan => ImproveMode::ImprovePlan,
             crate::session::SessionImproveMode::RefactorRun => ImproveMode::RefactorRun,
@@ -312,7 +282,7 @@ impl App {
         crate::telemetry::begin_session_with_parent(
             provider.name(),
             &provider.model(),
-            session.parent_id.clone(),
+            session.parent_id().map(str::to_owned),
             false,
         );
 
@@ -322,6 +292,7 @@ impl App {
             skills,
             mcp_manager,
             messages: Vec::new(),
+            active_skill: session.pinned_skill().map(str::to_owned),
             session,
             agent_models_global_scope: false,
             pending_agent_model_request_id: None,
@@ -341,14 +312,15 @@ impl App {
             command_suggestions_cache: RefCell::new(None),
             command_suggestions_epoch: std::cell::Cell::new(0),
             cursor_pos: 0,
+            preferred_input_column: None,
             scroll_offset: 0,
             auto_scroll_paused: false,
-            active_skill: None,
             is_processing: false,
             streaming: StreamingProgress::default(),
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             upstream_provider: None,
@@ -358,6 +330,8 @@ impl App {
             kv_cache: KvCacheState::default(),
             cost: CostState::default(),
             context_limit,
+            remote_context_meter_request: None,
+            remote_compaction_threshold: None,
             context_warning_shown: false,
             context_info: crate::prompt::ContextInfo::default(),
             context_revision: 0,
@@ -394,6 +368,8 @@ impl App {
             final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,
             auto_poke_attempts: 0,
+            auto_poke_outcome_pending: false,
+            turn_tool_call_seen: false,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,
@@ -410,6 +386,7 @@ impl App {
             rewind_undo_snapshot: None,
             cancel_requested: false,
             quit_pending: None,
+            processing_interrupt_presses: 0,
             last_resize_redraw: None,
             resize_redraw_pending: false,
             mcp_server_names: Vec::new(),
@@ -436,11 +413,11 @@ impl App {
             pending_cloud_handoff: None,
             cloud_interrupt_sent_for: None,
             cloud_remote_interrupt_pending: false,
-            cloud_recovery_context: None,
-            cloud_recovery_auto_pending: false,
-            cloud_recovery_auto_attempted: Default::default(),
+            cloud_recovery: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            detached_images: Default::default(),
+            prompt_history_backfill: (None, 0),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
@@ -474,7 +451,6 @@ impl App {
             remote_resolved_credential: None,
             remote_provider_oauth_email: None,
             remote_provider_oauth_account_label: None,
-            oauth_notice_displayed_at: None,
             remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
@@ -483,6 +459,7 @@ impl App {
             startup_display_snapshot: None,
             advertised_history_base: None,
             model_catalog_after_history: false,
+            pending_initial_model_spec: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
             remote_available_service_tiers: None,
@@ -497,6 +474,7 @@ impl App {
             remote_skills: Vec::new(),
             remote_total_tokens: None,
             remote_token_usage_totals: None,
+            remote_context_tokens: None,
             remote_is_canary: None,
             remote_server_version: None,
             remote_server_has_update: None,
@@ -523,12 +501,15 @@ impl App {
             tool_output_scan_index: 0,
             remote_session_id: None,
             cloud_environment: Default::default(),
+            jarvis_speech: None,
+            jarvis_listener: Default::default(),
             remote_sessions: Vec::new(),
             remote_side_pane_images: Vec::new(),
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
             remote_swarm_members_received_at: None,
-            swarm_last_message_at: std::collections::HashMap::new(),
+            swarm_notifications: Default::default(),
+            file_activity_stack: None,
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,
@@ -550,21 +531,7 @@ impl App {
             swarm_panel_full_page: false,
             diff_mode: display.diff_mode,
             centered: display.centered,
-            diagram_mode: display.diagram_mode,
-            diagram_focus: false,
-            diagram_index: 0,
-            diagram_scroll_x: 0,
-            diagram_scroll_y: 0,
-            diagram_pane_ratio: 40,
-            diagram_pane_ratio_from: 40,
-            diagram_pane_ratio_target: 40,
-            diagram_pane_ratio_user_adjusted: false,
-            diagram_pane_anim_start: None,
-            diagram_pane_enabled: true,
-            diagram_pane_position: crate::config::DiagramPanePosition::default(),
-            diagram_zoom: 100,
-            last_visible_diagram_hash: None,
-            diagram_pane_dragging: false,
+            diagram: diagram_pane::DiagramPane::new(display.diagram_mode),
             diff_pane_scroll: 0,
             diff_pane_scroll_x: 0,
             side_panel_image_zoom_percent: 100,
@@ -585,6 +552,7 @@ impl App {
             todos_view_updated_at_ms: 0,
             todos_view_rendered_hash: 0,
             remote_todos_payload: None,
+            remote_todos_cache: Default::default(),
             remote_todos_requested_at: None,
             remote_todos_pushed: false,
             todo_card_rendered_hash: 0,
@@ -611,8 +579,16 @@ impl App {
             chat_native_scrollbar: display.native_scrollbars.chat,
             side_panel_native_scrollbar: display.native_scrollbars.side_panel,
             inline_view_state: None,
+            inline_view_is_btw: false,
+            btw: None,
+            btw_ui: Default::default(),
+            pending_btw_turn: false,
             ask_picker: None,
+            routing_gate: None,
+            routing_chip: None,
+            routing_owns_failover: false,
             inline_interactive_state: None,
+            model_picker_effort_parent: None,
             model_picker_cache: None,
             model_picker_catalog_revision: 0,
             recent_authenticated_provider: None,
@@ -625,7 +601,9 @@ impl App {
             pending_automatic_failover_request_id: None,
             pending_automatic_failover_started: None,
             pending_reasoning_effort: None,
+            suppress_next_reasoning_effort_message: false,
             remote_model_switch_in_flight: false,
+            queued_model_switch: None,
             pending_prompt_after_model_switch: None,
             pending_prompt_before_history: None,
             pending_startup_prompt_echo: None,
@@ -673,6 +651,12 @@ impl App {
             interleave_message: None,
             interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
+            server_queued_prompts: Vec::new(),
+            queued_prompt_edit: None,
+            selected_queued_prompt: None,
+            pending_queue_requests: Vec::new(),
+            uncertain_queue_prompts: Vec::new(),
+            queue_snapshot_request_id: None,
             pending_soft_interrupt_requests: Vec::new(),
             sent_soft_interrupts: Vec::new(),
             soft_interrupt_recovery: None,
@@ -701,6 +685,7 @@ impl App {
             idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
+                .filter(|p| !crate::build::is_dynamic_loader_path(p))
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
@@ -727,6 +712,7 @@ impl App {
             help_scroll: None,
             model_status_scroll: None,
             model_status_content: String::new(),
+            model_status_title: "",
             commit_log_overlay: None,
             session_picker_overlay: None,
             session_picker_mode: SessionPickerMode::Resume,
@@ -761,16 +747,22 @@ impl App {
         let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
         let mut session = Session::create(None, None);
         session.mark_active();
-        session.model = Some(provider.model());
-        session.provider_key = crate::session::derive_session_provider_key(provider.name());
+        session.apply_route(crate::session::Route {
+            model: Some(provider.model()),
+            ..session.route()
+        });
+        session.apply_route(crate::session::Route {
+            provider_key: crate::session::derive_session_provider_key(provider.name()),
+            ..session.route()
+        });
         session.ensure_initial_session_context_message();
         let display = config().display.clone();
         let features = config().features.clone();
         let autoreview_enabled = session
-            .autoreview_enabled
+            .autoreview_enabled()
             .unwrap_or(config().autoreview.enabled);
         let autojudge_enabled = session
-            .autojudge_enabled
+            .autojudge_enabled()
             .unwrap_or(config().autojudge.enabled);
         let context_limit = provider.context_window() as u64;
         let mut runtime_memory_log = if crate::runtime_memory_log::client_logging_enabled() {
@@ -783,11 +775,11 @@ impl App {
         if let Some(controller) = runtime_memory_log.as_mut() {
             controller.defer_event(
                 crate::runtime_memory_log::RuntimeMemoryLogEvent::new("startup", "client_started")
-                    .with_session_id(session.id.clone())
+                    .with_session_id(session.id().to_owned())
                     .force_attribution(),
             );
         }
-        let improve_mode = session.improve_mode.map(|mode| match mode {
+        let improve_mode = session.improve_mode().map(|mode| match mode {
             crate::session::SessionImproveMode::ImproveRun => ImproveMode::ImproveRun,
             crate::session::SessionImproveMode::ImprovePlan => ImproveMode::ImprovePlan,
             crate::session::SessionImproveMode::RefactorRun => ImproveMode::RefactorRun,
@@ -804,8 +796,8 @@ impl App {
 
         // Pre-compute context info so it shows on startup
         let available_skills: Vec<crate::prompt::SkillInfo> = skills
-            .list()
-            .iter()
+            .list_for_model()
+            .into_iter()
             .map(|s| crate::prompt::SkillInfo {
                 name: s.name.clone(),
                 description: s.description.clone(),
@@ -814,7 +806,7 @@ impl App {
         let (_, context_info) = crate::prompt::build_system_prompt_with_context(
             None,
             &available_skills,
-            session.is_canary,
+            session.is_canary(),
         );
         let t_prompt = t0.elapsed();
         crate::logging::info(&format!(
@@ -828,7 +820,7 @@ impl App {
         crate::telemetry::begin_session_with_parent(
             provider.name(),
             &provider.model(),
-            session.parent_id.clone(),
+            session.parent_id().map(str::to_owned),
             false,
         );
 
@@ -838,6 +830,7 @@ impl App {
             skills,
             mcp_manager,
             messages: Vec::new(),
+            active_skill: session.pinned_skill().map(str::to_owned),
             session,
             agent_models_global_scope: false,
             pending_agent_model_request_id: None,
@@ -857,14 +850,15 @@ impl App {
             command_suggestions_cache: RefCell::new(None),
             command_suggestions_epoch: std::cell::Cell::new(0),
             cursor_pos: 0,
+            preferred_input_column: None,
             scroll_offset: 0,
             auto_scroll_paused: false,
-            active_skill: None,
             is_processing: false,
             streaming: StreamingProgress::default(),
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             upstream_provider: None,
@@ -874,6 +868,8 @@ impl App {
             kv_cache: KvCacheState::default(),
             cost: CostState::default(),
             context_limit,
+            remote_context_meter_request: None,
+            remote_compaction_threshold: None,
             context_warning_shown: false,
             context_info,
             context_revision: 0,
@@ -910,6 +906,8 @@ impl App {
             final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,
             auto_poke_attempts: 0,
+            auto_poke_outcome_pending: false,
+            turn_tool_call_seen: false,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,
@@ -926,6 +924,7 @@ impl App {
             rewind_undo_snapshot: None,
             cancel_requested: false,
             quit_pending: None,
+            processing_interrupt_presses: 0,
             last_resize_redraw: None,
             resize_redraw_pending: false,
             mcp_server_names: Vec::new(), // Vec<(name, tool_count)>
@@ -952,11 +951,11 @@ impl App {
             pending_cloud_handoff: None,
             cloud_interrupt_sent_for: None,
             cloud_remote_interrupt_pending: false,
-            cloud_recovery_context: None,
-            cloud_recovery_auto_pending: false,
-            cloud_recovery_auto_attempted: Default::default(),
+            cloud_recovery: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            detached_images: Default::default(),
+            prompt_history_backfill: (None, 0),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
@@ -990,7 +989,6 @@ impl App {
             remote_resolved_credential: None,
             remote_provider_oauth_email: None,
             remote_provider_oauth_account_label: None,
-            oauth_notice_displayed_at: None,
             remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
@@ -999,6 +997,7 @@ impl App {
             startup_display_snapshot: None,
             advertised_history_base: None,
             model_catalog_after_history: false,
+            pending_initial_model_spec: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
             remote_available_service_tiers: None,
@@ -1013,6 +1012,7 @@ impl App {
             remote_skills: Vec::new(),
             remote_total_tokens: None,
             remote_token_usage_totals: None,
+            remote_context_tokens: None,
             remote_is_canary: None,
             remote_server_version: None,
             remote_server_has_update: None,
@@ -1039,12 +1039,15 @@ impl App {
             tool_output_scan_index: 0,
             remote_session_id: None,
             cloud_environment: Default::default(),
+            jarvis_speech: None,
+            jarvis_listener: Default::default(),
             remote_sessions: Vec::new(),
             remote_side_pane_images: Vec::new(),
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
             remote_swarm_members_received_at: None,
-            swarm_last_message_at: std::collections::HashMap::new(),
+            swarm_notifications: Default::default(),
+            file_activity_stack: None,
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,
@@ -1066,21 +1069,7 @@ impl App {
             swarm_panel_full_page: false,
             diff_mode: display.diff_mode,
             centered: display.centered,
-            diagram_mode: display.diagram_mode,
-            diagram_focus: false,
-            diagram_index: 0,
-            diagram_scroll_x: 0,
-            diagram_scroll_y: 0,
-            diagram_pane_ratio: 40,
-            diagram_pane_ratio_from: 40,
-            diagram_pane_ratio_target: 40,
-            diagram_pane_ratio_user_adjusted: false,
-            diagram_pane_anim_start: None,
-            diagram_pane_enabled: true,
-            diagram_pane_position: crate::config::DiagramPanePosition::default(),
-            diagram_zoom: 100,
-            last_visible_diagram_hash: None,
-            diagram_pane_dragging: false,
+            diagram: diagram_pane::DiagramPane::new(display.diagram_mode),
             diff_pane_scroll: 0,
             diff_pane_scroll_x: 0,
             side_panel_image_zoom_percent: 100,
@@ -1101,6 +1090,7 @@ impl App {
             todos_view_updated_at_ms: 0,
             todos_view_rendered_hash: 0,
             remote_todos_payload: None,
+            remote_todos_cache: Default::default(),
             remote_todos_requested_at: None,
             remote_todos_pushed: false,
             todo_card_rendered_hash: 0,
@@ -1127,8 +1117,16 @@ impl App {
             chat_native_scrollbar: display.native_scrollbars.chat,
             side_panel_native_scrollbar: display.native_scrollbars.side_panel,
             inline_view_state: None,
+            inline_view_is_btw: false,
+            btw: None,
+            btw_ui: Default::default(),
+            pending_btw_turn: false,
             ask_picker: None,
+            routing_gate: None,
+            routing_chip: None,
+            routing_owns_failover: false,
             inline_interactive_state: None,
+            model_picker_effort_parent: None,
             model_picker_cache: None,
             model_picker_catalog_revision: 0,
             recent_authenticated_provider: None,
@@ -1141,7 +1139,9 @@ impl App {
             pending_automatic_failover_request_id: None,
             pending_automatic_failover_started: None,
             pending_reasoning_effort: None,
+            suppress_next_reasoning_effort_message: false,
             remote_model_switch_in_flight: false,
+            queued_model_switch: None,
             pending_prompt_after_model_switch: None,
             pending_prompt_before_history: None,
             pending_startup_prompt_echo: None,
@@ -1189,6 +1189,12 @@ impl App {
             interleave_message: None,
             interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
+            server_queued_prompts: Vec::new(),
+            queued_prompt_edit: None,
+            selected_queued_prompt: None,
+            pending_queue_requests: Vec::new(),
+            uncertain_queue_prompts: Vec::new(),
+            queue_snapshot_request_id: None,
             pending_soft_interrupt_requests: Vec::new(),
             sent_soft_interrupts: Vec::new(),
             soft_interrupt_recovery: None,
@@ -1217,6 +1223,7 @@ impl App {
             idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
+                .filter(|p| !crate::build::is_dynamic_loader_path(p))
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
@@ -1243,6 +1250,7 @@ impl App {
             help_scroll: None,
             model_status_scroll: None,
             model_status_content: String::new(),
+            model_status_title: "",
             commit_log_overlay: None,
             session_picker_overlay: None,
             session_picker_mode: SessionPickerMode::Resume,
@@ -1286,7 +1294,7 @@ impl App {
     /// Configure ambient mode: override system prompt and queue an initial message.
     pub fn set_ambient_mode(&mut self, system_prompt: String, initial_message: String) {
         self.ambient_system_prompt = Some(system_prompt);
-        crate::tool::ambient::register_ambient_session(self.session.id.clone());
+        crate::tool::ambient::register_ambient_session(self.session.id().to_owned());
         self.queued_messages.push(initial_message);
         self.is_processing = true;
         self.status = ProcessingStatus::Sending;
@@ -1451,10 +1459,8 @@ impl App {
         self.remote_session_id = Some(session_id.to_string());
         session.strip_transcript_for_remote_client();
         // Strip clears transcript vectors but keeps capacity; free buffers.
-        session.messages.shrink_to_fit();
-        session.env_snapshots.shrink_to_fit();
-        session.memory_injections.shrink_to_fit();
-        session.replay_events.shrink_to_fit();
+        session.shrink_transcript_buffers();
+        self.active_skill = session.pinned_skill().map(str::to_owned);
         self.session = session;
         // The full deserialized transcript (raw file + Session structs) was a
         // large transient; return the freed arena pages to the OS now instead
@@ -1462,13 +1468,13 @@ impl App {
         crate::process_memory::release_retained_heap("remote_startup_history_stripped");
         self.autoreview_enabled = self
             .session
-            .autoreview_enabled
+            .autoreview_enabled()
             .unwrap_or(crate::config::config().autoreview.enabled);
         self.autojudge_enabled = self
             .session
-            .autojudge_enabled
+            .autojudge_enabled()
             .unwrap_or(crate::config::config().autojudge.enabled);
-        if let Some(model) = self.session.model.clone() {
+        if let Some(model) = self.session.model().map(str::to_owned) {
             self.update_context_limit_for_model(&model, None);
         }
         self.follow_chat_bottom();
@@ -1492,181 +1498,15 @@ impl App {
         Self::new_for_remote_with_options(resume_session, false)
     }
 
-    pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
-        let new_start = Instant::now();
-        let mut lap = Instant::now();
-        let mut laps: Vec<(&'static str, u128)> = Vec::new();
-        let mut mark = |name: &'static str, laps: &mut Vec<(&'static str, u128)>| {
-            laps.push((name, lap.elapsed().as_millis()));
-            lap = Instant::now();
-        };
-        // Kick the background git probe first so its ~20ms of subprocess work
-        // overlaps with the rest of client setup. `run_remote` gives it a short
-        // bounded wait before the first paint.
-        let _ = super::helpers::gather_git_info();
-        mark("git_kick", &mut laps);
-        let provider: Arc<dyn Provider> =
-            Arc::new(InertRuntimeProvider::new(AppRuntimeMode::RemoteClient));
-        let registry = Registry::empty();
-        let session = resume_session
-            .as_ref()
-            .filter(|_| !crate::tui::is_ssh_remote())
-            .and_then(|session_id| Session::load_startup_stub(session_id).ok())
-            .unwrap_or_else(|| Session::create(None, None));
-        mark("stub", &mut laps);
-        let mut app = Self::new_minimal_with_session(provider, registry, session);
-        mark("minimal", &mut laps);
-        app.is_remote = true;
-        app.runtime_mode = AppRuntimeMode::RemoteClient;
-        app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);
-        app.remote_startup_phase_started = Some(Instant::now());
-
-        let handoff_preview_session = std::env::var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION").ok();
-        crate::env::remove_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION");
-        if let Some(host) = crate::tui::ssh_remote_host() {
-            // An explicit /cloud handoff has a known local source transcript.
-            // Render it before the first paint, while still waiting for authoritative
-            // server History. Never infer this from a remote session ID alone.
-            if let Some(session_id) = resume_session.as_deref()
-                && handoff_preview_session.as_deref() == Some(session_id)
-            {
-                app.restore_remote_startup_history(session_id);
-                app.remote_provider_model = app.session.model.clone();
-            }
-            // The server supplies history, credentials, models and project state.
-            // Local reload files can belong to an unrelated session with the same id.
-            app.onboarding_startup_checked = true;
-            app.auto_server_reload = false;
-            app.session.working_dir = None;
-            app.resume_session_id = resume_session;
-            app.set_status_notice(format!("SSH: {host} (remote server)"));
-            // `/cloud` hands a mid-task session over and asks the new runtime
-            // to keep going without the user retyping anything. One-shot.
-            if let Ok(message) = std::env::var("JCODE_CLOUD_CONTINUE_MESSAGE") {
-                crate::env::remove_var("JCODE_CLOUD_CONTINUE_MESSAGE");
-                if !message.trim().is_empty() {
-                    app.hidden_queued_system_messages.push(message);
-                    app.set_status_notice(format!("Continuing on {host}"));
-                }
-            }
-            return app;
-        }
-
-        // Minimal local clients start with empty skill registries. Load global
-        // metadata once so autocomplete works before the first History event.
-        // SSH clients above must use only the remote server's skill metadata.
-        app.refresh_skills_snapshot();
-        mark("skills", &mut laps);
-
-        let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        // One-shot handoff flag. A later ordinary resume in the same process
-        // must retain the existing eager local-history behavior.
-        crate::env::remove_var("JCODE_RELOAD_FAST_START");
-
-        // Load session to get canary status (for "client self-dev" badge)
-        if let Some(ref session_id) = resume_session {
-            if reload_fast_start {
-                crate::logging::info(&format!(
-                    "Remote reload fast start: rendering persisted transcript for {} in background",
-                    session_id
-                ));
-                // The server can take seconds to answer History while dozens
-                // of clients reconnect after a reload. Parse and render the
-                // local copy off the UI thread and show it as soon as it is
-                // ready; server History still replaces it when it arrives.
-                let (tx, rx) = std::sync::mpsc::channel();
-                let (base_tx, base_rx) = std::sync::mpsc::channel();
-                let id = session_id.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("jcode-startup-transcript".to_string())
-                    .spawn(move || {
-                        let start = Instant::now();
-                        let Ok(session) = Session::load_for_remote_startup(&id) else {
-                            return;
-                        };
-                        let (rendered, images) =
-                            crate::session::render_messages_and_images(&session);
-                        drop(session);
-                        // Same shape as server History messages, so the
-                        // server can verify this prefix and send only the
-                        // tail (delta History).
-                        let mut fingerprinter = crate::protocol::HistoryFingerprinter::default();
-                        for message in &rendered {
-                            fingerprinter.push(crate::protocol::HistoryMessageRef {
-                                role: &message.role,
-                                content: &message.content,
-                                tool_calls: &message.tool_calls,
-                                tool_data: message.tool_data.as_ref(),
-                            });
-                        }
-                        if fingerprinter.count() > 0 {
-                            let mut base = fingerprinter.base();
-                            base.images_fingerprint =
-                                Some(crate::protocol::history_images_fingerprint(&images));
-                            let _ = base_tx.send((id.clone(), base));
-                        }
-                        drop(base_tx);
-                        let display =
-                            jcode_tui_messages::display_messages_from_rendered_messages(rendered);
-                        crate::logging::info(&format!(
-                            "[TIMING] startup_transcript_background: session={}, messages={}, total={}ms",
-                            id,
-                            display.len(),
-                            start.elapsed().as_millis()
-                        ));
-                        let _ = tx.send((id, display, images));
-                    });
-                if spawned.is_ok() {
-                    app.pending_startup_transcript = Some(rx);
-                    if !crate::tui::is_ssh_remote() {
-                        app.pending_history_base = Some(base_rx);
-                    }
-                }
-                mark("transcript_spawn", &mut laps);
-            } else {
-                app.restore_remote_startup_history(session_id);
-                mark("transcript_sync", &mut laps);
-            }
-            if fresh_spawn && !reload_fast_start {
-                crate::logging::info(&format!(
-                    "Remote startup fresh-spawn path: restored persisted transcript for {} while awaiting server history",
-                    session_id
-                ));
-            }
-            let restored_input = Self::restore_input_for_reload(session_id);
-            mark("input_read", &mut laps);
-            if let Some(restored) = restored_input {
-                app.apply_restored_reload_input(restored);
-            }
-            mark("input_apply", &mut laps);
-        }
-
-        app.resume_session_id = resume_session;
-        // Paint persisted todos with the first frame, not a throttled tick after
-        // the server has finished loading the resumed conversation.
-        app.refresh_pinned_todos_now();
-        // After `resume_session_id`: the hint needs to know whether this is a
-        // new session (configured effort applies) or a resumed one.
-        app.apply_remote_header_hint();
-        mark("header_hint", &mut laps);
-        crate::logging::info(&format!(
-            "[TIMING] app_new_for_remote: total={}ms, {}",
-            new_start.elapsed().as_millis(),
-            laps.iter()
-                .map(|(name, ms)| format!("{name}={ms}ms"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ));
-        app
-    }
-
     /// Mark that a server was just spawned - run_remote will retry initial connection
     /// instead of failing fatally, allowing the TUI to show while the server starts.
     pub fn set_server_spawning(&mut self) {
         self.server_spawning = true;
         self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
         self.remote_startup_phase_started = Some(Instant::now());
+    }
+
+    pub(in crate::tui::app) fn take_pending_initial_model_spec(&mut self) -> Option<String> {
+        self.pending_initial_model_spec.take()
     }
 }

@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-use super::PersistVectorMode;
 use crate::storage;
 
 pub(crate) fn session_path_in_dir(base: &std::path::Path, session_id: &str) -> PathBuf {
@@ -12,14 +11,6 @@ pub(super) use crate::process_memory::estimate_json_bytes;
 
 pub(super) fn file_len_or_zero(path: &Path) -> u64 {
     std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
-}
-
-pub(super) fn persist_vector_mode_label(mode: PersistVectorMode) -> &'static str {
-    match mode {
-        PersistVectorMode::Clean => "clean",
-        PersistVectorMode::Append => "append",
-        PersistVectorMode::Full => "full",
-    }
 }
 
 pub fn session_path(session_id: &str) -> Result<PathBuf> {

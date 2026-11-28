@@ -25,8 +25,10 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         };
         let req = Request::Message {
             id,
+            jarvis_voice: false,
             content: content.clone(),
             images: images.clone(),
+            attachments: vec![],
             system_reminder: system_reminder.clone(),
             active_skill: None,
             no_reply: rng.random_bool(0.5),
@@ -68,6 +70,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
+            supports_applets: None,
             supports_server_failover: false,
             supports_turn_identity: false,
             id,
@@ -88,6 +91,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             system_prompt: _,
             supports_pdf_panels: _,
             supports_user_response: _,
+            supports_applets: _,
             supports_server_failover: _,
             supports_turn_identity: _,
             id: decoded_id,

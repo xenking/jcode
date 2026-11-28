@@ -42,15 +42,38 @@ pub(super) fn receive(staging: tempfile::TempDir) -> Result<()> {
         }
     }
     daemon_command("check_import", &group.swarm)?;
-    let repo = manifest.repo.as_ref().context("group repository missing")?;
+    let original = manifest.repo.as_ref().context("group repository missing")?;
+    let mut _workspace_lock = None;
+    let mapped = if staging.path().join("portable-workspace-v1").is_file() {
+        let repo = portable_repo(original, &manifest.source_host, &storage::jcode_dir()?)?;
+        reserve_portable_repo(&repo)?;
+        _workspace_lock = Some(lock_portable_repo(&repo)?);
+        check_portable_repo_available(&repo)?;
+        durable_json(&staging.path().join("mapped-repo.json"), &repo)?;
+        Some(repo)
+    } else {
+        None
+    };
+    let repo = mapped.as_ref().unwrap_or(original);
     let restored = restore_repo(
         repo,
         &staging.path().join("repo.bundle"),
         &staging.path().join("ignored.tar"),
         &group.coordinator,
-    )?;
+    ).with_context(|| if mapped.is_some() { "restore managed cloud workspace" } else { "legacy sender requires the original absolute path; update the sending jcode for portable workspaces" })?;
     if restored != repo.snapshot {
         bail!("restored group repository snapshot mismatch");
+    }
+    if mapped.is_some() {
+        for member in &group.members {
+            let manifest = &member.manifest;
+            let repo = portable_repo(
+                manifest.repo.as_ref().context("group repository missing")?,
+                &manifest.source_host,
+                &storage::jcode_dir()?,
+            )?;
+            ensure_portable_cwd(&repo)?;
+        }
     }
     let kept = staging.keep();
     std::fs::rename(&kept, &directory)?;
@@ -77,6 +100,16 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
     let _locks = lock_sessions(&ids)?;
     validate(&group, &directory)?;
     let record = group_dir(coordinator)?.join("received.json");
+    let mapped: Option<RepoManifest> = if directory.join("mapped-repo.json").is_file() {
+        Some(read_json(&directory.join("mapped-repo.json"))?)
+    } else {
+        None
+    };
+    let mut _workspace_lock = None;
+    if let Some(repo) = &mapped {
+        _workspace_lock = Some(lock_portable_repo(repo)?);
+        validate_staged_workspace(repo, &ids)?;
+    }
     if record.exists() {
         let installed: Group = read_json(&record)?;
         if serde_json::to_vec(&installed)? != serde_json::to_vec(&group)? {
@@ -99,7 +132,7 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
                 bail!("group member OAuth identity mismatch");
             }
         }
-        if let Some(lease) = storage::read_session_lease(&sess.id) {
+        if let Some(lease) = storage::read_session_lease(sess.id()) {
             if lease.epoch > member.manifest.epoch {
                 bail!("destination member has a newer migration epoch");
             }
@@ -120,16 +153,43 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
         }
         for member in &group.members {
             let stage = directory.join("members").join(&member.manifest.session_id);
-            let sess: session::Session = read_json(&stage.join("session.json"))?;
+            let mut sess: session::Session = read_json(&stage.join("session.json"))?;
+            if let Some(repo) = &mapped {
+                let original = member
+                    .manifest
+                    .repo
+                    .as_ref()
+                    .context("missing member repository")?;
+                let member_mapped = portable_repo(
+                    original,
+                    &member.manifest.source_host,
+                    &storage::jcode_dir()?,
+                )?;
+                if member_mapped.root != repo.root {
+                    bail!("group workspace mapping mismatch");
+                }
+                save_workspace_mapping(sess.id(), member.manifest.epoch, original, &member_mapped)?;
+                sess.apply_workspace(crate::session::Workspace {
+                    working_dir: Some(member_mapped.working_dir),
+                    ..sess.workspace()
+                });
+                append_system_notice(
+                    &mut sess,
+                    &format!(
+                        "Cloud workspace is at {}. The original local repository is at {} and will be restored on return.",
+                        repo.root, original.root
+                    ),
+                );
+            }
             if member.todos_sha256.is_none() {
-                let path = todo_file(&sess.id)?;
+                let path = todo_file(sess.id())?;
                 if path.exists() {
                     std::fs::remove_file(path)?;
                 }
             }
             install_session(&sess, &stage)?;
             storage::write_json_secret(
-                &transferred_accounts_path(&sess.id)?,
+                &transferred_accounts_path(sess.id())?,
                 &member.manifest.auth_accounts,
             )?;
         }
@@ -138,6 +198,9 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
         }
         import_group(&group.swarm)?;
         mark_members(&group)?;
+        if let Some(repo) = &mapped {
+            durable_json(&group_dir(coordinator)?.join("mapped-repo.json"), repo)?;
+        }
         durable_json(&record, &group)?;
     }
     // This loop is intentionally restartable and never writes transcripts.
@@ -149,7 +212,11 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
             bail!("destination group member epoch changed; refusing stale activation");
         }
         if !lease.is_here() {
-            write_lease(&member_lease(member, None))?;
+            let mut lease = member_lease(member, None);
+            if let Some(repo) = &mapped {
+                lease.repo_root = Some(repo.root.clone());
+            }
+            write_lease(&lease)?;
         }
     }
     eprintln!(

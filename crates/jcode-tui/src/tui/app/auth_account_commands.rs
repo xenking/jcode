@@ -28,6 +28,10 @@ pub(crate) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
         .strip_prefix("/login ")
         .or_else(|| trimmed.strip_prefix("/auth "))
     {
+        if crate::provider_catalog::is_auto_api_key_login_alias(provider) {
+            app.start_auto_api_key_login();
+            return true;
+        }
         let providers = crate::provider_catalog::tui_login_providers();
         if let Some(provider) =
             crate::provider_catalog::resolve_login_selection(provider, &providers)
@@ -441,21 +445,14 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
             execute_account_add_local(app, &provider_id, label.as_deref())
         }
         AccountCommand::Switch { provider_id, label } => match provider_id.as_str() {
-            "claude" => app.switch_account(&label),
-            "openai" => app.switch_openai_account(&label),
-            _ => app.push_display_message(DisplayMessage::error(format!(
-                "Provider {} does not support account switching.",
-                provider_id
-            ))),
+            "claude" | "openai" => app.switch_saved_oauth_account(&provider_id, &label),
+            other => switch_api_key_account_local(app, other, &label),
         },
         AccountCommand::SwitchShorthand { label } => app.switch_account_by_label(&label),
         AccountCommand::Remove { provider_id, label } => match provider_id.as_str() {
             "claude" => app.remove_account(&label),
             "openai" => app.remove_openai_account(&label),
-            _ => app.push_display_message(DisplayMessage::error(format!(
-                "Provider {} does not support account removal.",
-                provider_id
-            ))),
+            other => remove_api_key_account_local(app, other, &label),
         },
         AccountCommand::SetDefaultProvider(provider) => {
             save_default_provider_setting(app, provider.as_deref())
@@ -506,19 +503,27 @@ pub(crate) async fn execute_account_command_remote(
             AccountCommand::SetOpenAiTransport(value) => {
                 save_openai_transport_setting_local(app, value.as_deref());
                 remote
-                    .set_transport(value.as_deref().unwrap_or("auto"))
+                    .apply_session_policy(crate::tui::backend::SessionPolicyChange::Transport(
+                        value.as_deref().unwrap_or("auto"),
+                    ))
                     .await?;
             }
             AccountCommand::SetOpenAiEffort(value) => {
                 save_openai_effort_setting_local(app, value.as_deref());
                 if let Some(value) = value.as_deref() {
-                    remote.set_reasoning_effort(value).await?;
+                    remote
+                        .apply_session_policy(
+                            crate::tui::backend::SessionPolicyChange::ReasoningEffort(value),
+                        )
+                        .await?;
                 }
             }
             AccountCommand::SetOpenAiFast(enabled) => {
                 save_openai_fast_setting_local(app, enabled);
                 remote
-                    .set_service_tier(if enabled { "priority" } else { "off" })
+                    .apply_session_policy(crate::tui::backend::SessionPolicyChange::ServiceTier(
+                        if enabled { "priority" } else { "off" },
+                    ))
                     .await?;
             }
             other => execute_account_command_local(app, other),
@@ -734,20 +739,64 @@ fn execute_account_add_local(app: &mut App, provider_id: &str, label: Option<&st
             };
             app.start_openai_login_for_account(&target)
         }
-        other => match resolve_account_provider_descriptor(other) {
-            Some(provider) => app.start_login_provider(provider),
-            None => app.push_display_message(DisplayMessage::error(format!(
-                "Unknown provider {}.",
-                other
-            ))),
-        },
+        other => {
+            let labelled = label.map(str::trim).filter(|label| !label.is_empty());
+            if let Some(label) = labelled
+                && crate::provider_catalog::api_key_provider_takes_labels(other)
+            {
+                // The key is pasted in a terminal so it never enters the chat
+                // transcript.
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Add the key from a terminal so it never enters this chat:\n\n`jcode login {other} --account {label}`\n\nThen switch with `/account {other} switch {label}`."
+                )));
+                return;
+            }
+            match resolve_account_provider_descriptor(other) {
+                Some(provider) => app.start_login_provider(provider),
+                None => app.push_display_message(DisplayMessage::error(format!(
+                    "Unknown provider {}.",
+                    other
+                ))),
+            }
+        }
     }
 }
 
-pub(crate) fn resolve_account_provider_descriptor(
-    input: &str,
-) -> Option<crate::provider_catalog::LoginProviderDescriptor> {
-    crate::provider_catalog::resolve_login_provider(input)
+/// `/account <provider> switch <label>` for API-key providers. `default`
+/// returns to the unlabelled key.
+fn switch_api_key_account_local(app: &mut App, provider_id: &str, label: &str) {
+    if !crate::provider_catalog::api_key_provider_takes_labels(provider_id) {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Provider {provider_id} does not support account switching."
+        )));
+        return;
+    }
+    let wanted = (!label.eq_ignore_ascii_case("default")).then_some(label);
+    match crate::provider_catalog::set_active_api_key_account(provider_id, wanted) {
+        Ok(account) => app.push_display_message(DisplayMessage::system(format!(
+            "Requests to {provider_id} now use {account}."
+        ))),
+        Err(error) => app.push_display_message(DisplayMessage::error(format!("{error:#}"))),
+    }
+}
+
+/// `/account <provider> remove <label>` for stored labelled API keys.
+fn remove_api_key_account_local(app: &mut App, provider_id: &str, label: &str) {
+    if !crate::provider_catalog::api_key_provider_takes_labels(provider_id) {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Provider {provider_id} does not support account removal."
+        )));
+        return;
+    }
+    match crate::provider_catalog::remove_labelled_api_key(provider_id, label) {
+        Ok(true) => app.push_display_message(DisplayMessage::system(format!(
+            "Removed {provider_id}:{label}."
+        ))),
+        Ok(false) => app.push_display_message(DisplayMessage::error(format!(
+            "No stored key {provider_id}:{label}. A key defined by `key_command` is removed from config.toml."
+        ))),
+        Err(error) => app.push_display_message(DisplayMessage::error(format!("{error:#}"))),
+    }
 }
 
 fn normalize_clearish_value(value: &str) -> Option<String> {
@@ -789,7 +838,7 @@ fn save_default_provider_setting(app: &mut App, provider: Option<&str>) {
             return;
         }
     };
-    match crate::config::Config::set_default_provider(provider.as_deref()) {
+    match crate::auth::account_pool::set_default_provider(provider.as_deref()) {
         Ok(()) => {
             let label = provider.as_deref().unwrap_or("auto");
             app.set_status_notice(format!("Default provider: {}", label));
@@ -1056,6 +1105,52 @@ fn save_openai_compat_setting(app: &mut App, setting: OpenAiCompatSetting, value
 mod diagnostics;
 use diagnostics::render_auth_doctor_markdown;
 use diagnostics::render_provider_settings_markdown;
+impl App {
+    pub(crate) fn handle_account_picker_command(
+        &mut self,
+        command: crate::tui::account_picker::AccountPickerCommand,
+    ) {
+        match command {
+            crate::tui::account_picker::AccountPickerCommand::OpenAccountCenter {
+                provider_filter,
+            } => self.open_account_center(provider_filter.as_deref()),
+            crate::tui::account_picker::AccountPickerCommand::OpenAddReplaceFlow {
+                provider_filter,
+            } => self.open_account_add_replace_flow(provider_filter.as_deref()),
+            crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) => {
+                self.input = input;
+                self.cursor_pos = self.input.len();
+                self.submit_input();
+            }
+            crate::tui::account_picker::AccountPickerCommand::PromptValue {
+                prompt,
+                command_prefix,
+                empty_value,
+                status_notice,
+            } => self.prompt_account_value(prompt, command_prefix, empty_value, status_notice),
+            crate::tui::account_picker::AccountPickerCommand::PromptNew { provider } => {
+                match provider {
+                    crate::tui::account_picker::AccountProviderKind::Anthropic => {
+                        self.input = "/account claude add".to_string();
+                        self.cursor_pos = self.input.len();
+                        self.submit_input();
+                    }
+                    crate::tui::account_picker::AccountProviderKind::OpenAi => {
+                        self.input = "/account openai add".to_string();
+                        self.cursor_pos = self.input.len();
+                        self.submit_input();
+                    }
+                }
+            }
+            other => {
+                if let Some(command) = account_command_from_picker(&other) {
+                    execute_account_command_local(self, command);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

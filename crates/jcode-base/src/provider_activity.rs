@@ -25,6 +25,7 @@
 
 #[path = "provider_activity_oauth.rs"]
 mod oauth_usage;
+pub(crate) use oauth_usage::flush_oauth_usage;
 pub use oauth_usage::{
     anthropic_oauth_usage_summary, openai_oauth_usage_summary, record_anthropic_oauth_usage,
     record_openai_oauth_usage,
@@ -174,6 +175,13 @@ pub fn record_use(source_key: &str) {
     });
 }
 
+/// Spend recorded for one exact API-key account.
+pub fn spend_snapshot_for_account(
+    account: &jcode_routing_policy::AccountId,
+) -> Option<ProviderSpend> {
+    spend_snapshot(&crate::provider_catalog::ledger_key_for_account(account))
+}
+
 /// Accumulate locally computed API-key spend (in USD) for a credential.
 pub fn record_spend(source_key: &str, usd: f64) {
     let source_key = source_key.trim();
@@ -252,6 +260,9 @@ pub fn display_name_for_source_key(source_key: &str) -> String {
             .map(|profile| profile.display_name.to_string())
             .unwrap_or_else(|| profile_id.to_string());
         return format!("{} (API key)", name);
+    }
+    if let Some(name) = crate::provider_catalog::labelled_account_display_name(source_key) {
+        return name;
     }
     if let Some(label) = source_key.strip_prefix("claude:oauth:") {
         return format!("Anthropic (Claude) [{}]", label);

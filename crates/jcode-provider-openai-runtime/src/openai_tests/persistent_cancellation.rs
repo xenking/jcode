@@ -44,7 +44,9 @@ async fn persistent_cancellation_completed_unseen_tool_forces_full_replay() {
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
-        last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
+        last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
+            last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
         last_response_output: vec![
             serde_json::json!({"type":"function_call","call_id":"unseen","name":"bash","arguments":"{}"}),
         ],
@@ -58,8 +60,8 @@ async fn persistent_cancellation_completed_unseen_tool_forces_full_replay() {
         &Arc::new(RwLock::new(prewarm_test_credentials())),
         &request,
         &input,
-        input.len(),
         &tx,
+        None,
     )
     .await;
     assert!(matches!(result, PersistentWsResult::Success));
@@ -127,7 +129,9 @@ async fn persistent_cancellation_keepalive_abort_invalidates_before_handoff() {
         message_count: 1,
         last_input_item_count: 0,
         last_response_output: Vec::new(),
-        last_input_item_hashes: vec![],
+        last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
+            last_input_item_hashes: vec![],
     })));
     let keepalive = spawn_persistent_ws_keepalive_with_interval(
         Arc::downgrade(&persistent),
@@ -267,7 +271,9 @@ async fn persistent_cancellation_drains_unseen_tools_and_replays_on_same_socket(
         message_count: 1,
         last_input_item_count: 1,
         last_response_output: Vec::new(),
-        last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
+        last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
+            last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
     });
     let mut stream = provider
         .complete(&messages, &[], "fixture", None)
@@ -399,7 +405,9 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
         message_count: 1,
         last_input_item_count: 1,
         last_response_output: Vec::new(),
-        last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
+        last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
+            last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
     });
     let mut stream = provider
         .complete(&messages, &[], "fixture", None)
@@ -486,7 +494,9 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
         message_count: 1,
         last_input_item_count: 1,
         last_response_output: Vec::new(),
-        last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
+        last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
+            last_input_item_hashes: persistent_ws_input_item_hashes(&input[..1]),
     })));
     let (tx, _rx) = mpsc::channel(10);
     let socket = Arc::clone(&persistent);
@@ -496,8 +506,8 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
             &Arc::new(RwLock::new(prewarm_test_credentials())),
             &serde_json::json!({"model":"gpt-5.6-sol"}),
             &input,
-            input.len(),
             &tx,
+            None,
         )
         .await
     });

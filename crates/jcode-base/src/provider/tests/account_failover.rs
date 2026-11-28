@@ -57,14 +57,6 @@ impl Provider for AccountRoutingStreamProvider {
 
 struct AccountRoutingFixtureCleanup;
 
-struct RemoteQuotaCleanup;
-
-impl Drop for RemoteQuotaCleanup {
-    fn drop(&mut self) {
-        crate::usage::clear_remote_account_usage();
-    }
-}
-
 fn exhausted_account_snapshot(label: &str) -> jcode_protocol::AccountUsageSnapshot {
     serde_json::from_value(serde_json::json!({
         "label": label,
@@ -77,11 +69,15 @@ fn exhausted_account_snapshot(label: &str) -> jcode_protocol::AccountUsageSnapsh
 
 #[test]
 fn account_router_skips_known_exhausted_alternates_without_runtime_errors() {
+    if crate::usage::run_remote_account_test_in_subprocess(
+        "provider::tests::account_router_skips_known_exhausted_alternates_without_runtime_errors",
+    ) {
+        return;
+    }
     with_clean_provider_test_env(|| {
         let runtime = enter_test_runtime();
         let _guard = runtime.enter();
         let (provider, _, _cleanup) = account_routing_fixture(&[]);
-        let _quota_cleanup = RemoteQuotaCleanup;
         crate::usage::set_remote_account_usage(
             vec![],
             vec![exhausted_account_snapshot("openai-fox")],
@@ -96,12 +92,16 @@ fn account_router_skips_known_exhausted_alternates_without_runtime_errors() {
 
 #[test]
 fn bound_account_router_checks_known_quota_before_sending_in_both_modes() {
+    if crate::usage::run_remote_account_test_in_subprocess(
+        "provider::tests::bound_account_router_checks_known_quota_before_sending_in_both_modes",
+    ) {
+        return;
+    }
     with_clean_provider_test_env(|| {
         enter_test_runtime().block_on(async {
             for split in [false, true] {
                 let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
                 bind_fixture_account(&provider, &attempts, "openai-otter", &[]);
-                let _quota_cleanup = RemoteQuotaCleanup;
                 crate::usage::set_remote_account_usage(
                     vec![],
                     vec![exhausted_account_snapshot("openai-otter")],
@@ -291,6 +291,34 @@ fn account_router_respects_disabled_failover() {
                 .expect("surface account error when no cross-provider pool route exists");
             assert!(parse_failover_prompt_message(&error.to_string()).is_none());
             assert_eq!(*attempts.lock().unwrap(), ["openai-otter"]);
+        });
+    });
+}
+
+// Auto-switch off on the accounts page: manual means no move without the user.
+#[test]
+fn account_router_with_auto_switch_off_never_moves_and_names_the_blocked_account() {
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            let (provider, attempts, _cleanup) =
+                account_routing_fixture(&[("openai-otter", "429 Too Many Requests")]);
+            assert!(has_eligible_alternate_account("openai"), "on: a spare exists");
+            let mut pool = crate::auth::account_pool::AccountPool::load();
+            pool.manual = true;
+            pool.save().expect("save the switch");
+
+            assert!(!has_eligible_alternate_account("openai"));
+            let error = provider
+                .complete(&[], &[], "system", None)
+                .await
+                .err()
+                .expect("the blocked account fails the request");
+            assert!(parse_failover_prompt_message(&error.to_string()).is_none());
+            assert_eq!(*attempts.lock().unwrap(), ["openai-otter"], "no retry elsewhere");
+            assert!(
+                error.to_string().contains("openai-otter"),
+                "the failure names the account: {error}"
+            );
         });
     });
 }
@@ -521,6 +549,63 @@ fn bind_fixture_account(
 }
 
 #[test]
+fn bound_claude_retries_after_403_but_still_skips_exhausted_quota() {
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            use futures::StreamExt;
+
+            let label = auth::claude::upsert_account(auth::claude::AnthropicAccount {
+                label: "claude-recovery".into(),
+                access: "fake-access".into(),
+                refresh: "fake-refresh".into(),
+                expires: chrono::Utc::now().timestamp_millis() + 86_400_000,
+                email: None,
+                subscription_type: Some("max".into()),
+                scopes: vec![],
+            })
+            .unwrap();
+            let provider = test_multi_provider_with_openai();
+            provider.set_active_provider(ActiveProvider::Claude);
+            let attempts = Arc::new(Mutex::new(Vec::new()));
+            *provider.anthropic.write().unwrap() = Some(Arc::new(BoundAccountRoutingProvider {
+                attempts: attempts.clone(),
+                failures: HashMap::new(),
+                label: Mutex::new(label.clone()),
+                mode: Mutex::new(CredentialMode::OAuth),
+            }));
+
+            models::record_provider_unavailable_for_account_label(
+                "claude",
+                Some(&label),
+                "Anthropic API error (403 Forbidden): Request not allowed",
+            );
+            let mut stream = provider
+                .complete_split(&[], &[], "static", "dynamic", None)
+                .await
+                .expect("a transient 403 must not block the next request");
+            assert!(matches!(
+                stream.next().await,
+                Some(Ok(crate::message::StreamEvent::TextDelta(text))) if text == format!("served by {label}")
+            ));
+            assert!(
+                models::provider_unavailability_detail_for_account_label("claude", Some(&label))
+                    .is_none()
+            );
+
+            models::record_provider_unavailable_for_account_label(
+                "claude",
+                Some(&label),
+                "Anthropic API error (429): weekly limit reached",
+            );
+            let blocked = provider.complete(&[], &[], "system", None).await;
+            models::clear_claude_provider_unavailability_for_account_label(Some(&label));
+            assert!(blocked.is_err(), "weekly quota must still block the request");
+            assert_eq!(*attempts.lock().unwrap(), [label]);
+        });
+    });
+}
+
+#[test]
 fn pinned_complete_can_cross_pool_boundary_for_context_or_disabled_same_provider() {
     with_clean_provider_test_env(|| {
         enter_test_runtime().block_on(async {
@@ -636,6 +721,180 @@ fn auto_subscription_failure_is_pinned_before_any_api_spending() {
             assert_eq!(original.oauth_account_label().as_deref(), Some("unbound"));
             assert_eq!(auth::codex::active_account_label(), global_before);
         });
+    });
+}
+
+#[test]
+fn auto_initial_account_skips_known_quota_before_sending_in_both_modes() {
+    if crate::usage::run_remote_account_test_in_subprocess(
+        "provider::tests::auto_initial_account_skips_known_quota_before_sending_in_both_modes",
+    ) {
+        return;
+    }
+    with_clean_provider_test_env(|| {
+        enter_test_runtime().block_on(async {
+            for split in [false, true] {
+                let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
+                bind_fixture_account(&provider, &attempts, "unbound", &[]);
+                provider.openai_provider().unwrap().set_credential_mode(CredentialMode::Auto).unwrap();
+                crate::usage::set_remote_account_usage(vec![], vec![
+                    exhausted_account_snapshot("openai-otter"),
+                    exhausted_account_snapshot("openai-fox"),
+                ]);
+                assert!(models::provider_unavailability_detail_for_account_label(
+                    "openai", Some("openai-otter")
+                ).is_none(), "quota is known without a prior request failure");
+                let original = provider.openai_provider().unwrap();
+                let result = if split {
+                    provider.complete_split(&[], &[], "static", "dynamic", None).await
+                } else {
+                    provider.complete(&[], &[], "system", None).await
+                };
+                assert!(result.is_ok(), "initial Auto must choose the ready pool member, not prompt after binding the exhausted one");
+                assert_eq!(*attempts.lock().unwrap(), ["openai-panda"]);
+                assert_eq!(provider.oauth_account_label().as_deref(), Some("openai-panda"));
+                assert_eq!(provider.credential_mode(), CredentialMode::OAuth);
+                assert_eq!(original.credential_mode(), CredentialMode::Auto);
+                assert_eq!(auth::codex::active_account_label().as_deref(), Some("openai-otter"));
+            }
+        });
+    });
+}
+
+#[test]
+fn auto_initial_anthropic_account_skips_weekly_quota_without_cooldown() {
+    if crate::usage::run_remote_account_test_in_subprocess(
+        "provider::tests::auto_initial_anthropic_account_skips_weekly_quota_without_cooldown",
+    ) {
+        return;
+    }
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _guard = runtime.enter();
+        let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
+        for label in ["claude-otter", "claude-fox", "claude-panda"] {
+            auth::claude::upsert_account(auth::claude::AnthropicAccount {
+                label: label.into(),
+                access: "access".into(),
+                refresh: "refresh".into(),
+                expires: chrono::Utc::now().timestamp_millis() + 86_400_000,
+                email: None,
+                subscription_type: Some("max".into()),
+                scopes: vec![],
+            })
+            .unwrap();
+            models::clear_claude_provider_unavailability_for_account_label(Some(label));
+        }
+        auth::claude::set_active_account_override(Some("claude-otter".into()));
+        let pool = crate::auth::account_pool::AccountPool {
+            members: vec!["claude:claude-otter".into(), "claude:claude-fox".into()],
+            excluded: vec!["claude:claude-panda".into()],
+            ..Default::default()
+        };
+        pool.save().unwrap();
+        let original = Arc::new(BoundAccountRoutingProvider {
+            attempts,
+            failures: HashMap::new(),
+            label: Mutex::new("unbound".into()),
+            mode: Mutex::new(CredentialMode::Auto),
+        });
+        *provider.anthropic.write().unwrap() = Some(original.clone());
+        crate::usage::set_remote_account_usage(
+            vec![serde_json::from_value(serde_json::json!({
+                "label": "claude-otter", "exhausted": false,
+                "five_hour_ratio": 0.1, "seven_day_ratio": 1.0,
+                "resets_at": "2999-01-01T00:00:00Z"
+            }))
+            .unwrap()],
+            vec![],
+        );
+        provider
+            .bind_auto_account_for_request(ActiveProvider::Claude)
+            .unwrap();
+        assert_eq!(
+            provider
+                .selected_account_for_provider(ActiveProvider::Claude)
+                .as_deref(),
+            Some("claude-fox")
+        );
+        assert_eq!(
+            auth::claude::active_account_label().as_deref(),
+            Some("claude-otter")
+        );
+        assert_eq!(original.credential_mode(), CredentialMode::Auto);
+        assert_eq!(crate::auth::account_pool::AccountPool::load(), pool);
+    });
+}
+
+#[test]
+fn auto_initial_quota_routing_preserves_pins_disabled_failover_and_pool_boundaries() {
+    if crate::usage::run_remote_account_test_in_subprocess(
+        "provider::tests::auto_initial_quota_routing_preserves_pins_disabled_failover_and_pool_boundaries",
+    ) {
+        return;
+    }
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _guard = runtime.enter();
+        for case in ["pinned", "api", "disabled", "no-ready", "excluded-targets"] {
+            crate::env::set_var(
+                "JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER",
+                if case == "disabled" { "false" } else { "true" },
+            );
+            let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
+            bind_fixture_account(&provider, &attempts, "openai-otter", &[]);
+            let original = provider.openai_provider().unwrap();
+            original
+                .set_credential_mode(match case {
+                    "pinned" => CredentialMode::OAuth,
+                    "api" => CredentialMode::ApiKey,
+                    _ => CredentialMode::Auto,
+                })
+                .unwrap();
+            let mut snapshots = vec![exhausted_account_snapshot("openai-otter")];
+            if case == "no-ready" {
+                snapshots.extend([
+                    exhausted_account_snapshot("openai-fox"),
+                    exhausted_account_snapshot("openai-panda"),
+                ]);
+            }
+            crate::usage::set_remote_account_usage(vec![], snapshots);
+            let mut pool = crate::auth::account_pool::AccountPool::load();
+            pool.excluded.push("openai-api".into());
+            if case == "excluded-targets" {
+                pool.members.retain(|member| {
+                    !matches!(member.as_str(), "openai:openai-fox" | "openai:openai-panda")
+                });
+                pool.excluded.extend(["openai:openai-fox".into(), "openai:openai-panda".into()]);
+            }
+            pool.save().unwrap();
+            provider
+                .bind_auto_account_for_request(ActiveProvider::OpenAI)
+                .unwrap();
+            assert_eq!(
+                provider
+                    .openai_provider()
+                    .unwrap()
+                    .oauth_account_label()
+                    .as_deref(),
+                Some("openai-otter"),
+                "{case}"
+            );
+            assert_eq!(
+                provider.openai_provider().unwrap().credential_mode(),
+                match case {
+                    "api" => CredentialMode::ApiKey,
+                    _ => CredentialMode::OAuth,
+                },
+                "{case}"
+            );
+            assert!(attempts.lock().unwrap().is_empty());
+            assert_eq!(
+                auth::codex::active_account_label().as_deref(),
+                Some("openai-otter")
+            );
+            assert_eq!(crate::auth::account_pool::AccountPool::load(), pool);
+        }
     });
 }
 

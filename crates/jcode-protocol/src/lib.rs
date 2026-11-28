@@ -2,12 +2,17 @@
 //!
 //! Uses newline-delimited JSON over Unix socket.
 //! Server streams events back to clients during message processing.
+//! Session images can be listed and fetched by stable identity.
+//! Queued skill delivery is negotiated by the queued_prompt_active_skill capability.
 //!
 //! Socket types:
 //! - Main socket: TUI/client communication with agent
 //! - Agent socket: Inter-agent communication (AI-to-AI)
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+mod image_requests_tests;
 
 /// Selected model-provider OAuth identity for the telemetry notice handshake.
 /// Debug formatting must never disclose this personal information.
@@ -35,14 +40,19 @@ impl std::fmt::Debug for ProviderOAuthEmail {
     }
 }
 
-mod comm_format;
+mod routing;
+pub use routing::*;
+mod screen;
+pub use screen::*;
 mod notifications;
 
-pub use comm_format::*;
 pub use jcode_session_types::TurnStopReason;
+pub use jcode_session_types::desktop_state::{
+    DESKTOP_STATE_CAPABILITY, DesktopStateChange, DesktopStateEntry, DesktopStateRejection,
+};
 pub use jcode_session_types::{
-    ASK_DECLINED_MESSAGE, ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS, AskAnswer,
-    AskOption, AskQuestion, AskResponse, format_ask_answers, validate_ask_questions,
+    ASK_DECLINED_MESSAGE, ASK_MAX_OPTIONS, ASK_MAX_QUESTIONS, ASK_MIN_OPTIONS, AskAnswer, AskKind,
+    AskOption, AskQuestion, AskRecord, AskResponse, validate_ask_questions,
 };
 pub use notifications::{FeatureToggle, NotificationType};
 
@@ -275,10 +285,23 @@ impl<'a> From<&'a HistoryMessage> for HistoryMessageRef<'a> {
 /// A message in conversation history (for sync)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryMessage {
+    /// Unix epoch milliseconds when the stored message was recorded, so
+    /// clients show when it arrived rather than when they rendered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_duration_ms: Option<u64>,
+    #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+    pub codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+    /// The typed answer when this row is a completed `ask`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<Box<jcode_session_types::AskRecord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_stats: Option<jcode_session_types::ResponseStats>,
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<jcode_session_types::StoredAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,8 +426,24 @@ impl AuthChanged {
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
-pub use wire::{AccountUsageSnapshot, AccountUsageWindow, Request, ServerEvent, TurnIdentity};
-pub use wire::{SessionToolConfig, SessionToolDefinition};
+pub use wire::{
+    AccountUsageSnapshot, AccountUsageWindow, DaemonIdentity, Request, ServerEvent, TurnIdentity,
+};
+pub use wire::{
+    QueuedPrompt, QueuedPromptEditOutcome, QueuedPromptMode, QueuedPromptRejection,
+    QueuedPromptRemovalOutcome, SessionToolConfig, SessionToolDefinition,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SwarmWorkerControl {
+    SetModel {
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
+    Compact,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -412,6 +451,17 @@ pub struct ToolCallSummary {
     pub brief_output: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp_secs: Option<u64>,
+}
+
+pub const MAX_COMM_SUMMARY_TOOL_CALLS: usize = 50;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CommToolCallSnapshot {
+    /// The live runtime's stored tool uses, as of its last snapshot update.
+    Available { captured_at_secs: u64 },
+    /// No live runtime snapshot. A read-only summary does not restore it.
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -504,6 +554,8 @@ pub struct AgentInfo {
     /// Reasoning effort the agent's provider is running with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
     /// Number of turns the agent has run this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u64>,
@@ -564,6 +616,8 @@ pub struct AgentStatusSnapshot {
     pub provider_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
 }
 
 /// Lightweight swarm plan graph summary for planner-friendly reads.
@@ -711,6 +765,10 @@ pub struct SwarmMemberStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwarmMemberRuntime {
+    /// Daemon publication order as monotonic Unix milliseconds. This versions
+    /// the whole swarm snapshot, not a transcript or a liveness heartbeat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_at_unix_ms: Option<u64>,
     /// Current turn's event-derived status. Absent for older producers and
     /// sessions that have not emitted live telemetry. Never session totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -744,6 +802,9 @@ pub struct SwarmMemberRuntime {
     /// tell a working agent from one that has gone quiet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_age_secs: Option<u64>,
+    /// Silence duration when the server watchdog considers this worker stalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_secs: Option<u64>,
     /// Tokens in the worker's context window as of its latest response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u64>,
@@ -757,7 +818,8 @@ pub struct SwarmMemberRuntime {
 
 impl SwarmMemberRuntime {
     fn is_empty(&self) -> bool {
-        self.live_status.is_none()
+        self.snapshot_at_unix_ms.is_none()
+            && self.live_status.is_none()
             && self.wait_reason.is_none()
             && self.todo_blocked_reason.is_none()
             && self.wait_age_secs.is_none()
@@ -768,6 +830,7 @@ impl SwarmMemberRuntime {
             && self.effort.is_none()
             && self.elapsed_secs.is_none()
             && self.activity_age_secs.is_none()
+            && self.stalled_secs.is_none()
             && self.context_tokens.is_none()
             && self.context_limit.is_none()
             && self.output_tokens.is_none()
@@ -848,18 +911,32 @@ impl Request {
     pub fn id(&self) -> u64 {
         match self {
             Request::RuntimeCommand { id, .. } => *id,
-            Request::ConfigureTools { id, .. }
+            Request::ScreenContext { id, .. }
+            | Request::ConfigureTools { id, .. }
             | Request::ListTools { id }
             | Request::ToolResult { id, .. } => *id,
             Request::Message { id, .. } => *id,
             Request::Cancel { id } => *id,
+            Request::ForceStopTurn { id, .. } => *id,
             Request::BackgroundTool { id } => *id,
+            Request::BackgroundTasks { id, .. } => *id,
+            Request::QueuePrompt { id, .. }
+            | Request::SetQueuedPromptMode { id, .. }
+            | Request::InterruptQueuedPrompt { id, .. }
+            | Request::InterruptQueuedPrompts { id, .. }
+            | Request::RemoveQueuedPrompt { id, .. }
+            | Request::ReorderQueuedPrompts { id, .. }
+            | Request::SetQueuedPromptEditing { id, .. }
+            | Request::EditQueuedPrompt { id, .. }
+            | Request::GetQueuedPrompts { id } => *id,
             Request::SoftInterrupt { id, .. } => *id,
             Request::CancelSoftInterrupts { id, .. } => *id,
             Request::Clear { id } => *id,
             Request::Rewind { id, .. } => *id,
+            Request::RewindTranscript { id, .. } => *id,
             Request::RewindUndo { id } => *id,
             Request::Ping { id } => *id,
+            Request::OpenrigHostIdentity { id } => *id,
             Request::GetState { id } => *id,
             Request::GetTodos { id } => *id,
             Request::ClientFocus { id, .. } => *id,
@@ -870,6 +947,12 @@ impl Request {
             Request::GetHistory { id } => *id,
             Request::GetModelCatalog { id, .. } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
+            Request::GetHistoryPage { id, .. } => *id,
+            Request::GetHistoryImageChunk { id, .. } => *id,
+            Request::ListSessionImages { id, .. } | Request::GetSessionImage { id, .. } => *id,
+            Request::SessionContextBreakdown { id, .. } | Request::SessionShakeTools { id, .. } => {
+                *id
+            }
             Request::Reload { id, .. } => *id,
             Request::UpgradeRuntime { id, .. } => *id,
             Request::ResumeSession { id, .. } => *id,
@@ -883,12 +966,14 @@ impl Request {
             Request::CycleModel { id, .. } => *id,
             Request::RefreshModels { id } => *id,
             Request::SetModel { id, .. } => *id,
+            Request::CancelPendingModelChange { id } => *id,
             Request::SetContextCap { id, .. } => *id,
             Request::SetRoute { id, .. } => *id,
             Request::SetSubagentModel { id, .. } | Request::SetAgentModel { id, .. } => *id,
             Request::RunSubagent { id, .. } => *id,
             Request::SetReasoningEffort { id, .. } => *id,
             Request::SetServiceTier { id, .. } => *id,
+            Request::SetSpeedMode { id, .. } => *id,
             Request::SetTransport { id, .. } => *id,
             Request::SetPremiumMode { id, .. } => *id,
             Request::SetFeature { id, .. } => *id,
@@ -897,7 +982,11 @@ impl Request {
             Request::SetSessionEnv { id, .. } => *id,
             Request::SetSessionSaved { id, .. } => *id,
             Request::PersistSession { id } => *id,
-            Request::Split { id } => *id,
+            Request::Split { id }
+            | Request::SplitSideQuestion { id }
+            | Request::ListSideQuestions { id, .. }
+            | Request::GetSideQuestionHistory { id, .. }
+            | Request::PromoteSideQuestion { id, .. } => *id,
             Request::Transfer { id } => *id,
             Request::Compact { id } => *id,
             Request::TriggerMemoryExtraction { id } => *id,
@@ -907,8 +996,15 @@ impl Request {
             Request::AccountUsage { id } => *id,
             Request::InvalidateOpenAiUsage { id, .. } => *id,
             Request::InvalidateAnthropicUsage { id, .. } => *id,
+            Request::RefreshAuth { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,
             Request::AskUserResponse { id, .. } => *id,
+            Request::RoutingGateAnswer { id, .. } => *id,
+            Request::RoutingIntent { id, .. } => *id,
+            Request::RoutingView { id } => *id,
+            Request::DesktopStateGet { id, .. }
+            | Request::DesktopStateSubscribe { id, .. }
+            | Request::DesktopStatePut { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
             Request::AgentCapabilities { id } => *id,
@@ -919,6 +1015,8 @@ impl Request {
             Request::CommList { id, .. } => *id,
             Request::CommListChannels { id, .. } => *id,
             Request::CommListSwarms { id, .. } => *id,
+            Request::CommListSessions { id, .. } => *id,
+            Request::CommFocusSession { id, .. } => *id,
             Request::CommSetSwarmLabel { id, .. } => *id,
             Request::CommChannelMembers { id, .. } => *id,
             Request::CommProposePlan { id, .. } => *id,
@@ -926,7 +1024,7 @@ impl Request {
             Request::CommRejectPlan { id, .. } => *id,
             Request::CommSpawn { id, .. } => *id,
             Request::CommListModels { id, .. } => *id,
-            Request::CommStop { id, .. } => *id,
+            Request::CommStop { id, .. } | Request::CommWorkerControl { id, .. } => *id,
             Request::CommAssignRole { id, .. } => *id,
             Request::CommSummary { id, .. } => *id,
             Request::CommStatus { id, .. } => *id,
@@ -943,16 +1041,34 @@ impl Request {
         }
     }
 
+    /// A request only a dedicated Desktop state connection serves.
+    pub fn is_desktop_state_request(&self) -> bool {
+        matches!(
+            self,
+            Request::DesktopStateGet { .. }
+                | Request::DesktopStateSubscribe { .. }
+                | Request::DesktopStatePut { .. }
+        )
+    }
+
     pub fn is_lightweight_control_request(&self) -> bool {
         matches!(
             self,
             Request::Ping { .. }
+                | Request::OpenrigHostIdentity { .. }
+                | Request::SessionContextBreakdown { .. }
+                | Request::ListSideQuestions { .. }
+                | Request::RoutingView { .. }
+                | Request::GetSideQuestionHistory { .. }
+                | Request::PromoteSideQuestion { .. }
+                | Request::SessionShakeTools { .. }
                 | Request::UpgradeRuntime { .. }
                 // Usage invalidation only touches process-wide caches, so a
                 // one-shot client can send it without subscribing to a session.
                 | Request::AccountUsage { .. }
                 | Request::InvalidateOpenAiUsage { .. }
                 | Request::InvalidateAnthropicUsage { .. }
+                | Request::RefreshAuth { .. }
                 // One-shot login clients report new credentials without a
                 // session. Subscribed connections still take the
                 // session-local path that also switches their model.
@@ -966,6 +1082,8 @@ impl Request {
                 | Request::CommList { .. }
                 | Request::CommListChannels { .. }
                 | Request::CommListSwarms { .. }
+                | Request::CommListSessions { .. }
+                | Request::CommFocusSession { .. }
                 | Request::CommSetSwarmLabel { .. }
                 | Request::CommChannelMembers { .. }
                 | Request::CommProposePlan { .. }
@@ -974,6 +1092,7 @@ impl Request {
                 | Request::CommSpawn { .. }
                 | Request::CommListModels { .. }
                 | Request::CommStop { .. }
+                | Request::CommWorkerControl { .. }
                 | Request::CommAssignRole { .. }
                 | Request::CommSummary { .. }
                 | Request::CommStatus { .. }

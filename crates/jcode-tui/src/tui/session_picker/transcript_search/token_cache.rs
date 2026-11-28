@@ -436,7 +436,7 @@ fn scan_token_with_scores(
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        if scan.sources[0] == Some(Source::User) {
+        if scan.first_source() == Some(Source::User) {
             break;
         }
         let scanned = scan.normalized_text::<serde_json::Error>(segment, source);
@@ -454,8 +454,8 @@ fn scan_token_with_scores(
     if cancel.load(Ordering::Relaxed) {
         None
     } else {
-        Some(scan.sources[0].map(|source| Hit {
-            score: scan.score,
+        Some(scan.first_source().map(|source| Hit {
+            score: scan.score(),
             source,
         }))
     }
@@ -555,11 +555,11 @@ mod tests {
         );
         assert_eq!(
             result.iter().flatten().map(|hit| hit.score).sum::<i64>(),
-            scan.score
+            scan.score()
         );
         assert_eq!(
             result.iter().map(Option::is_some).collect::<Vec<_>>(),
-            scan.found
+            scan.found()
         );
         let literal = resolve(&cache, &text, &query, &cancel, false, scan_token).unwrap();
         assert!(literal.iter().flatten().all(|hit| hit.score == 0));
@@ -583,11 +583,10 @@ mod tests {
         let never = |_: &Segments, _: &str, _: &AtomicBool, _: bool| -> Option<Option<Hit>> {
             panic!("extension must reuse its prefix's segments")
         };
-        let resolve_one =
-            |token: &str,
-             scan: &dyn Fn(&Segments, &str, &AtomicBool, bool) -> Option<Option<Hit>>| {
-                resolve(&cache, &text, &tokens(&[token]), &cancel, false, scan).unwrap()[0]
-            };
+        type Scanner = dyn Fn(&Segments, &str, &AtomicBool, bool) -> Option<Option<Hit>>;
+        let resolve_one = |token: &str, scan: &Scanner| {
+            resolve(&cache, &text, &tokens(&[token]), &cancel, false, scan).unwrap()[0]
+        };
         let user = Some(Hit {
             score: 0,
             source: Source::User,

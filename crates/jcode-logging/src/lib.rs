@@ -1,16 +1,18 @@
 //! Logging infrastructure for jcode
 //!
-//! Logs to ~/.jcode/logs/ with automatic rotation
+//! Logs to ~/.jcode/logs/, rolling by local date or at 64 MiB per segment.
+//! Retains up to seven calendar dates within a 256 MiB budget for Jcode log
+//! files. Concurrent appenders refresh their file handles on the write path,
+//! so brief overshoot is possible without waking an idle process.
 //!
 //! Supports thread-local context for server, session, provider, and model info.
 
+mod log_file;
 pub mod watchdog;
 
 use chrono::Local;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -39,7 +41,7 @@ impl LogLevel {
         }
     }
 
-    fn is_enabled(self) -> bool {
+    pub fn is_enabled(self) -> bool {
         !matches!(self, Self::Debug) || std::env::var("JCODE_TRACE").is_ok()
     }
 }
@@ -205,7 +207,7 @@ fn context_prefix_for(ctx: &LogContext) -> String {
 }
 
 pub struct Logger {
-    file: File,
+    file: log_file::LogFile,
 }
 
 fn log_dir() -> Option<PathBuf> {
@@ -217,29 +219,18 @@ impl Logger {
         let log_dir = log_dir()?;
         jcode_storage::ensure_dir(&log_dir).ok()?;
 
-        // Use date-based log file
-        let date = Local::now().format("%Y-%m-%d");
-        let path = log_dir.join(format!("jcode-{}.log", date));
-
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .ok()?;
+        let file = log_file::LogFile::open(log_dir, Local::now().date_naive()).ok()?;
 
         Some(Self { file })
     }
 
     fn write(&mut self, level: &str, message: &str) {
-        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let now = Local::now();
+        let timestamp = now.format("%Y-%m-%d %H:%M:%S%.3f");
         let ctx = context_prefix();
         let line = format!("[{}] [{}] {}{}\n", timestamp, level, ctx, message);
-        if let Err(err) = self.file.write_all(line.as_bytes()) {
+        if let Err(err) = self.file.append(now, line.as_bytes()) {
             eprintln!("jcode logger write failed: {err}");
-            return;
-        }
-        if let Err(err) = self.file.flush() {
-            eprintln!("jcode logger flush failed: {err}");
         }
     }
 }
@@ -333,6 +324,13 @@ pub fn debug(message: &str) {
                 logger.write("DEBUG", message);
             }
         }
+    }
+}
+
+/// Construct a debug message only when trace logging is enabled.
+pub fn debug_lazy(message: impl FnOnce() -> String) {
+    if LogLevel::Debug.is_enabled() {
+        write_level(LogLevel::Debug, &message());
     }
 }
 
@@ -590,49 +588,13 @@ pub fn current_session() -> Option<String> {
 /// Get path to today's log file
 pub fn log_path() -> Option<PathBuf> {
     let log_dir = log_dir()?;
-    let date = Local::now().format("%Y-%m-%d");
-    Some(log_dir.join(format!("jcode-{}.log", date)))
+    Some(log_file::daily_path(&log_dir, Local::now().date_naive()))
 }
 
-/// Remove daily `jcode-*.log` / `jcode-desktop-*.log` files older than 7 days.
-///
-/// Scoped deliberately to the date-stamped log files this logger produces. The
-/// log directory also holds non-log data (e.g. `memory/`, `memory-events-*.jsonl`)
-/// that must NOT be touched here, so we never blanket-delete by mtime.
+/// Apply retention to the date-stamped Jcode logs, not unrelated log-dir data.
 pub fn cleanup_old_logs() {
     if let Some(log_dir) = log_dir() {
-        cleanup_old_logs_in(&log_dir, Local::now());
-    }
-}
-
-/// Core of [`cleanup_old_logs`], parameterized on the directory and "now" so it
-/// can be unit-tested without touching the real log directory or process env.
-fn cleanup_old_logs_in(log_dir: &std::path::Path, now: chrono::DateTime<Local>) {
-    let Ok(entries) = fs::read_dir(log_dir) else {
-        return;
-    };
-    let cutoff = now - chrono::Duration::days(7);
-    for entry in entries.flatten() {
-        // Only consider our own date-stamped log files.
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let is_jcode_log = (name.starts_with("jcode-") || name.starts_with("jcode-desktop-"))
-            && name.ends_with(".log");
-        if !is_jcode_log {
-            continue;
-        }
-
-        if let Ok(metadata) = entry.metadata()
-            && metadata.is_file()
-            && let Ok(modified) = metadata.modified()
-        {
-            let modified: chrono::DateTime<Local> = modified.into();
-            if modified < cutoff
-                && let Err(err) = fs::remove_file(entry.path())
-            {
-                eprintln!("jcode logger cleanup failed: {err}");
-            }
-        }
+        log_file::cleanup(&log_dir, Local::now().date_naive());
     }
 }
 
@@ -800,6 +762,8 @@ mod tests {
 
     #[test]
     fn cleanup_removes_only_old_jcode_logs() {
+        use std::fs::{self, File, OpenOptions};
+        use std::io::Write;
         use std::time::{Duration, SystemTime};
 
         let dir = std::env::temp_dir().join(format!(
@@ -832,15 +796,40 @@ mod tests {
         // Non-log data that SHOULD survive even though it is old.
         let old_memory = write("memory-events-2000-01-01.jsonl", true);
         let old_other = write("notes-2000-01-01.txt", true);
+        let oldest_recent = write("jcode-2099-01-01.log.001", false);
+        let middle_recent = write("jcode-2099-01-01.log.002", false);
+        let oversized_recent = write("jcode-2099-01-01.log.003", false);
+        for (path, mb) in [
+            (&oldest_recent, 120),
+            (&middle_recent, 120),
+            (&oversized_recent, 300),
+            (&new_log, 40),
+        ] {
+            OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_len(mb * 1024 * 1024)
+                .unwrap();
+        }
         // A subdirectory (e.g. `memory/`) must never be removed.
         let subdir = dir.join("memory");
         fs::create_dir_all(&subdir).expect("create subdir");
 
-        cleanup_old_logs_in(&dir, Local::now());
+        log_file::cleanup(&dir, chrono::NaiveDate::from_ymd_opt(2099, 1, 1).unwrap());
 
         assert!(!old_log.exists(), "old jcode log should be deleted");
         assert!(!old_desktop.exists(), "old desktop log should be deleted");
         assert!(new_log.exists(), "recent jcode log must survive");
+        assert!(middle_recent.exists(), "newest archive must survive");
+        assert!(
+            !oversized_recent.exists(),
+            "an archive that cannot fit must not evict all others"
+        );
+        assert!(
+            !oldest_recent.exists(),
+            "oldest archive must yield to the size budget"
+        );
         assert!(old_memory.exists(), "memory-events jsonl must survive");
         assert!(old_other.exists(), "unrelated files must survive");
         assert!(subdir.is_dir(), "subdirectories must survive");

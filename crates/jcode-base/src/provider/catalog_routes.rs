@@ -1,4 +1,5 @@
 use crate::auth::{AuthState, AuthStatus};
+use chrono::Datelike;
 
 use super::pricing::cheapness_for_route;
 use super::{
@@ -38,6 +39,8 @@ pub fn simplified_model_routes_for_picker(
             // Platform-API-only GPT Pro models: never advertise an OAuth route.
             if jcode_provider_core::is_openai_api_only_pro_model(&model) {
                 routes.push(ModelRoute {
+                    speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-api-key".to_string(),
@@ -49,11 +52,15 @@ pub fn simplified_model_routes_for_picker(
                     },
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 });
                 continue;
             }
             if auth.openai_has_oauth {
                 routes.push(ModelRoute {
+                    speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-oauth".to_string(),
@@ -61,10 +68,14 @@ pub fn simplified_model_routes_for_picker(
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 });
             }
             if auth.openai_has_api_key {
                 routes.push(ModelRoute {
+                    speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: model.clone(),
                     provider: "OpenAI".to_string(),
                     api_method: "openai-api-key".to_string(),
@@ -72,10 +83,14 @@ pub fn simplified_model_routes_for_picker(
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 });
             }
             if auth.openai == AuthState::NotConfigured {
                 routes.push(ModelRoute {
+                    speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model,
                     provider: "OpenAI".to_string(),
                     api_method: "openai-oauth".to_string(),
@@ -83,6 +98,8 @@ pub fn simplified_model_routes_for_picker(
                     detail: "no credentials".to_string(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 });
             }
             continue;
@@ -143,6 +160,8 @@ pub fn simplified_model_routes_for_picker(
             };
 
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model,
             provider,
             api_method,
@@ -150,11 +169,15 @@ pub fn simplified_model_routes_for_picker(
             detail,
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 
     if routes.is_empty() && !current_model.is_empty() && current_model != "unknown" {
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: current_model.to_string(),
             provider: current_provider_name.to_string(),
             api_method: "current".to_string(),
@@ -162,6 +185,8 @@ pub fn simplified_model_routes_for_picker(
             detail: "simplified catalog".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 
@@ -190,6 +215,14 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
             Vec::new()
         }
     };
+    let identities = crate::auth::account_identity::oauth_identities();
+    let display_name_of = |provider: &str, label: &str| {
+        identities
+            .iter()
+            .find(|identity| identity.provider == provider && identity.label == label)
+            .map(|identity| identity.display_name.clone())
+    };
+    let (claude_count, openai_count) = (claude.len(), openai.len());
     if !claude.is_empty() {
         routes.retain(|route| route.api_method != "claude-oauth");
         // Auth and disk-catalog reads are account facts, not model facts.
@@ -235,7 +268,13 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
                     has_refresh,
                     expired,
                 );
-                qualify_saved_account_route(&mut route, &account.label, account.email.as_deref());
+                qualify_saved_account_route(
+                    &mut route,
+                    &account.label,
+                    display_name_of("claude", &account.label).as_deref(),
+                    account.email.as_deref(),
+                    claude_count,
+                );
                 routes.push(route);
             }
         }
@@ -266,9 +305,79 @@ fn expand_saved_account_routes(mut routes: Vec<ModelRoute>) -> Vec<ModelRoute> {
                         .expires_at
                         .is_some_and(|expires| expires <= chrono::Utc::now().timestamp_millis()),
                 );
-                qualify_saved_account_route(&mut route, &account.label, account.email.as_deref());
+                qualify_saved_account_route(
+                    &mut route,
+                    &account.label,
+                    display_name_of("openai", &account.label).as_deref(),
+                    account.email.as_deref(),
+                    openai_count,
+                );
                 routes.push(route);
             }
+        }
+    }
+    let oauth_capabilities = super::models::openai_oauth_route_capabilities();
+    let native_api = super::openai::native_speed_api_endpoint(&super::openai::resolve_api_base());
+    let native_anthropic_api = super::anthropic::native_fast_api_configured();
+    let today = chrono::Utc::now().date_naive();
+    let today = (today.year(), today.month(), today.day());
+    for route in &mut routes {
+        use jcode_provider_core::RuntimeKey;
+        if !route.available {
+            continue;
+        }
+        let method = route.api_method_kind();
+        match RuntimeKey::from_api_method(&method, &route.provider) {
+            RuntimeKey::OpenAIApiKey if native_api => {
+                route.reasoning_efforts =
+                    jcode_provider_core::reasoning::openai_reasoning_efforts(&route.model, None)
+                        .map(|efforts| efforts.into_iter().map(str::to_owned).collect());
+                route.speed_options = jcode_provider_core::service_tier::openai_speed_options(
+                    &route.model,
+                    false,
+                    None,
+                );
+            }
+            RuntimeKey::OpenAIOAuth if route.model != CHATGPT_WEB_MODEL => {
+                (route.reasoning_efforts, route.speed_options) =
+                    oauth_capabilities(&route.model, &route.api_method);
+            }
+            RuntimeKey::ClaudeOAuth | RuntimeKey::AnthropicApiKey => {
+                route.reasoning_efforts = Some(
+                    jcode_provider_core::inferred_reasoning_efforts(
+                        Some("claude"),
+                        Some(&route.model),
+                    )
+                    .into_iter()
+                    .filter_map(jcode_provider_core::canonical_reasoning_effort)
+                    .map(str::to_owned)
+                    .collect(),
+                );
+                let oauth = matches!(
+                    method,
+                    jcode_provider_core::ModelRouteApiMethod::ClaudeOAuth
+                );
+                let native = oauth || native_anthropic_api;
+                if native
+                    && jcode_provider_core::service_tier::anthropic_fast_mode(
+                        &route.model,
+                        oauth,
+                        today,
+                    )
+                    .is_some()
+                {
+                    route.speed_options = vec![
+                        jcode_provider_core::SpeedOption::standard(),
+                        jcode_provider_core::SpeedOption {
+                            mode: jcode_provider_core::SpeedMode::Fast,
+                            availability: jcode_provider_core::SpeedAvailability::Unknown,
+                            reason: Some(if oauth { "Uses paid Anthropic usage credits; account eligibility is not verified" }
+                                else { "Uses premium Anthropic API rates; organization eligibility is not verified" }.into()),
+                        },
+                    ];
+                }
+            }
+            _ => {}
         }
     }
     dedupe_model_routes(routes)
@@ -304,11 +413,36 @@ fn apply_saved_account_status(
     }
 }
 
-fn qualify_saved_account_route(route: &mut ModelRoute, label: &str, email: Option<&str>) {
+fn qualify_saved_account_route(
+    route: &mut ModelRoute,
+    label: &str,
+    display_name: Option<&str>,
+    email: Option<&str>,
+    provider_accounts: usize,
+) {
+    if let Some(account) =
+        jcode_provider_core::route_pool_key(&format!("{}@{label}", route.api_method))
+    {
+        // Counted from the saved logins at hand: asking the routing list would
+        // make this module and `routing_accounts` use each other.
+        let configured = crate::config::config()
+            .routing
+            .account(&account, |raw| Some(raw.icon.clone()))
+            .flatten();
+        route.icon = jcode_session_types::account_icon::disambiguating_icon(
+            &account,
+            configured.as_deref(),
+            provider_accounts,
+        );
+        route.account = Some(account);
+    }
     route.api_method = format!("{}@{label}", route.api_method);
+    // Carry the name a person knows the login by, so a picker can tell three
+    // Anthropic accounts apart without showing internal ids.
+    let identity = jcode_provider_core::route_account_identity(label, display_name);
     let identity = match email {
-        Some(email) => format!("account {label} · {email}"),
-        None => format!("account {label}"),
+        Some(email) => format!("{identity} · {}", crate::usage::mask_email(email)),
+        None => identity,
     };
     route.detail = if route.detail.is_empty() {
         identity
@@ -344,6 +478,8 @@ pub fn append_simplified_anthropic_model_routes(
             anthropic_api_key_route_availability(&model)
         };
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: model.clone(),
             provider: "Anthropic".to_string(),
             api_method: if oauth { "claude-oauth" } else { "claude-api" }.to_string(),
@@ -351,6 +487,8 @@ pub fn append_simplified_anthropic_model_routes(
             detail,
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 }
@@ -402,6 +540,8 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     if !has_openrouter_transport && !added_direct_openai_compatible_routes {
         // OpenRouter not configured - show a placeholder as unavailable.
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "openrouter models".to_string(),
             provider: "—".to_string(),
             api_method: "openrouter".to_string(),
@@ -409,6 +549,8 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
             detail: "OPENROUTER_API_KEY not set".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
 
@@ -504,6 +646,8 @@ pub(super) fn append_anthropic_routes(
                 routes.push(build_anthropic_oauth_route(&model, available, detail));
             } else {
                 routes.push(ModelRoute {
+                    speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: model.clone(),
                     provider: "Anthropic".to_string(),
                     api_method: "claude-api".to_string(),
@@ -511,6 +655,8 @@ pub(super) fn append_anthropic_routes(
                     detail,
                     usage: None,
                     cheapness: cheapness_for_route(&model, "Anthropic", "claude-api"),
+                    account: None,
+                    icon: None,
                 });
             }
         }
@@ -714,6 +860,8 @@ fn named_provider_profile_routes(
             continue;
         }
         routes.push(ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model,
             provider: profile_name.to_string(),
             api_method: api_method.clone(),
@@ -721,6 +869,8 @@ fn named_provider_profile_routes(
             detail: detail.clone(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         });
     }
     routes
@@ -752,6 +902,8 @@ fn append_gemini_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
     if let Some(gemini) = provider.gemini_provider() {
         for model in gemini.available_models_display() {
             routes.push(ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model,
                 provider: "Gemini".to_string(),
                 api_method: "code-assist-oauth".to_string(),
@@ -759,6 +911,8 @@ fn append_gemini_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
     }
@@ -774,6 +928,8 @@ fn append_cursor_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
     if let Some(cursor) = provider.cursor_provider() {
         for model in cursor.available_models_display() {
             routes.push(ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model,
                 provider: "Cursor".to_string(),
                 api_method: "cursor".to_string(),
@@ -781,6 +937,8 @@ fn append_cursor_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
     }
@@ -876,6 +1034,8 @@ fn append_openrouter_routes(
                     )
                 });
             routes.push(ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: model.clone(),
                 provider,
                 api_method,
@@ -883,6 +1043,8 @@ fn append_openrouter_routes(
                 detail,
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
         // Add per-provider routes from endpoints cache

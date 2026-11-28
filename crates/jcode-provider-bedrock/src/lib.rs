@@ -1308,10 +1308,10 @@ impl Provider for BedrockProvider {
                                 }
                             }
                         }
-                        ConverseStreamOutput::ContentBlockStop(_) => {
-                            if current_tool.take().is_some() {
-                                let _ = tx.send(Ok(StreamEvent::ToolUseEnd)).await;
-                            }
+                        ConverseStreamOutput::ContentBlockStop(_)
+                            if current_tool.take().is_some() =>
+                        {
+                            let _ = tx.send(Ok(StreamEvent::ToolUseEnd)).await;
                         }
                         ConverseStreamOutput::MessageStop(stop) => {
                             let reason = Some(format!("{:?}", stop.stop_reason()));
@@ -1451,6 +1451,8 @@ impl Provider for BedrockProvider {
                     features.push("reasoning");
                 }
                 ModelRoute {
+                    speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: model.clone(),
                     provider: "AWS Bedrock".to_string(),
                     api_method: "bedrock".to_string(),
@@ -1480,6 +1482,8 @@ impl Provider for BedrockProvider {
                     },
                     usage: None,
                     cheapness: Self::route_pricing(&model),
+                    account: None,
+                    icon: None,
                 }
             })
             .collect()

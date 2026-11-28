@@ -12,6 +12,9 @@ pub(crate) struct ResolvedTokenPricing {
     pub completion_price: f32,
     /// Cache-read price in $/1M tokens when known; falls back to `prompt_price`.
     pub cache_read_price: Option<f32>,
+    /// Explicit cache-write price in $/1M tokens from a config price override;
+    /// without it writes are priced as input times the provider's premium.
+    pub cache_write_price: Option<f32>,
     /// Whether the active model is Anthropic/Claude (drives split-accounting and
     /// the cache-write premium).
     pub is_anthropic: bool,
@@ -59,18 +62,21 @@ impl ResolvedTokenPricing {
         // Write pricing replaces ordinary input pricing, it is not an extra
         // charge on top of already-billed OpenAI input tokens.
         let cache_write_cost = if cache_creation_tokens > 0 {
-            let multiplier = if self.is_anthropic {
-                if crate::provider::anthropic::is_cache_ttl_1h() {
-                    2.0
-                } else {
+            let write_price = self.cache_write_price.unwrap_or_else(|| {
+                let multiplier = if self.is_anthropic {
+                    if crate::provider::anthropic::is_cache_ttl_1h() {
+                        2.0
+                    } else {
+                        1.25
+                    }
+                } else if self.is_openai {
                     1.25
-                }
-            } else if self.is_openai {
-                1.25
-            } else {
-                1.0
-            };
-            (cache_creation_tokens as f32 * self.prompt_price * multiplier) / 1_000_000.0
+                } else {
+                    1.0
+                };
+                self.prompt_price * multiplier
+            });
+            (cache_creation_tokens as f32 * write_price) / 1_000_000.0
         } else {
             0.0
         };
@@ -133,7 +139,7 @@ impl App {
     pub(super) fn open_usage_inline_loading(&mut self) {
         self.push_usage_loading_card();
         self.inline_interactive_state = None;
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.input.clear();
         self.cursor_pos = 0;
         self.set_status_notice("Usage → refreshing");
@@ -237,6 +243,7 @@ impl App {
             prompt_price,
             completion_price,
             cache_read_price,
+            cache_write_price: self.cost.cached_cache_write_price,
             is_anthropic,
             is_openai,
         };
@@ -248,7 +255,13 @@ impl App {
             self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
         );
         self.cost.total_cost += call_cost;
-        self.record_api_key_spend(call_cost);
+        self.record_api_key_spend(
+            call_cost,
+            self.streaming.streaming_input_tokens
+                + self.streaming.streaming_output_tokens
+                + self.streaming.streaming_cache_read_tokens.unwrap_or(0)
+                + self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
+        );
     }
 
     /// Accrue the dollar cost of a single completed remote API call.
@@ -286,7 +299,10 @@ impl App {
             cache_creation_delta,
         );
         self.cost.total_cost += call_cost;
-        self.record_api_key_spend(call_cost);
+        self.record_api_key_spend(
+            call_cost,
+            input_delta + output_delta + cache_read_delta + cache_creation_delta,
+        );
     }
 
     /// Seed `cost.total_cost` from token totals restored when resuming a
@@ -325,7 +341,7 @@ impl App {
     /// `/usage` can show per-login spend (today / month / all-time). Only ever
     /// called from the billed-per-token paths, so every dollar recorded here
     /// is real API-key spend rather than subscription usage.
-    fn record_api_key_spend(&self, call_cost: f32) {
+    fn record_api_key_spend(&self, call_cost: f32, tokens: u64) {
         if !call_cost.is_finite() || call_cost <= 0.0 {
             return;
         }
@@ -335,9 +351,13 @@ impl App {
         let source_key =
             crate::provider_activity::source_key_for_provider_label(&label, runtime.as_deref());
         let cost = call_cost as f64;
+        let model = <Self as TuiState>::provider_model(self);
         // Ledger writes hit the filesystem; never block the render/input loop.
+        // The routing spend ledger gets the same call with its model and tokens.
         std::thread::spawn(move || {
-            crate::provider_activity::record_spend(&source_key, cost);
+            // Spend bills the account whose key served the call.
+            let source_key = crate::provider_catalog::spend_ledger_key(&source_key);
+            crate::routing_meters::record_priced_spend(&source_key, &model, cost, tokens);
         });
     }
 
@@ -381,6 +401,7 @@ impl App {
             prompt_price: *self.cost.cached_prompt_price.get_or_insert(15.0),
             completion_price: *self.cost.cached_completion_price.get_or_insert(60.0),
             cache_read_price: self.cost.cached_cache_read_price,
+            cache_write_price: self.cost.cached_cache_write_price,
             is_anthropic,
             is_openai,
         })
@@ -425,6 +446,11 @@ impl App {
             self.cost.cached_prompt_price = per_mtok(estimate.input_price_per_mtok_micros);
             self.cost.cached_completion_price = per_mtok(estimate.output_price_per_mtok_micros);
             self.cost.cached_cache_read_price = per_mtok(estimate.cache_read_price_per_mtok_micros);
+            self.cost.cached_cache_write_price =
+                crate::provider::pricing::configured_cost_override(&source_key, model)
+                    .and_then(|cost| cost.cache_write)
+                    .filter(|price| price.is_finite() && *price >= 0.0)
+                    .map(|price| price as f32);
             self.cost.cached_price_model = Some(price_key);
             return;
         }
@@ -438,6 +464,7 @@ impl App {
             self.cost.cached_prompt_price = None;
             self.cost.cached_completion_price = None;
             self.cost.cached_cache_read_price = None;
+            self.cost.cached_cache_write_price = None;
             self.cost.cached_price_model = None;
         }
     }
@@ -530,6 +557,7 @@ impl App {
         match code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.model_status_scroll = None;
+                self.model_status_title = "";
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.model_status_scroll = Some(scroll.saturating_add(1));
@@ -595,6 +623,7 @@ mod cache_cost_tests {
             prompt_price: 10.0,
             completion_price: 40.0,
             cache_read_price: Some(1.0),
+            cache_write_price: None,
             is_anthropic: false,
             is_openai: true,
         };
@@ -603,5 +632,20 @@ mod cache_cost_tests {
         let expected = (2_000.0 * 10.0 + 6_000.0 + 2_000.0 * 12.5 + 100.0 * 40.0) / 1_000_000.0;
         assert!((cost - expected).abs() < 0.000001, "{cost} != {expected}");
         assert!((pricing.cost_for_usage(10_000, 0, 6_000, 0) - 0.046).abs() < 0.000001);
+    }
+
+    #[test]
+    fn configured_cache_write_price_replaces_the_provider_premium() {
+        let pricing = ResolvedTokenPricing {
+            prompt_price: 10.0,
+            completion_price: 40.0,
+            cache_read_price: Some(1.0),
+            cache_write_price: Some(3.0),
+            is_anthropic: false,
+            is_openai: true,
+        };
+        let cost = pricing.cost_for_usage(10_000, 0, 6_000, 2_000);
+        let expected = (2_000.0 * 10.0 + 6_000.0 * 1.0 + 2_000.0 * 3.0) / 1_000_000.0;
+        assert!((cost - expected).abs() < 0.000001, "{cost} != {expected}");
     }
 }

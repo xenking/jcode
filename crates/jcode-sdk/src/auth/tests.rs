@@ -50,12 +50,33 @@ fn catalog_is_capability_filtered_and_uses_shared_aliases() {
         client.resolve_provider("jcode").unwrap().method,
         LoginMethod::ApiKey
     );
+    assert_eq!(
+        client.resolve_provider("cursor").unwrap().method,
+        LoginMethod::DeviceCode
+    );
     assert!(client.resolve_provider("grok-build").is_none());
     for provider in client.providers() {
         assert_eq!(client.resolve_provider(provider.id), Some(provider));
         assert!(!provider.display_name.is_empty());
     }
     assert!(client.begin("jcode", None).is_err());
+}
+
+/// Desktop builds its account picker from this list. A key-based catalog
+/// provider that is missing here (OpenCode Go) leaves the user pasting its key
+/// under the nearest listed provider (OpenRouter), where it silently breaks.
+#[test]
+fn key_based_catalog_providers_are_offered_with_their_own_id() {
+    let client = AuthClient::default();
+    for id in ["opencode-go", "opencode", "deepseek", "zai"] {
+        let provider = client
+            .resolve_provider(id)
+            .unwrap_or_else(|| panic!("{id} must be offered as a native login provider"));
+        assert_eq!(provider.id, id);
+        assert_eq!(provider.method, LoginMethod::ApiKey, "{id}");
+    }
+    let listed: Vec<_> = client.providers().into_iter().map(|p| p.id).collect();
+    assert!(listed.contains(&"opencode-go"), "{listed:?}");
 }
 
 #[test]
@@ -186,9 +207,11 @@ sys.exit(1 if mode in ('warning', 'legacy-warning') else 0)
         let notified = thread::spawn(move || {
             use std::io::BufRead;
             let (stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+            // Best effort: Darwin rejects `SO_RCVTIMEO` with `EINVAL` once the
+            // peer has closed, and the client may legitimately finish before
+            // this thread gets here. The request line is already buffered, so
+            // the timeout is a safety net, not a precondition.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let mut line = String::new();
             std::io::BufReader::new(stream)
                 .read_line(&mut line)
@@ -518,7 +541,14 @@ sys.exit(1 if mode in ('warning', 'legacy-warning') else 0)
             assert!(task.join().unwrap().is_err());
             assert!(started.elapsed() < Duration::from_secs(2));
             assert!(!flow.has_callback_listener());
-            assert!(std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok());
+            drop(_peer);
+            let next = client.begin("openai", None).unwrap();
+            next.start().unwrap();
+            assert!(
+                next.has_callback_listener(),
+                "the next login must reclaim the port"
+            );
+            next.cancel().unwrap();
         }
     }
 

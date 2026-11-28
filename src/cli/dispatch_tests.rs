@@ -1,6 +1,54 @@
 use super::*;
 use crate::transport::Listener;
 
+/// A CLI started from an agent shell inherits the daemon's private handoff
+/// variables. `rollout` is not the image a reload handed off to, so it must
+/// ignore them instead of rejecting the intent with "executing image does not
+/// match inherited immutable runtime target".
+#[test]
+fn cli_invocation_ignores_inherited_runtime_target() {
+    use clap::Parser as _;
+    let _lock = crate::storage::lock_test_env();
+    let keys = [
+        "JCODE_RUNTIME_TARGET",
+        "JCODE_RUNTIME_RELOAD_ID",
+        "JCODE_RUNTIME_GENERATION",
+    ];
+    let previous: Vec<_> = keys.iter().map(std::env::var_os).collect();
+    let foreign = serde_json::json!({
+        "binary_path": "/nonexistent/versions/old/jcode",
+        "git_hash": "oldhash123",
+        "version_label": "old",
+        "file_identity": { "device": 1, "inode": 2, "length": 3, "modified_ns": 4 },
+        "payload_identity": null,
+    });
+    crate::env::set_var("JCODE_RUNTIME_TARGET", foreign.to_string());
+    crate::env::set_var("JCODE_RUNTIME_RELOAD_ID", "reload-foreign");
+    crate::env::set_var("JCODE_RUNTIME_GENERATION", "5");
+    let args = Args::try_parse_from(["jcode", "rollout", "--status"]).unwrap();
+
+    adopt_runtime_handoff_env(args.command.as_ref());
+
+    for key in keys {
+        assert!(
+            std::env::var_os(key).is_none(),
+            "{key} must not reach anything this CLI spawns"
+        );
+    }
+    // The path every rollout intent and unknown-generation warning reads.
+    let identity = crate::build::runtime_generation::serving_identity(jcode_build_meta::git_hash())
+        .expect("a foreign inherited target must not make this CLI unidentifiable");
+    let executing = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    assert_eq!(identity.binary_path, executing);
+
+    for (key, value) in keys.iter().zip(previous) {
+        match value {
+            Some(value) => crate::env::set_var(key, value),
+            None => crate::env::remove_var(key),
+        }
+    }
+}
+
 #[test]
 fn only_file_controlled_debug_clients_need_parent_lifetime_binding() {
     let _lock = crate::storage::lock_test_env();
@@ -37,6 +85,38 @@ fn auth_doctor_provider_focus_uses_global_provider_when_positional_is_absent() {
         auth_doctor_provider_arg(None, &ProviderChoice::Auto),
         None,
         "auto should keep the default doctor behavior of checking configured providers"
+    );
+}
+
+#[test]
+fn client_initial_model_spec_formats_provider_and_model_for_running_server() {
+    assert_eq!(
+        client_initial_model_spec(
+            &ProviderChoice::Openrouter,
+            Some("thinkingmachines/inkling-2-mini"),
+            None,
+        ),
+        Some("openrouter:thinkingmachines/inkling-2-mini".to_string())
+    );
+    assert_eq!(
+        client_initial_model_spec(&ProviderChoice::Auto, Some("gpt-5.4"), None),
+        Some("gpt-5.4".to_string())
+    );
+    assert_eq!(
+        client_initial_model_spec(
+            &ProviderChoice::Openrouter,
+            Some("openrouter:thinkingmachines/inkling-2-mini"),
+            None,
+        ),
+        Some("openrouter:thinkingmachines/inkling-2-mini".to_string())
+    );
+    assert_eq!(
+        client_initial_model_spec(&ProviderChoice::Auto, Some("my-model"), Some("my-profile")),
+        Some("my-profile:my-model".to_string())
+    );
+    assert_eq!(
+        client_initial_model_spec(&ProviderChoice::Openrouter, None, None),
+        None
     );
 }
 
@@ -196,7 +276,7 @@ fn resolve_resume_id_imports_raw_codex_session_ids() {
     assert_eq!(resolved, imported_id);
 
     let session = crate::session::Session::load(&resolved).expect("load imported session");
-    assert_eq!(session.messages.len(), 2);
+    assert_eq!(session.message_count(), 2);
 
     crate::env::remove_var("JCODE_HOME");
 }
@@ -245,7 +325,8 @@ async fn wait_for_existing_reload_server_uses_reloading_server_instead_of_spawni
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let bind_task = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let listener = Listener::bind(&bind_path).expect("bind replacement listener");
+        let listener =
+            crate::cli::test_support::reload_identity_listener(&bind_path, "reload-test");
         crate::server::write_reload_state(
             "reload-test",
             "hash",
@@ -332,10 +413,17 @@ async fn wait_for_reloading_server_returns_false_when_reload_failed() {
 }
 
 #[tokio::test]
-async fn wait_for_reloading_server_returns_true_for_live_listener() {
+async fn wait_for_reloading_server_returns_true_for_confirmed_generation() {
     let _guard = crate::storage::lock_test_env();
     let env = ReloadTestEnv::new();
-    let _listener = Listener::bind(&env.socket_path).expect("bind listener");
+    crate::server::write_reload_state(
+        "reload-test",
+        "abcdef123",
+        crate::server::ReloadPhase::SocketReady,
+        None,
+    );
+    let _listener =
+        crate::cli::test_support::reload_identity_listener(&env.socket_path, "reload-test");
 
     assert!(wait_for_reloading_server().await);
 }

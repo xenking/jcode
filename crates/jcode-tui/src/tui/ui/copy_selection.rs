@@ -1,10 +1,10 @@
 use unicode_width::UnicodeWidthStr;
 
+use super::copy_snapshot::{CopyViewportData, CopyViewportSnapshot};
 use super::display_width::{
     clamp_display_col, display_col_slice, display_col_slice_copy, line_display_width,
 };
 use super::url_regex_support::link_target_for_display_column;
-use super::{CopyViewportData, CopyViewportSnapshot};
 
 pub(super) fn copy_point_from_snapshot(
     snapshot: &CopyViewportSnapshot,
@@ -213,10 +213,11 @@ fn frame_chrome_for_selection(
 }
 
 fn frame_chrome_at(chrome: &[(usize, FrameChrome)], raw_line: usize) -> Option<FrameChrome> {
-    chrome
-        .binary_search_by_key(&raw_line, |(raw, _)| *raw)
-        .ok()
-        .map(|idx| chrome[idx].1)
+    match chrome.binary_search_by_key(&raw_line, |(raw, _)| *raw) {
+        Ok(index) => Some(chrome[index].1),
+        // A missing chrome row is ordinary content, not a lookup failure.
+        Err(_) => None,
+    }
 }
 
 fn copy_selection_text_from_raw_lines_base(

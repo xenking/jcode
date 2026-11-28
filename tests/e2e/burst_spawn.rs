@@ -205,7 +205,10 @@ async fn run_burst_resume_attach_stress(burst_size: usize) -> Result<()> {
             None,
             Some(format!("Burst Attach {idx}")),
         );
-        session.model = Some("burst-model".to_string());
+        session.apply_route(jcode::session::Route {
+            model: Some("burst-model".to_string()),
+            ..session.route()
+        });
         session.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -221,7 +224,7 @@ async fn run_burst_resume_attach_stress(burst_size: usize) -> Result<()> {
             }],
         );
         session.save()?;
-        expected_session_ids.push(session.id);
+        expected_session_ids.push(session.id().to_owned());
     }
 
     let provider = Arc::new(MockProvider::with_models(vec!["burst-model"]));
@@ -422,7 +425,10 @@ async fn burst_retry_takeover_without_local_history_keeps_existing_live_clients_
             None,
             Some(format!("Live Attach {idx}")),
         );
-        session.model = Some("burst-model".to_string());
+        session.apply_route(jcode::session::Route {
+            model: Some("burst-model".to_string()),
+            ..session.route()
+        });
         session.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -438,7 +444,7 @@ async fn burst_retry_takeover_without_local_history_keeps_existing_live_clients_
             }],
         );
         session.save()?;
-        live_session_ids.push(session.id);
+        live_session_ids.push(session.id().to_owned());
     }
 
     let provider = Arc::new(MockProvider::with_models(vec!["burst-model"]));
@@ -595,7 +601,10 @@ async fn burst_attach_detach_reattach_restores_live_clients_cleanly() -> Result<
             None,
             Some(format!("Burst Reattach {idx}")),
         );
-        session.model = Some("burst-model".to_string());
+        session.apply_route(jcode::session::Route {
+            model: Some("burst-model".to_string()),
+            ..session.route()
+        });
         session.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -611,7 +620,7 @@ async fn burst_attach_detach_reattach_restores_live_clients_cleanly() -> Result<
             }],
         );
         session.save()?;
-        session_ids.push(session.id);
+        session_ids.push(session.id().to_owned());
     }
 
     let provider = Arc::new(MockProvider::with_models(vec!["burst-model"]));

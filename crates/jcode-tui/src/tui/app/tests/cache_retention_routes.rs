@@ -74,7 +74,10 @@ fn cache_timer_openai_routes_distinguish_api_oauth_and_unknown() {
         (None, Some("openai-oauth"), "openai-oauth", false),
     ] {
         app.remote_resolved_credential = credential;
-        app.session.route_api_method = route.map(str::to_string);
+        app.session.apply_route(crate::session::Route {
+            route_api_method: route.map(str::to_string),
+            ..app.session.route()
+        });
         assert_eq!(app.kv_cache_provider_name(), identity);
         app.begin_kv_cache_request(&[Message::user("first")], &[], "system", "");
         app.streaming.streaming_input_tokens = 42_000;
@@ -193,6 +196,7 @@ fn cache_warning_does_not_leak_anthropic_expiry_into_openai_route() {
         session_id: app.kv_cache_session_id(),
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
+        read_tokens: None,
         completed_at: Instant::now() - Duration::from_secs(3700),
         utc_day: 0,
         cache_ttl_secs: Some(3600),
@@ -222,6 +226,7 @@ fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
         session_id: app.kv_cache_session_id(),
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
+        read_tokens: None,
         completed_at: Instant::now(),
         utc_day: 0,
         cache_ttl_secs: Some(1800),
@@ -257,4 +262,50 @@ fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
     app.streaming.streaming_cache_read_tokens = Some(0);
     assert!(record_reported_test_cache_usage(&mut app));
     assert_eq!(app.kv_cache.kv_cache_miss_samples.len(), 1);
+}
+#[test]
+fn cold_cache_notice_does_not_advertise_the_old_prompt_as_outgoing() {
+    let mut config = crate::config::CompactionConfig {
+        snapcompact: true,
+        snapcompact_cache_expiry: true,
+        cache_expiry_threshold_tokens: 200_000,
+        ..Default::default()
+    };
+    for trigger in [
+        ColdCacheWarningTrigger::IdleExpiry,
+        ColdCacheWarningTrigger::RequestStart,
+    ] {
+        let text = App::cold_cache_warning_text(&config, trigger, 433_000, 10);
+        assert!(text.contains("shrink before"), "{text}");
+        assert!(!text.contains("resend") && !text.contains("433K"), "{text}");
+        assert_eq!(text.lines().count(), 1);
+    }
+    config.snapcompact_cache_expiry = false;
+    assert!(
+        App::cold_cache_warning_text(&config, ColdCacheWarningTrigger::IdleExpiry, 433_000, 0)
+            .contains("resend ~433K")
+    );
+    config.snapcompact_cache_expiry = true;
+    config.cache_expiry_threshold_tokens = 0;
+    assert!(
+        App::cold_cache_warning_text(&config, ColdCacheWarningTrigger::IdleExpiry, 433_000, 0)
+            .contains("resend ~433K")
+    );
+}
+
+#[test]
+fn cold_cache_actual_reduction_is_durable_and_deduplicated() {
+    let mut app = create_test_app();
+    app.display_messages.push(DisplayMessage::user("next turn"));
+    let measured = "🧊 Cache cold · reduced ~433K → ~60K tok before sending";
+    app.apply_status_detail(measured.into());
+    app.apply_status_detail("provider connected".into());
+    app.apply_status_detail(measured.into());
+    assert_eq!(
+        app.display_messages
+            .iter()
+            .filter(|m| m.role == "system" && m.content == measured)
+            .count(),
+        1
+    );
 }

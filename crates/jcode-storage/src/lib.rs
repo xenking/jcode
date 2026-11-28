@@ -79,6 +79,8 @@ static SECRET_HARDEN_STATE: LazyLock<Mutex<SecretHardenState>> =
     LazyLock::new(|| Mutex::new(SecretHardenState::default()));
 
 mod active_pids;
+#[cfg(any(test, feature = "test-support"))]
+mod test_home;
 pub use active_pids::{
     SessionCounts, SessionPresence, StreamingGuard, active_pids_dir, active_session_ids,
     find_active_session_id_by_pid, internal_pids_dir, mark_streaming, prune_active_pids_owned_by,
@@ -86,11 +88,13 @@ pub use active_pids::{
     set_session_internal, streaming_pids_dir, streaming_session_ids, unmark_streaming,
     unregister_active_pid, user_session_counts, user_session_presence,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use test_home::{isolated_test_home, isolated_test_runtime_dir};
 
 mod session_lease;
 pub use session_lease::{
-    SessionLease, SessionLeaseBlock, read_session_lease, remove_session_lease, session_lease_block,
-    session_leases_dir, write_session_lease,
+    GroupReturnCommit, SessionLease, SessionLeaseBlock, read_session_lease, remove_session_lease,
+    session_lease_block, session_leases_dir, write_session_lease,
 };
 
 /// Serialize this crate's tests that mutate `JCODE_HOME`.
@@ -103,19 +107,49 @@ pub(crate) fn test_jcode_home_lock() -> std::sync::MutexGuard<'static, ()> {
 /// Platform-aware runtime directory for sockets and ephemeral state.
 ///
 /// - Linux: `$XDG_RUNTIME_DIR` (typically `/run/user/<uid>`)
-/// - macOS: `$TMPDIR` (per-user, e.g. `/var/folders/xx/.../T/`)
+/// - macOS: the per-user Darwin temp dir (`confstr(_CS_DARWIN_USER_TEMP_DIR)`,
+///   e.g. `/var/folders/xx/.../T/`). Not `$TMPDIR`: jcode points tool
+///   subprocesses' `TMPDIR` at a scratch dir, and launchd agents may set their
+///   own, so `$TMPDIR` would split one user into several daemons.
 /// - Fallback: `std::env::temp_dir()`
 ///
-/// Can be overridden with `$JCODE_RUNTIME_DIR`.
+/// Can be overridden with `$JCODE_RUNTIME_DIR`. A test build with no override
+/// gets [`isolated_test_runtime_dir`], never the machine's real one.
 pub fn runtime_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("JCODE_RUNTIME_DIR") {
         return PathBuf::from(dir);
+    }
+    user_runtime_dir()
+}
+
+/// Where the shared jcode daemon listens: `$JCODE_SOCKET`, else `jcode.sock`
+/// in the runtime dir.
+pub fn socket_path() -> PathBuf {
+    if let Ok(custom) = std::env::var("JCODE_SOCKET") {
+        return PathBuf::from(custom);
+    }
+    default_socket_path()
+}
+
+/// The shared-daemon socket for this runtime dir, ignoring any
+/// `--socket`/`JCODE_SOCKET` override.
+pub fn default_socket_path() -> PathBuf {
+    runtime_dir().join("jcode.sock")
+}
+
+/// Default runtime directory, independent of daemon-specific overrides.
+pub fn user_runtime_dir() -> PathBuf {
+    if let Some(dir) = test_runtime_dir() {
+        return dir;
     }
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir);
     }
     #[cfg(target_os = "macos")]
     {
+        if let Some(dir) = darwin_user_temp_dir() {
+            return dir;
+        }
         if let Ok(dir) = std::env::var("TMPDIR") {
             return PathBuf::from(dir);
         }
@@ -124,6 +158,44 @@ pub fn runtime_dir() -> PathBuf {
     let dir = fallback_runtime_dir();
     ensure_private_runtime_dir(&dir);
     dir
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_runtime_dir() -> Option<PathBuf> {
+    Some(isolated_test_runtime_dir().to_path_buf())
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn test_runtime_dir() -> Option<PathBuf> {
+    None
+}
+
+/// The Darwin per-user temp dir is fixed for the life of the process, while
+/// `runtime_dir()` is called for every durable-state path. Resolve it once:
+/// a reconnect storm otherwise spends most daemon CPU on `confstr` + `stat`.
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    static RESOLVED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(dir) = RESOLVED.get() {
+        return Some(dir.clone());
+    }
+    // A missing dir is not cached: it may be created later.
+    let dir = resolve_darwin_user_temp_dir()?;
+    Some(RESOLVED.get_or_init(|| dir).clone())
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_darwin_user_temp_dir() -> Option<PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0 as libc::c_char; libc::PATH_MAX as usize];
+    let len = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr(), buf.len()) };
+    if len == 0 || len > buf.len() {
+        return None;
+    }
+    let path = unsafe { CStr::from_ptr(buf.as_ptr()) };
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes()));
+    path.is_dir().then_some(path)
 }
 
 fn fallback_runtime_dir() -> PathBuf {
@@ -160,13 +232,26 @@ fn ensure_private_runtime_dir(path: &Path) {
     }
 }
 
+/// Resolve `~/.jcode`. A test build never resolves the developer's real one:
+/// with `JCODE_HOME` unset it gets [`isolated_test_home`]. Every caller below
+/// the `jcode-base` wrapper (active_pids, sessions, ...) shares this rule, so a
+/// test guard that restores `JCODE_HOME` to unset cannot send them home.
 pub fn jcode_dir() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("JCODE_HOME") {
         return Ok(PathBuf::from(path));
     }
-
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
-    Ok(home.join(".jcode"))
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(pinned) = std::env::var_os("JCODE_TEST_ISOLATED_HOME") {
+        // A child-process test that needs a specific home pins it here.
+        return Ok(PathBuf::from(pinned));
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    return Ok(isolated_test_home().to_path_buf());
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
+        Ok(home.join(".jcode"))
+    }
 }
 
 /// Whether `JCODE_HOME` redirects this process away from the user's real
@@ -516,18 +601,35 @@ pub fn upsert_env_file_value(path: &Path, env_key: &str, value: Option<&str>) ->
 }
 
 pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, true, false)
+    write_json_inner(path, value, true, false, true)
 }
 
 pub fn write_json_secret<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, true, true)
+    write_json_inner(path, value, true, true, true)
+}
+
+/// Durable secret JSON sidecar with a backup named by appending .bak to the
+/// complete filename, so sibling files cannot share a backup.
+pub fn write_json_secret_sidecar<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    let backup = path.with_added_extension("bak");
+    write_json_with_backup(path, value, true, true, Some(&backup))
 }
 
 /// Fast JSON write: atomic rename but no fsync. Good for frequent saves where
 /// durability on power loss is not critical (e.g., session saves during tool execution).
 /// Data is still safe against process crashes (atomic rename protects against partial writes).
 pub fn write_json_fast<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, false, false)
+    write_json_inner(path, value, false, false, true)
+}
+
+/// Atomically replace regenerable JSON without syncing or keeping a backup.
+pub fn write_json_cache<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    write_json_inner(path, value, false, false, false)
+}
+
+/// Like write_json_cache, but protect account-scoped data with owner-only permissions.
+pub fn write_json_secret_cache<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    write_json_inner(path, value, false, true, false)
 }
 
 /// Atomically write raw bytes to `path` (temp file + rename), fsync'd for
@@ -537,23 +639,42 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     write_bytes_inner(path, bytes, true, false)
 }
 
+/// Refresh a throttle marker's mtime. A non-empty payload forces a write even
+/// on filesystems where reopening an already empty file does not update mtime.
+pub fn touch_stamp(path: &Path) -> std::io::Result<()> {
+    std::fs::write(path, b"1")
+}
+
 fn write_json_inner<T: Serialize + ?Sized>(
     path: &Path,
     value: &T,
     durable: bool,
     secret: bool,
+    keep_backup: bool,
+) -> Result<()> {
+    let backup = keep_backup.then(|| path.with_extension("bak"));
+    write_json_with_backup(path, value, durable, secret, backup.as_deref())
+}
+
+fn write_json_with_backup<T: Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+    durable: bool,
+    secret: bool,
+    backup: Option<&Path>,
 ) -> Result<()> {
     // Serialize directly into the atomic temporary file. Materializing the
     // entire JSON document first duplicates large transcripts and picker indexes
     // on every save and leaves those transient allocations in allocator arenas.
-    write_atomic_inner(path, durable, secret, |writer| {
+    write_atomic_inner(path, durable, secret, backup, |writer| {
         serde_json::to_writer(writer, value)?;
         Ok(())
     })
 }
 
 fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool, secret: bool) -> Result<()> {
-    write_atomic_inner(path, durable, secret, |writer| {
+    let backup = path.with_extension("bak");
+    write_atomic_inner(path, durable, secret, Some(&backup), |writer| {
         writer.write_all(bytes)?;
         Ok(())
     })
@@ -563,6 +684,7 @@ fn write_atomic_inner(
     path: &Path,
     durable: bool,
     secret: bool,
+    backup: Option<&Path>,
     write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<()>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -595,8 +717,7 @@ fn write_atomic_inner(
             file.sync_all()?;
         }
 
-        if path.exists() {
-            let bak_path = path.with_extension("bak");
+        if let Some(bak_path) = backup.filter(|_| path.exists()) {
             if secret {
                 jcode_core::fs::set_permissions_owner_only(path)?;
             }
@@ -610,19 +731,19 @@ fn write_atomic_inner(
             // self-dev build requests "disappearing" from the queue.)
             #[cfg(unix)]
             {
-                let _ = std::fs::remove_file(&bak_path);
-                let _ = std::fs::hard_link(path, &bak_path);
+                let _ = std::fs::remove_file(bak_path);
+                let _ = std::fs::hard_link(path, bak_path);
             }
             // On Windows, rename fails when the destination exists, so the
             // primary must be moved away first; the brief missing window is
             // unavoidable without platform-specific replace APIs.
             #[cfg(not(unix))]
             {
-                let _ = std::fs::remove_file(&bak_path);
-                let _ = std::fs::rename(path, &bak_path);
+                let _ = std::fs::remove_file(bak_path);
+                let _ = std::fs::rename(path, bak_path);
             }
             if secret && bak_path.exists() {
-                jcode_core::fs::set_permissions_owner_only(&bak_path)?;
+                jcode_core::fs::set_permissions_owner_only(bak_path)?;
             }
         }
 
@@ -663,7 +784,16 @@ pub enum StorageRecoveryEvent<'a> {
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    read_json_with_recovery_handler(path, |event| match event {
+    read_json_with_logged_recovery(path, &path.with_extension("bak"))
+}
+
+/// Read a sidecar written by write_json_secret_sidecar, using only its own backup.
+pub fn read_json_sidecar<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    read_json_with_logged_recovery(path, &path.with_added_extension("bak"))
+}
+
+fn read_json_with_logged_recovery<T: DeserializeOwned>(path: &Path, backup: &Path) -> Result<T> {
+    read_json_at(path, backup, |event| match event {
         StorageRecoveryEvent::CorruptPrimary { path, error } => {
             eprintln!(
                 "Corrupt JSON at {}, trying backup: {}",
@@ -677,7 +807,15 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     })
 }
 
-pub fn read_json_with_recovery_handler<T, F>(path: &Path, mut on_recovery: F) -> Result<T>
+pub fn read_json_with_recovery_handler<T, F>(path: &Path, on_recovery: F) -> Result<T>
+where
+    T: DeserializeOwned,
+    F: FnMut(StorageRecoveryEvent<'_>),
+{
+    read_json_at(path, &path.with_extension("bak"), on_recovery)
+}
+
+fn read_json_at<T, F>(path: &Path, backup: &Path, mut on_recovery: F) -> Result<T>
 where
     T: DeserializeOwned,
     F: FnMut(StorageRecoveryEvent<'_>),
@@ -686,16 +824,15 @@ where
     match serde_json::from_str(&data) {
         Ok(val) => Ok(val),
         Err(e) => {
-            let bak_path = path.with_extension("bak");
-            if bak_path.exists() {
+            if backup.exists() {
                 on_recovery(StorageRecoveryEvent::CorruptPrimary { path, error: &e });
-                let bak_data = std::fs::read_to_string(&bak_path)?;
+                let bak_data = std::fs::read_to_string(backup)?;
                 match serde_json::from_str(&bak_data) {
                     Ok(val) => {
                         on_recovery(StorageRecoveryEvent::RecoveredFromBackup {
-                            backup_path: &bak_path,
+                            backup_path: backup,
                         });
-                        let _ = std::fs::copy(&bak_path, path);
+                        let _ = std::fs::copy(backup, path);
                         Ok(val)
                     }
                     Err(bak_err) => Err(anyhow::anyhow!(
@@ -817,6 +954,35 @@ mod env_file_tests {
         assert_eq!(
             std::fs::read_to_string(&path).expect("unchanged env"),
             "SAFE_KEY=safe-value\n"
+        );
+    }
+
+    #[test]
+    fn touch_stamp_writes_non_empty_payload_and_updates_mtime() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let marker = temp.path().join("throttle.stamp");
+
+        touch_stamp(&marker).expect("touch stamp");
+        let data = std::fs::read(&marker).expect("read stamp");
+        assert!(!data.is_empty(), "stamp payload must be non-empty");
+
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .and_then(|file| file.set_modified(past))
+            .expect("backdate stamp");
+        let old_mtime = std::fs::metadata(&marker)
+            .and_then(|meta| meta.modified())
+            .expect("old mtime");
+
+        touch_stamp(&marker).expect("re-touch stamp");
+        let new_mtime = std::fs::metadata(&marker)
+            .and_then(|meta| meta.modified())
+            .expect("new mtime");
+        assert!(
+            new_mtime > old_mtime,
+            "expected mtime to advance after touch_stamp (old={old_mtime:?}, new={new_mtime:?})"
         );
     }
 }

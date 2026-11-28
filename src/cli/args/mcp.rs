@@ -26,6 +26,32 @@ pub(crate) enum McpCommand {
         /// Server name from the merged MCP configuration
         server: String,
     },
+    /// Show, grant or revoke the MCP tools that run without asking a human
+    Approvals {
+        /// Print machine-readable output
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<ApprovalsCommand>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ApprovalsCommand {
+    /// Always allow one tool, or every tool of the server when no tool is given
+    Allow {
+        /// Server name from the merged MCP configuration
+        server: String,
+        /// Raw tool name as the server lists it
+        tool: Option<String>,
+    },
+    /// Remove one tool's grant, or every grant of the server when no tool is given
+    Revoke {
+        /// Server name from the merged MCP configuration
+        server: String,
+        /// Raw tool name as the server lists it
+        tool: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -61,6 +87,30 @@ mod tests {
         assert!(
             matches!(args.command, Some(Command::Mcp { action: McpCommand::Test { server } }) if server == "remote")
         );
+    }
+
+    #[test]
+    fn mcp_approvals_parses_listing_allow_and_revoke() {
+        let parse = |argv: &[&str]| {
+            let mut full = vec!["jcode", "mcp", "approvals"];
+            full.extend_from_slice(argv);
+            match Args::try_parse_from(full).unwrap().command {
+                Some(Command::Mcp {
+                    action: McpCommand::Approvals { json, action },
+                }) => (json, action),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(matches!(parse(&["--json"]), (true, None)));
+        assert!(matches!(parse(&[]), (false, None)));
+        assert!(matches!(
+            parse(&["revoke", "gated", "plan_item"]),
+            (false, Some(ApprovalsCommand::Revoke { server, tool: Some(tool) })) if server == "gated" && tool == "plan_item"
+        ));
+        assert!(matches!(
+            parse(&["allow", "gated"]),
+            (false, Some(ApprovalsCommand::Allow { server, tool: None })) if server == "gated"
+        ));
     }
 
     #[test]

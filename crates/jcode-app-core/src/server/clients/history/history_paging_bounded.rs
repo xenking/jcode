@@ -1,0 +1,235 @@
+//! Byte-bounded backward transcript fragments. Each fragment is a slice of one
+//! JSON record. The opaque cursor validates the boundary against rewind/edits.
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::hash::{Hash, Hasher};
+
+pub(super) const LAZY_IMAGE_PREFIX: &str = "jcode-lazy:";
+
+pub(super) fn image_key(data: &str) -> String {
+    format!("{:x}", Sha256::digest(data.as_bytes()))
+}
+
+/// Every record contains one rendered row and only metadata for its images.
+/// Image bytes never enter a history response, even for the initial tail.
+pub(super) fn records(session: &crate::session::Session) -> Result<Vec<String>, String> {
+    let (messages, images, _, image_ids) =
+        crate::session::render_messages_and_images_with_ids(session, usize::MAX);
+    let mut image_rows = vec![Vec::new(); messages.len().max(1)];
+    let user_indices: Vec<_> = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| (m.role == "user").then_some(i))
+        .collect();
+    for (mut image, image_id) in images.into_iter().zip(image_ids) {
+        let index = if let Some(boundary) = image.history_message_index {
+            let index = boundary.min(image_rows.len() - 1);
+            image.history_message_index = Some(boundary.saturating_sub(index));
+            index
+        } else {
+            match &mut image.anchor {
+                Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal }) => user_indices
+                    .get(*ordinal)
+                    .copied()
+                    .unwrap_or(image_rows.len() - 1),
+                Some(crate::session::RenderedImageAnchor::ToolCall { id }) => messages
+                    .iter()
+                    .position(|m| m.tool_data.as_ref().is_some_and(|tool| &tool.id == id))
+                    .unwrap_or(image_rows.len() - 1),
+                None => image_rows.len() - 1,
+            }
+        };
+        if let Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal }) = &mut image.anchor
+        {
+            *ordinal = ordinal
+                .saturating_sub(user_indices.partition_point(|user_index| *user_index < index));
+        }
+        image.data = format!("{LAZY_IMAGE_PREFIX}{image_id}");
+        image_rows[index].push(image);
+    }
+    let mut records = Vec::with_capacity(image_rows.len());
+    let mut prompt_offset = 0usize;
+    for (index, message) in messages.into_iter().enumerate() {
+        let text = message.content.trim();
+        // Match Desktop's numbered user turns, including completed ask decisions.
+        let is_prompt = (message.role == "tool"
+            && message
+                .tool_data
+                .as_ref()
+                .is_some_and(|tool| jcode_session_types::is_ask_tool(&tool.name))
+            && jcode_session_types::AskRecord::resolve(message.ask.as_deref(), text).is_some())
+            || (message.role == "user"
+                && !text.is_empty()
+                && !crate::todo::is_auto_poke_message(text)
+                && ![
+                    "**Background task** `",
+                    "**Background task started** `",
+                    "**Background task progress** `",
+                    "**Background task stalled** `",
+                ]
+                .iter()
+                .any(|prefix| text.starts_with(prefix)));
+        #[derive(Serialize)]
+        struct PagedTool {
+            id: String,
+            name: String,
+            input: serde_json::Value,
+            duration_ms: Option<u64>,
+            #[serde(flatten, skip_serializing_if = "Option::is_none")]
+            codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+        }
+        let tool = (message.role == "tool")
+            .then_some(message.tool_data)
+            .flatten()
+            .map(|tool| PagedTool {
+                id: tool.id,
+                name: tool.name,
+                input: tool.input,
+                duration_ms: message.tool_duration_ms,
+                codemode: message.codemode,
+            });
+        records.push(serde_json::json!({
+            "message": { "role": message.role, "content": message.content,
+                "timestamp_ms": message.timestamp_ms, "response_stats": message.response_stats, "tool": tool },
+            "images": std::mem::take(&mut image_rows[index]),
+            "prompt_offset": prompt_offset,
+        }).to_string());
+        prompt_offset += usize::from(is_prompt);
+    }
+    if records.is_empty() && !image_rows[0].is_empty() {
+        records.push(serde_json::json!({"message":{"role":"system","content":""}, "images":image_rows.remove(0)}).to_string());
+    }
+    Ok(records)
+}
+
+// JSON can expand each byte to six bytes when escaped. This keeps the entire
+// NDJSON frame under 4 MiB even for adversarial control characters.
+const MAX_RAW_BYTES: usize = 512 * 1024;
+const MAX_ROWS: usize = 128;
+
+#[derive(Debug, Serialize)]
+pub(super) struct Fragment {
+    pub index: usize,
+    pub start: usize,
+    pub total: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct Page {
+    pub fragments: Vec<Fragment>,
+    pub before: Option<String>,
+}
+
+fn fingerprint(s: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+fn cursor(index: usize, end: usize, row: &str) -> String {
+    format!("{index}:{end}:{:x}", fingerprint(row))
+}
+
+fn partial_cursor(index: usize, end: usize, row: &str, logical_index: usize) -> String {
+    if index == logical_index {
+        cursor(index, end, row)
+    } else {
+        format!("{}:{logical_index}", cursor(index, end, row))
+    }
+}
+
+pub(super) fn page_records(
+    rows: &[String],
+    before: Option<&str>,
+    limit: usize,
+) -> Result<Page, String> {
+    if rows.is_empty() {
+        if before.is_some() {
+            return Err("stale cursor".into());
+        }
+        return Ok(Page {
+            fragments: vec![],
+            before: None,
+        });
+    }
+    let (mut index, mut end, mut logical_index) = if let Some(before) = before {
+        let mut parts = before.split(':');
+        let index: usize = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or("invalid cursor")?;
+        let end: usize = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or("invalid cursor")?;
+        let hash = parts
+            .next()
+            .and_then(|s| u64::from_str_radix(s, 16).ok())
+            .ok_or("invalid cursor")?;
+        let logical_index = match parts.next() {
+            Some(value) => value.parse().map_err(|_| "invalid cursor")?,
+            None => index,
+        };
+        if parts.next().is_some() || end == 0 {
+            return Err("invalid cursor".into());
+        }
+        let matches = |row: &String| {
+            end <= row.len() && row.is_char_boundary(end) && fingerprint(row) == hash
+        };
+        let resolved = if rows.get(index).is_some_and(&matches) {
+            index
+        } else {
+            let mut found = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| matches(row))
+                .map(|(i, _)| i);
+            let candidate = found.next().ok_or("stale cursor")?;
+            if found.next().is_some() {
+                return Err("stale cursor".into());
+            }
+            candidate
+        };
+        (resolved, end, logical_index)
+    } else {
+        let index = rows.len() - 1;
+        (index, rows[index].len(), index)
+    };
+    let mut fragments = Vec::new();
+    let mut budget = MAX_RAW_BYTES;
+    let limit = limit.clamp(1, MAX_ROWS);
+    let before = loop {
+        let row = &rows[index];
+        if !fragments.is_empty() && end > budget {
+            break Some(partial_cursor(index, end, row, logical_index));
+        }
+        let mut start = end.saturating_sub(budget);
+        while start < end && !row.is_char_boundary(start) {
+            start += 1;
+        }
+        if start == end {
+            break Some(partial_cursor(index, end, row, logical_index));
+        }
+        fragments.push(Fragment {
+            index: logical_index,
+            start,
+            total: row.len(),
+            text: row[start..end].to_owned(),
+        });
+        budget -= end - start;
+        if start > 0 {
+            break Some(partial_cursor(index, start, row, logical_index));
+        }
+        if index == 0 {
+            break None;
+        }
+        index -= 1;
+        logical_index = index;
+        end = rows[index].len();
+        if budget < 4 || fragments.len() >= limit {
+            break Some(cursor(index, end, &rows[index]));
+        }
+    };
+    Ok(Page { fragments, before })
+}

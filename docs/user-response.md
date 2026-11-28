@@ -1,9 +1,9 @@
 # Desktop user responses
 
 `user_response` sends a user-visible Markdown answer inline in Jcode Desktop.
-The tool description instructs the model to use it for answers, explanations,
-and completion summaries, and not repeat that content in a normal assistant
-message. It does not open a panel, create an applet, or write a file.
+Use it for answers, explanations, and completion summaries. Do not repeat the
+content in a normal assistant message. It does not open a panel, create an
+applet, or write a file.
 
 ## Input and output
 
@@ -41,17 +41,15 @@ the original tool input, while the Markdown also enters the tool result.
 
 ## Client gating
 
-The tool is absent from the base registry. It is registered only for the bound
-agent when the client opts in using the existing Subscribe
+The base registry always includes the tool. Calling it requires at least one
+client attached to the same session that opted in with the Subscribe
 `supports_user_response: true` capability. The harness API bridge forwards
 the dedicated flag from the client's Hello handshake. Rust SDK Desktop clients
 set `ConnectOptions.supports_user_response` or
 `SshConnectOptions.supports_user_response` to true. PDF support does not imply
-response support. TUI, generic SDK clients, and old clients default to false. Repeated
-Subscribe snapshots and ResumeSession attachments update registration and
-invalidate the agent's locked tool catalog when the capability changes. Busy
-attachments defer the update until the running turn releases the agent lock,
-matching the existing deferred subscribe metadata pattern.
+response support. TUI, generic SDK clients, and old clients default to false.
+Attach, reconnect, and capability changes never rewrite the model's tool list.
+Without a compatible attached client, use a normal assistant message instead.
 
 ## Runtime delivery
 

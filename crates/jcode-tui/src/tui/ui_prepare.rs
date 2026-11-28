@@ -45,6 +45,43 @@ fn assistant_aux_cache() -> &'static std::sync::Mutex<AssistantAuxCacheState> {
     CACHE.get_or_init(|| std::sync::Mutex::new(AssistantAuxCacheState::default()))
 }
 
+pub(super) fn diagnostic_aux_profile<'a>(
+    values: impl Iterator<Item = (usize, usize, &'a Vec<String>)>,
+    order_entries_count: usize,
+) -> serde_json::Value {
+    let mut seen = std::collections::HashSet::new();
+    let mut entries_count = 0;
+    let mut bytes = 0;
+    for (pointer, inline_bytes, lines) in values {
+        entries_count += 1;
+        if seen.insert(pointer) {
+            bytes += 2 * std::mem::size_of::<usize>()
+                + inline_bytes
+                + (lines.iter().map(|value| value.capacity()).sum::<usize>()
+                    + lines.capacity() * std::mem::size_of::<String>());
+        }
+    }
+    serde_json::json!({"entries_count": entries_count, "unique_values_count": seen.len(),
+        "order_entries_count": order_entries_count, "unique_prepared_bytes": bytes})
+}
+
+/// Diagnostic-only snapshot of unique auxiliary payload allocations.
+pub(super) fn debug_assistant_aux_memory_profile() -> serde_json::Value {
+    let cache = assistant_aux_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    diagnostic_aux_profile(
+        cache.entries.values().map(|value| {
+            (
+                Arc::as_ptr(value) as usize,
+                std::mem::size_of::<AssistantAuxData>(),
+                &value.logical_plain_lines,
+            )
+        }),
+        cache.order.len(),
+    )
+}
+
 fn content_prefers_display_as_logical_lines(content: &str) -> bool {
     content.lines().any(|line| {
         let trimmed = line.trim();
@@ -118,7 +155,7 @@ fn default_message_alignment(role: &str, centered: bool) -> ratatui::layout::Ali
     if centered
         && !matches!(
             role,
-            "tool" | "system" | "swarm" | "background_task" | "overnight" | "todos"
+            "tool" | "system" | "swarm" | "background_task" | "overnight" | "todos" | "compaction"
         )
     {
         ratatui::layout::Alignment::Center
@@ -181,14 +218,7 @@ fn push_user_prompt_lines(
 ) {
     let prefix_width = unicode_width::UnicodeWidthStr::width(prompt_num.to_string().as_str())
         + unicode_width::UnicodeWidthStr::width("› ");
-    // Voice prompts carry <transcription> tags for the model. Show the spoken
-    // words with a mic marker instead, like Jcode Desktop.
-    let (visible, transcribed) = jcode_session_types::strip_transcription(content);
-    let content: &str = if transcribed {
-        &format!("🎙 {visible}")
-    } else {
-        content
-    };
+    // Callers supply already projected user-facing content.
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     for (line_idx, content_line) in normalized.split('\n').enumerate() {
         let raw_line = raw_plain_lines.len();
@@ -347,64 +377,6 @@ pub(super) fn active_batch_progress_hash(app: &dyn TuiState) -> u64 {
     hasher.finish()
 }
 
-fn swarm_members_signature(members: &[crate::protocol::SwarmMemberStatus]) -> u64 {
-    // Chat only renders a stable one-line identity/status summary. Excluding
-    // elapsed time, age, output tails, todos, tool progress, and runtime details
-    // prevents high-frequency live swarm updates from invalidating the entire
-    // transcript preparation cache.
-    let mut ordered: Vec<_> = members.iter().collect();
-    ordered.sort_by(|a, b| a.session_id.cmp(&b.session_id));
-    let mut hasher = DefaultHasher::new();
-    for member in ordered {
-        member.session_id.hash(&mut hasher);
-        member.friendly_name.hash(&mut hasher);
-        member.status.hash(&mut hasher);
-        member.task_label.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn spawned_member_for_tool<'a>(
-    msg: &DisplayMessage,
-    members: &'a [crate::protocol::SwarmMemberStatus],
-) -> Option<&'a crate::protocol::SwarmMemberStatus> {
-    let tool = msg.tool_data.as_ref()?;
-    if tools_ui::canonical_tool_name(&tool.name) != "swarm" {
-        return None;
-    }
-
-    // Live remote tool output is decorated as `[swarm] Spawned new agent: …`.
-    // The completed ToolCall can also lose its parsed input across a reload or
-    // event race, so the server-issued session ID is the authoritative signal.
-    let session_id = msg
-        .content
-        .lines()
-        .find_map(|line| line.split_once("Spawned new agent: ").map(|(_, id)| id))
-        .map(str::trim);
-    if let Some(member) = session_id.and_then(|session_id| {
-        members
-            .iter()
-            .find(|member| member.session_id == session_id)
-    }) {
-        return Some(member);
-    }
-
-    // The server may publish the member snapshot before or after the tool result,
-    // and older/reformatted tool results may not retain the exact session-id line.
-    // The spawn label is copied into `task_label`, so use a unique label match as
-    // a safe fallback. Requiring uniqueness prevents an old spawn row from
-    // adopting a newer worker when labels are reused.
-    if tool.input.get("action").and_then(|value| value.as_str()) != Some("spawn") {
-        return None;
-    }
-    let label = tool.input.get("label").and_then(|value| value.as_str())?;
-    let mut matching = members
-        .iter()
-        .filter(|member| member.task_label.as_deref() == Some(label));
-    let member = matching.next()?;
-    matching.next().is_none().then_some(member)
-}
-
 fn prepare_active_batch_progress(
     app: &dyn TuiState,
     width: u16,
@@ -537,7 +509,7 @@ pub(super) fn prepare_messages(
     // exact frame-cache hit can bypass the normal anchored-image resolver.
     let restage_start = Instant::now();
     super::inline_image_ui::restage_requested_payloads(app);
-    super::note_prep_restage(restage_start.elapsed());
+    super::record_prep_phase(super::PrepPhase::Restage, restage_start.elapsed());
     if prep_cache_bypassed() {
         return Arc::new(prepare_messages_inner(app, width, height));
     }
@@ -552,7 +524,7 @@ pub(super) fn prepare_messages(
         messages_version: app
             .display_messages_version()
             .wrapping_mul(2)
-            .wrapping_add(u64::from(crate::config::config().display.pin_todos))
+            .wrapping_add(todo_header_render_tag())
             .wrapping_mul(31)
             .wrapping_add(super::hash_text_for_cache(
                 app.pinned_todos_payload().unwrap_or(""),
@@ -562,7 +534,7 @@ pub(super) fn prepare_messages(
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
         is_processing: app.is_processing(),
         streaming_text_len: app.streaming_text().len(),
-        streaming_text_hash: super::hash_text_for_cache(app.streaming_text()),
+        streaming_text_hash: app.streaming_text_hash(),
         batch_progress_hash: active_batch_progress_hash(app),
         // An unpinned transcript must not reuse a previously prepared frame
         // containing anchored images. With no images, both modes are visually
@@ -574,8 +546,7 @@ pub(super) fn prepare_messages(
         },
         inline_images_visible: app.inline_images_visible(),
         expanded_images_version: app.expanded_images_version(),
-        swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
-        latex_rendering: crate::config::config().display.latex_rendering,
+        latex_rendering: crate::config::config().display.render_prefs().latex,
         show_link_urls: crate::config::config().display.show_link_urls,
     };
 
@@ -713,12 +684,12 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     // the body now; no separate retained/collapsing trace section exists.
     let reasoning_prepared = Arc::new(empty_prepared_messages());
     let has_streaming = app.is_processing() && !app.streaming_text().is_empty();
-    let stream_prefix_blank = has_streaming
-        && !(crate::config::config().display.compact_thinking
+    let stream_prefix_blank = !(!has_streaming
+        || (crate::config::config().display.compact_thinking
             && super::messages::starts_with_reasoning(app.streaming_text()))
-        && (!body_prepared.wrapped_lines.is_empty()
-            || !batch_progress_prepared.wrapped_lines.is_empty()
-            || !reasoning_prepared.wrapped_lines.is_empty());
+        || (body_prepared.wrapped_lines.is_empty()
+            && batch_progress_prepared.wrapped_lines.is_empty()
+            && reasoning_prepared.wrapped_lines.is_empty()));
     let streaming_prepared = if has_streaming {
         Arc::new(prepare_streaming_cached(app, width, stream_prefix_blank))
     } else {
@@ -984,6 +955,7 @@ fn header_prep_signature(app: &dyn TuiState, width: u16) -> u64 {
     app.server_display_icon().hash(&mut hasher);
     app.connection_type().hash(&mut hasher);
     app.upstream_provider().hash(&mut hasher);
+    app.routing_chip().hash(&mut hasher);
     app.is_replay().hash(&mut hasher);
     app.is_remote_mode().hash(&mut hasher);
     app.is_canary().hash(&mut hasher);
@@ -1060,7 +1032,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         messages_version: app
             .display_messages_version()
             .wrapping_mul(2)
-            .wrapping_add(u64::from(crate::config::config().display.pin_todos)),
+            .wrapping_add(todo_header_render_tag()),
         diagram_mode: app.diagram_mode(),
         centered: app.centered_mode(),
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
@@ -1068,8 +1040,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         inline_images_visible: app.inline_images_visible(),
         images_signature: app.side_pane_images_signature(),
         expanded_images_version: app.expanded_images_version(),
-        swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
-        latex_rendering: crate::config::config().display.latex_rendering,
+        latex_rendering: crate::config::config().display.render_prefs().latex,
         show_link_urls: crate::config::config().display.show_link_urls,
     };
     let msg_count = app.display_messages().len();
@@ -1138,1380 +1109,10 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
     prepared
 }
 
-/// Rebuild the body reusing as much of a cached base as possible. Tries, in
-/// order: exact reuse (identical messages), suffix reuse (older history was
-/// prepended above an otherwise unchanged transcript - the "scroll to top of a
-/// compacted session" path), and prefix reuse (append / tail edit). Falls back
-/// to re-rendering whatever cannot be reused.
-pub(super) fn build_body_from_base(
-    app: &dyn TuiState,
-    width: u16,
-    mut prev: Arc<PreparedMessages>,
-    mut prev_count: usize,
-    prev_prompt_offset: usize,
-    msg_count: usize,
-) -> (Arc<PreparedMessages>, &'static str) {
-    let messages = app.display_messages();
-    // A stale deferred-mermaid base (its background render finished after the
-    // base was built) must not be reused verbatim: cut it at the message that
-    // owns the first pending placeholder so that message and everything after
-    // it re-render and pick up the completed diagram.
-    if let Some(stamp) = prev.mermaid_pending_epoch
-        && crate::tui::mermaid::deferred_render_epoch() != stamp
-    {
-        match first_mermaid_pending_message(prev.as_ref()) {
-            Some(keep) if !prev.message_boundaries.is_empty() => {
-                let prepared = Arc::make_mut(&mut prev);
-                truncate_prepared_to_boundary(prepared, keep);
-                prepared.mermaid_pending_epoch = None;
-                prev_count = prepared.message_boundaries.len();
-            }
-            Some(_) => {
-                // No boundary tracking: cannot cut at the pending message.
-                return (Arc::new(prepare_body(app, width, false)), "full");
-            }
-            None => {
-                // Stamp outlived its placeholder (e.g. the pending tail was
-                // truncated away); clear it and reuse normally.
-                Arc::make_mut(&mut prev).mermaid_pending_epoch = None;
-            }
-        }
-    }
-    // The selected base shares this key's width/mode/image signature. Find the
-    // longest message prefix whose hashes still match the current transcript.
-    let k = matching_prefix_len(prev.as_ref(), messages);
-    if k == prev_count && prev_count == msg_count {
-        // Exact same messages (the body differs only by something not in the
-        // cache key, e.g. a width-independent flag); reuse as-is.
-        return (prev, "prefix_exact");
-    }
-
-    // Prepend (suffix) reuse: when older compacted history is loaded in, the
-    // new transcript is `new head + unchanged old messages`, so the prefix
-    // match above collapses (the compacted-history marker at index 0 changes
-    // every load) even though almost everything is reusable. Re-rendering the
-    // whole transcript per 64-message chunk made "scroll to the start of a
-    // long session" O(total transcript) per chunk - the issue #344 hang.
-    // Instead, when a message suffix still matches, render only the new head
-    // and stitch the prepared suffix below it.
-    let base_msgs = prev.message_boundaries.len();
-    let s = matching_suffix_len(prev.as_ref(), messages)
-        .min(base_msgs.saturating_sub(1))
-        .min(msg_count.saturating_sub(1));
-    if s > k {
-        let drop_msgs = base_msgs - s;
-        let head_count = msg_count - s;
-        if suffix_reuse_compatible(
-            app,
-            messages,
-            head_count,
-            prev.as_ref(),
-            drop_msgs,
-            prev_prompt_offset,
-        ) {
-            match prepare_body_prepended(app, width, prev, drop_msgs, head_count) {
-                Ok(stitched) => {
-                    super::note_body_incremental_reuse(s);
-                    return (stitched, "suffix_reuse");
-                }
-                Err(returned) => prev = returned,
-            }
-        }
-    }
-
-    // Prefix reuse: if the whole base matches it's a pure append
-    // (`k == prev_count`); otherwise the tail diverged (in-place edit,
-    // finalize, truncation) and we truncate the base to the matching prefix
-    // before re-rendering only the changed tail.
-    if k != prev_count {
-        truncate_prepared_to_boundary(Arc::make_mut(&mut prev), k);
-    }
-    super::note_body_incremental_reuse(k);
-    (
-        prepare_body_incremental(app, width, prev, k),
-        if k == prev_count {
-            "incremental"
-        } else {
-            "prefix_reuse"
-        },
-    )
-}
-
-/// Immutable per-build render context shared by the full and incremental body
-/// builders. Holding this in one place keeps the single per-message renderer
-/// (`render_message_into`) free of divergence between the two entry points.
-struct BodyRenderCtx<'a> {
-    app: Option<&'a dyn TuiState>,
-    diff_mode: crate::config::DiffDisplayMode,
-    width: u16,
-    centered: bool,
-    /// Number rendered next to the first user prompt = global prompt count +
-    /// number of prompts hidden by compaction.
-    prompt_number_offset: usize,
-    total_prompts: usize,
-    pending_count: usize,
-    anchored_images: Arc<super::inline_image_ui::AnchoredInlineImages>,
-    inline_images_visible: bool,
-    messages: &'a [DisplayMessage],
-    swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
-}
-
-/// Render saved history through the live dispatcher and wrapping pipeline.
-/// No active App is borrowed: expansion state, images and in-flight swarm work
-/// from the session behind the picker must never leak into this transcript.
-#[cfg(test)]
-pub(crate) fn prepare_history_preview(
-    messages: &[DisplayMessage],
-    hidden_prompts: usize,
-    width: u16,
-    diff_mode: crate::config::DiffDisplayMode,
-) -> PreparedMessages {
-    prepare_history_preview_bounded(messages, hidden_prompts, width, diff_mode, None)
-        .unwrap_or_else(|| preview_fallback::unavailable(width))
-}
-
-#[cfg(test)]
-#[path = "ui_prepare/preview_fallback.rs"]
-mod preview_fallback;
-
-/// Choose scrollbar width without fully rendering overflowing history twice.
-/// The budget excludes caller-owned header and padding rows. The flag is the
-/// wide layout's strict overflow decision, not a second narrow-layout decision.
-#[cfg(test)]
-pub(crate) fn prepare_history_preview_for_viewport(
-    messages: &[DisplayMessage],
-    hidden_prompts: usize,
-    wide_width: u16,
-    narrow_width: u16,
-    diff_mode: crate::config::DiffDisplayMode,
-    max_body_rows: usize,
-) -> (PreparedMessages, bool) {
-    if wide_width == narrow_width {
-        let prepared = prepare_history_preview(messages, hidden_prompts, wide_width, diff_mode);
-        let overflow = prepared.wrapped_lines.len() > max_body_rows;
-        return (prepared, overflow);
-    }
-    if let Some(wide) = prepare_history_preview_bounded(
-        messages,
-        hidden_prompts,
-        wide_width,
-        diff_mode,
-        Some(max_body_rows),
-    ) && wide.wrapped_lines.len() <= max_body_rows
-    {
-        return (wide, false);
-    }
-    (
-        prepare_history_preview(messages, hidden_prompts, narrow_width, diff_mode),
-        true,
-    )
-}
-
-#[cfg(test)]
-fn prepare_history_preview_bounded(
-    messages: &[DisplayMessage],
-    hidden_prompts: usize,
-    width: u16,
-    diff_mode: crate::config::DiffDisplayMode,
-    max_body_rows: Option<usize>,
-) -> Option<PreparedMessages> {
-    markdown::with_center_code_blocks(false, || {
-        let ctx = BodyRenderCtx {
-            app: None,
-            diff_mode,
-            width,
-            centered: false,
-            prompt_number_offset: hidden_prompts,
-            total_prompts: messages
-                .iter()
-                .filter(|msg| msg.effective_role() == "user")
-                .count(),
-            pending_count: 0,
-            anchored_images: Arc::new(Default::default()),
-            inline_images_visible: false,
-            messages,
-            swarm_members: Vec::new(),
-        };
-        let mut acc = BodyAcc::default();
-        for (idx, msg) in messages.iter().enumerate() {
-            render_message_into(&ctx, &mut acc, msg, idx);
-            // Wrapping preserves at least one row per input line, including
-            // blanks and zero-width viewports. Equality may still fit.
-            if max_body_rows.is_some_and(|budget| acc.lines.len() > budget) {
-                return None;
-            }
-        }
-        Some(wrap_lines_with_map(
-            acc.lines,
-            &acc.raw_plain_lines,
-            &acc.line_raw_overrides,
-            &acc.line_copy_offsets,
-            &acc.user_line_indices,
-            &acc.user_prompt_texts,
-            width,
-            &acc.edit_tool_line_ranges,
-            &acc.copy_targets,
-            &acc.segments,
-        ))
-    })
-}
-
-#[cfg(test)]
-#[path = "ui_prepare/viewport_preview_tests.rs"]
-mod viewport_preview_tests;
-
-/// Mutable accumulator for one body build. Both `prepare_body` (full) and
-/// `prepare_body_incremental` (tail only) push into one of these via the shared
-/// `render_message_into`, guaranteeing byte-identical per-message output and
-/// recording a per-message boundary table for prefix reuse.
-#[derive(Default)]
-struct BodyAcc {
-    lines: Vec<Line<'static>>,
-    raw_plain_lines: Vec<String>,
-    line_raw_overrides: Vec<Option<WrappedLineMap>>,
-    line_copy_offsets: Vec<usize>,
-    user_line_indices: Vec<usize>,
-    user_prompt_texts: Vec<String>,
-    edit_tool_line_ranges: Vec<(usize, String, usize, usize, bool)>,
-    copy_targets: Vec<RawCopyTarget>,
-    /// One entry per rendered message, in order: `(msg_hash, lines_len_after,
-    /// raw_len_after, user_prompt_len_after)`. `lines_len_after` counts any
-    /// separator blank pushed at the start of that message, so truncating the
-    /// wrapped body at a boundary cleanly drops the message together with its
-    /// leading blank. `raw_len_after` is the contiguous raw count, used to
-    /// truncate the raw array in lockstep.
-    segments: Vec<(u64, usize, usize, usize)>,
-    /// Next 1-based prompt number to assign. Seeded from the reused base in the
-    /// incremental path so numbering continues without rescanning the prefix.
-    prompt_num: usize,
-    /// 0-based ordinal of the next rendered user prompt excluding synthetic
-    /// attached-image label messages; mirrors the session renderer's count.
-    anchor_prompt_ordinal: usize,
-    /// True when a prior (reused) body already has content, so the first message
-    /// rendered here still gets its leading separator blank.
-    body_has_content: bool,
-}
-
-impl BodyAcc {
-    /// Push a fully-rendered display line whose raw selection text is the line
-    /// itself (no logical-line mapping). Seeds a contiguous raw entry and an
-    /// explicit full-width override so the body's `raw_plain_lines` stays
-    /// message-ordered. Keeping raws contiguous is what lets a tail-edit rebuild
-    /// truncate both the wrapped arrays *and* the raw array at a message
-    /// boundary, avoiding an unbounded raw leak across repeated tail edits (e.g.
-    /// a streaming tool result that updates many times).
-    fn push_auto(&mut self, line: Line<'static>) {
-        let raw_text = ui::line_plain_text(&line);
-        let raw_width = unicode_width::UnicodeWidthStr::width(raw_text.as_str());
-        let raw_line = self.raw_plain_lines.len();
-        self.raw_plain_lines.push(raw_text);
-        self.lines.push(line);
-        self.line_raw_overrides.push(Some(WrappedLineMap {
-            raw_line,
-            start_col: 0,
-            end_col: raw_width,
-        }));
-        self.line_copy_offsets.push(0);
-    }
-
-    /// Push a blank separator line. Routed through `push_auto` so it seeds a
-    /// (empty) raw and keeps the raw array contiguous.
-    fn push_blank(&mut self) {
-        self.push_auto(Line::from(""));
-    }
-}
-
-/// Render a single transcript message into `acc`. This is the one canonical
-/// per-message renderer; the full and incremental body builders both call it so
-/// their output cannot drift (which previously caused subtle text-selection and
-/// spacing differences on the incremental path).
-fn render_message_into(
-    ctx: &BodyRenderCtx<'_>,
-    acc: &mut BodyAcc,
-    msg: &DisplayMessage,
-    msg_global_idx: usize,
-) {
-    let width = ctx.width;
-    let centered = ctx.centered;
-    let diff_mode = ctx.diff_mode;
-    let role = msg.effective_role();
-    // The pinned band is the canonical todo presentation while enabled. Keep
-    // todo tool messages in display_messages for history/session fidelity, but
-    // omit their duplicate cards from the prepared transcript.
-    if role == "tool"
-        && crate::config::config().display.pin_todos
-        && msg
-            .tool_data
-            .as_ref()
-            .is_some_and(|tool| tools_ui::canonical_tool_name(&tool.name) == "todo")
-    {
-        // Hidden messages still occupy a position in the transcript cache.
-        // Without this zero-length boundary, incremental updates compare later
-        // messages against the wrong indices and can truncate earlier content.
-        acc.segments.push((
-            msg.stable_cache_hash(),
-            acc.lines.len(),
-            acc.raw_plain_lines.len(),
-            acc.user_prompt_texts.len(),
-        ));
-        return;
-    }
-    let align = default_message_alignment(role, centered);
-
-    if (acc.body_has_content || !acc.lines.is_empty())
-        && super::messages::needs_message_separator(msg)
-    {
-        acc.push_blank();
-    }
-
-    match role {
-        "user" => {
-            acc.prompt_num += 1;
-            acc.user_prompt_texts.push(msg.content.clone());
-            let distance = ctx.total_prompts + ctx.pending_count + 1 - acc.prompt_num;
-            let num_color = rainbow_prompt_color(distance);
-            let displayed_prompt_num = acc.prompt_num + ctx.prompt_number_offset;
-            push_user_prompt_lines(
-                &mut acc.lines,
-                &mut acc.raw_plain_lines,
-                &mut acc.line_raw_overrides,
-                &mut acc.line_copy_offsets,
-                &mut acc.user_line_indices,
-                displayed_prompt_num,
-                num_color,
-                &msg.content,
-                align,
-            );
-            if !crate::session::is_attached_image_label_text(&msg.content) {
-                let ordinal = acc.anchor_prompt_ordinal;
-                acc.anchor_prompt_ordinal += 1;
-                if let (Some(app), Some(items)) =
-                    (ctx.app, ctx.anchored_images.by_prompt.get(&ordinal))
-                {
-                    for line in super::inline_image_ui::anchored_image_lines(
-                        items,
-                        width,
-                        ctx.inline_images_visible,
-                        &super::inline_image_ui::AppExpandLevels(app),
-                    ) {
-                        acc.push_auto(line);
-                    }
-                }
-            }
-        }
-        "assistant" => {
-            let content_width = width.saturating_sub(4);
-            let cached =
-                get_cached_message_lines(msg, content_width, diff_mode, render_assistant_message);
-            let message_copy_targets = assistant_message_copy_targets(&msg.content, &cached);
-            for target in message_copy_targets {
-                acc.copy_targets
-                    .push(offset_copy_target(target, acc.lines.len()));
-            }
-            let aux = assistant_aux_data(msg, &cached, content_width, centered, diff_mode, align);
-            let content_line_count = aux.content_line_count;
-            let logical_plain_lines = &aux.logical_plain_lines;
-            let raw_base = acc.raw_plain_lines.len();
-            let content_maps = map_display_lines_to_logical_lines(
-                &cached[..content_line_count],
-                logical_plain_lines,
-                raw_base,
-            );
-            if let Some(maps) = content_maps {
-                // Content lines map back into the logical markdown lines for
-                // text selection; seed those raws contiguously. Trailing
-                // tool-summary lines (idx >= content_line_count) and any line
-                // the mapping could not cover fall back to self-raws via
-                // `push_auto`, keeping `raw_plain_lines` message-contiguous.
-                acc.raw_plain_lines
-                    .extend(logical_plain_lines.iter().cloned());
-                for (idx, line) in cached.into_iter().enumerate() {
-                    let line = align_if_unset(line, align);
-                    if let Some(map) = maps.get(idx).copied() {
-                        acc.lines.push(line);
-                        acc.line_raw_overrides.push(Some(map));
-                        acc.line_copy_offsets.push(0);
-                    } else {
-                        acc.push_auto(line);
-                    }
-                }
-            } else {
-                // Logical mapping failed; every display line uses its own plain
-                // text as the raw, matching the previous wrap-time fallback but
-                // recorded contiguously and in message order.
-                for line in cached {
-                    acc.push_auto(align_if_unset(line, align));
-                }
-            }
-        }
-        "meta" => {
-            let raw_line = acc.raw_plain_lines.len();
-            acc.raw_plain_lines.push(msg.content.clone());
-            let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
-            let prefix_width = if centered {
-                0
-            } else {
-                unicode_width::UnicodeWidthStr::width("  ")
-            };
-            acc.lines.push(
-                Line::from(vec![
-                    Span::raw(if centered { "" } else { "  " }),
-                    Span::styled(msg.content.clone(), Style::default().fg(dim_color())),
-                ])
-                .alignment(align),
-            );
-            acc.line_raw_overrides.push(Some(WrappedLineMap {
-                raw_line,
-                start_col: 0,
-                end_col: raw_width,
-            }));
-            acc.line_copy_offsets.push(prefix_width);
-        }
-        "tool" => {
-            let tool_start_line = acc.lines.len();
-            let cached = get_cached_message_lines(msg, width, diff_mode, render_tool_message);
-            if let Some(target) = tool_message_copy_target(msg, cached.len()) {
-                acc.copy_targets
-                    .push(offset_copy_target(target, tool_start_line));
-            }
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-            if let Some(member) = spawned_member_for_tool(msg, &ctx.swarm_members) {
-                for line in crate::tui::info_widget::swarm_gallery::render_swarm_chat_card_lines(
-                    std::slice::from_ref(member),
-                    width.saturating_sub(1) as usize,
-                ) {
-                    acc.push_auto(line.alignment(ratatui::layout::Alignment::Left));
-                }
-            }
-            for line in todo_change_lines(ctx.messages, msg_global_idx, msg, width) {
-                acc.push_auto(align_if_unset(line, align));
-            }
-            if let Some(ref tc) = msg.tool_data {
-                let is_edit_tool = tools_ui::is_edit_tool_name(&tc.name);
-                if is_edit_tool {
-                    let file_path = tc
-                        .input
-                        .get("file_path")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                        .or_else(|| {
-                            tc.input
-                                .get("patch_text")
-                                .and_then(|v| v.as_str())
-                                .and_then(|patch_text| {
-                                    match tools_ui::edit_render_name(&tc.name, &tc.input) {
-                                        "apply_patch" => {
-                                            tools_ui::extract_apply_patch_primary_file(patch_text)
-                                        }
-                                        "patch" => {
-                                            tools_ui::extract_unified_patch_primary_file(patch_text)
-                                        }
-                                        _ => None,
-                                    }
-                                })
-                        })
-                        .unwrap_or_else(|| "unknown".to_string());
-                    // Outside the inline modes the diff body is hidden entirely,
-                    // so any edit with a diff can be expanded into full inline.
-                    let expandable = if diff_mode.is_inline() {
-                        messages::edit_tool_inline_diff_is_expandable(tc, &msg.content, width)
-                    } else {
-                        messages::edit_tool_has_inline_diff(tc, &msg.content)
-                    };
-                    acc.edit_tool_line_ranges.push((
-                        msg_global_idx,
-                        file_path,
-                        tool_start_line,
-                        acc.lines.len(),
-                        expandable,
-                    ));
-                }
-                if let (Some(app), Some(items)) = (ctx.app, ctx.anchored_images.by_tool.get(&tc.id))
-                {
-                    for line in super::inline_image_ui::anchored_image_lines(
-                        items,
-                        width,
-                        ctx.inline_images_visible,
-                        &super::inline_image_ui::AppExpandLevels(app),
-                    ) {
-                        acc.push_auto(line);
-                    }
-                }
-            }
-        }
-        "system" => {
-            let content_width = width.saturating_sub(4);
-            let cached =
-                get_cached_message_lines(msg, content_width, diff_mode, render_system_message);
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        // Terminal-style clear spacer (Ctrl+L): N blank rows that push the
-        // prior transcript up out of the viewport while keeping it in
-        // scrollback. The separator blank already pushed above counts toward
-        // the requested height.
-        "spacer" => {
-            let rows: usize = msg.content.trim().parse().unwrap_or(0);
-            for _ in 0..rows.saturating_sub(1) {
-                acc.push_blank();
-            }
-        }
-        "reasoning" => {
-            let content_width = width.saturating_sub(4);
-            let cached =
-                get_cached_message_lines(msg, content_width, diff_mode, render_reasoning_message);
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "background_task" => {
-            let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                diff_mode,
-                render_background_task_message,
-            );
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "swarm" => {
-            let content_width = width.saturating_sub(4);
-            let cached =
-                get_cached_message_lines(msg, content_width, diff_mode, render_swarm_message);
-            for line in cached {
-                let line = align_if_unset(line, align);
-                let plain = ui::line_plain_text(&line);
-                let (semantic, prefix_width) = semantic_swarm_line_text(plain.as_str());
-                let raw_line = acc.raw_plain_lines.len();
-                let raw_width = unicode_width::UnicodeWidthStr::width(semantic.as_str());
-                acc.raw_plain_lines.push(semantic);
-                acc.lines.push(line);
-                acc.line_raw_overrides.push(Some(WrappedLineMap {
-                    raw_line,
-                    start_col: 0,
-                    end_col: raw_width,
-                }));
-                acc.line_copy_offsets.push(prefix_width);
-            }
-        }
-        "memory" => {
-            let border_style = Style::default().fg(rgb(130, 140, 180));
-            let text_style = Style::default().fg(dim_color());
-            let entries = super::memory_ui::parse_memory_display_entries(&msg.content);
-
-            let count = entries.len();
-            let tiles = group_into_tiles(entries);
-
-            let header_text = if let Some(title) = &msg.title {
-                title.clone()
-            } else if count == 1 {
-                "🧠 1 memory".to_string()
-            } else {
-                format!("🧠 {} memories", count)
-            };
-            let header = Line::from(Span::styled(header_text, border_style)).alignment(align);
-
-            let total_width = if centered {
-                (width.saturating_sub(4) as usize).min(120)
-            } else {
-                width.saturating_sub(2) as usize
-            };
-            let tile_lines =
-                render_memory_tiles(&tiles, total_width, border_style, text_style, Some(header));
-            for line in tile_lines {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "usage" => {
-            let content_width = width.saturating_sub(4);
-            let cached =
-                get_cached_message_lines(msg, content_width, diff_mode, render_usage_message);
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "overnight" => {
-            let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                diff_mode,
-                super::messages::render_overnight_message,
-            );
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "todos" => {
-            let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                diff_mode,
-                super::messages::render_todos_message,
-            );
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "error" => {
-            let error_start_line = acc.lines.len();
-            if let Some(target) = error_copy_target(&msg.content, 1) {
-                acc.copy_targets
-                    .push(offset_copy_target(target, error_start_line));
-            }
-            // Multi-line diagnostics (cloud failures, error chains) keep one
-            // logical line per row instead of collapsing into a single row.
-            let prefix = if centered { "✗ " } else { "  ✗ " };
-            let continuation = if centered { "  " } else { "    " };
-            let prefix_width = unicode_width::UnicodeWidthStr::width(prefix);
-            for (index, text) in msg.content.lines().enumerate() {
-                let raw_line = acc.raw_plain_lines.len();
-                acc.raw_plain_lines.push(text.to_string());
-                let raw_width = unicode_width::UnicodeWidthStr::width(text);
-                acc.lines.push(
-                    Line::from(vec![
-                        Span::styled(
-                            if index == 0 { prefix } else { continuation },
-                            Style::default().fg(Color::Red),
-                        ),
-                        Span::styled(text.to_string(), Style::default().fg(Color::Red)),
-                    ])
-                    .alignment(align),
-                );
-                acc.line_raw_overrides.push(Some(WrappedLineMap {
-                    raw_line,
-                    start_col: 0,
-                    end_col: raw_width,
-                }));
-                acc.line_copy_offsets.push(prefix_width);
-            }
-        }
-        _ => {}
-    }
-
-    acc.segments.push((
-        msg.stable_cache_hash(),
-        acc.lines.len(),
-        acc.raw_plain_lines.len(),
-        acc.user_prompt_texts.len(),
-    ));
-}
-
-pub(super) fn prepare_body_incremental(
-    app: &dyn TuiState,
-    width: u16,
-    mut prev: Arc<PreparedMessages>,
-    prev_msg_count: usize,
-) -> Arc<PreparedMessages> {
-    let messages = app.display_messages();
-    let new_messages = &messages[prev_msg_count..];
-    if new_messages.is_empty() {
-        return prev;
-    }
-
-    // Read before rendering the tail: a background diagram render completing
-    // mid-build must leave the stamp already-stale.
-    let mermaid_epoch_before = crate::tui::mermaid::deferred_render_epoch();
-    let centered = app.centered_mode();
-    markdown::set_center_code_blocks(centered);
-
-    // Images anchored to transcript messages render inline right after the
-    // message that produced them. An incremental base is only reused when the
-    // image set is unchanged (cache key includes the image signature), so any
-    // anchored image matching a *new* message must be injected here; its anchor
-    // target did not exist when the base was built.
-    let anchored_images = super::inline_image_ui::resolve_anchored_items_cached(app);
-
-    // The number of user prompts already rendered equals the number of cached
-    // user prompt texts. Re-counting `messages[..prev_msg_count]` here on every
-    // incremental append rescans the whole prior transcript, making a session
-    // that grows one message at a time O(n^2). `prev.user_prompt_texts` is
-    // extended in lockstep with each rendered user message, so its length is the
-    // exact prior prompt count.
-    let prev_prompt_count = prev.user_prompt_texts.len();
-    // 0-based ordinal of the next rendered user prompt, excluding synthetic
-    // attached-image label messages, mirroring the session renderer's count.
-    let anchor_prompt_ordinal = if anchored_images.by_prompt.is_empty() {
-        0
-    } else {
-        prev.user_prompt_texts
-            .iter()
-            .filter(|text| !crate::session::is_attached_image_label_text(text))
-            .count()
-    };
-
-    let ctx = BodyRenderCtx {
-        app: Some(app),
-        diff_mode: app.diff_mode(),
-        width,
-        centered,
-        prompt_number_offset: app.compacted_hidden_user_prompts(),
-        total_prompts: app.display_user_message_count(),
-        pending_count: input_ui::pending_prompt_count(app),
-        anchored_images,
-        inline_images_visible: app.inline_images_visible(),
-        messages,
-        swarm_members: app.swarm_members_for_transcript(),
-    };
-
-    let mut acc = BodyAcc {
-        prompt_num: prev_prompt_count,
-        anchor_prompt_ordinal,
-        body_has_content: !prev.wrapped_lines.is_empty(),
-        ..BodyAcc::default()
-    };
-
-    for (new_msg_offset, msg) in new_messages.iter().enumerate() {
-        render_message_into(&ctx, &mut acc, msg, prev_msg_count + new_msg_offset);
-    }
-
-    let new_wrapped = wrap_lines_with_map(
-        acc.lines,
-        &acc.raw_plain_lines,
-        &acc.line_raw_overrides,
-        &acc.line_copy_offsets,
-        &acc.user_line_indices,
-        &acc.user_prompt_texts,
-        width,
-        &acc.edit_tool_line_ranges,
-        &acc.copy_targets,
-        &acc.segments,
-    );
-
-    let prepared = Arc::make_mut(&mut prev);
-    let new_tail_pending = new_wrapped
-        .wrapped_lines
-        .iter()
-        .any(markdown::line_is_mermaid_pending_placeholder);
-    prepared.mermaid_pending_epoch = merge_mermaid_pending(
-        prepared.mermaid_pending_epoch,
-        new_tail_pending,
-        mermaid_epoch_before,
-    );
-    let prev_len = prepared.wrapped_lines.len();
-    let prev_raw_len = prepared.raw_plain_lines.len();
-    let prev_prompt_len = prepared.user_prompt_texts.len();
-    let edit_index_base = prepared.edit_tool_ranges.len();
-
-    prepared.wrapped_lines.extend(new_wrapped.wrapped_lines);
-    Arc::make_mut(&mut prepared.wrapped_plain_lines)
-        .extend(new_wrapped.wrapped_plain_lines.iter().cloned());
-    Arc::make_mut(&mut prepared.wrapped_copy_offsets)
-        .extend(new_wrapped.wrapped_copy_offsets.iter().copied());
-    Arc::make_mut(&mut prepared.raw_plain_lines)
-        .extend(new_wrapped.raw_plain_lines.iter().cloned());
-
-    {
-        let wrapped_line_map = Arc::make_mut(&mut prepared.wrapped_line_map);
-        for map in new_wrapped.wrapped_line_map.iter().copied() {
-            wrapped_line_map.push(WrappedLineMap {
-                raw_line: map.raw_line + prev_raw_len,
-                ..map
-            });
-        }
-    }
-
-    prepared.wrapped_user_indices.extend(
-        new_wrapped
-            .wrapped_user_indices
-            .into_iter()
-            .map(|idx| idx + prev_len),
-    );
-    prepared.wrapped_user_prompt_starts.extend(
-        new_wrapped
-            .wrapped_user_prompt_starts
-            .into_iter()
-            .map(|idx| idx + prev_len),
-    );
-    prepared.wrapped_user_prompt_ends.extend(
-        new_wrapped
-            .wrapped_user_prompt_ends
-            .into_iter()
-            .map(|idx| idx + prev_len),
-    );
-    prepared
-        .user_prompt_texts
-        .extend(new_wrapped.user_prompt_texts);
-    prepared
-        .image_regions
-        .extend(
-            new_wrapped
-                .image_regions
-                .into_iter()
-                .map(|region| ImageRegion {
-                    abs_line_idx: region.abs_line_idx + prev_len,
-                    end_line: region.end_line + prev_len,
-                    ..region
-                }),
-        );
-    prepared
-        .edit_tool_ranges
-        .extend(
-            new_wrapped
-                .edit_tool_ranges
-                .into_iter()
-                .map(|r| EditToolRange {
-                    edit_index: edit_index_base + r.edit_index,
-                    msg_index: r.msg_index,
-                    file_path: r.file_path,
-                    start_line: r.start_line + prev_len,
-                    end_line: r.end_line + prev_len,
-                    expandable: r.expandable,
-                }),
-        );
-    prepared.copy_targets.extend(
-        new_wrapped
-            .copy_targets
-            .into_iter()
-            .map(|target| CopyTarget {
-                start_line: target.start_line + prev_len,
-                end_line: target.end_line + prev_len,
-                badge_line: target.badge_line + prev_len,
-                ..target
-            }),
-    );
-    prepared
-        .message_boundaries
-        .extend(
-            new_wrapped
-                .message_boundaries
-                .into_iter()
-                .map(|b| MessageBoundary {
-                    msg_hash: b.msg_hash,
-                    wrapped_len: b.wrapped_len + prev_len,
-                    raw_len: b.raw_len + prev_raw_len,
-                    user_prompt_len: b.user_prompt_len + prev_prompt_len,
-                }),
-        );
-
-    prev
-}
-
-/// Truncate a prepared body so it contains exactly the first `keep_msgs`
-/// messages, in place on the (uniquely owned) `prepared`. Used by prefix reuse:
-/// when an incoming rebuild shares a hash prefix of length `keep_msgs` with a
-/// cached body, the body is truncated here and the changed tail is re-appended
-/// via `prepare_body_incremental`. The cut always lands on a message boundary,
-/// so every wrapped-indexed entry belongs entirely to either the kept prefix or
-/// the dropped tail; filtering by `start < wrapped_len` is exact.
-///
-/// Requires message-contiguous raws (guaranteed by the shared body renderer),
-/// which lets the raw array be truncated too rather than leaked.
-pub(super) fn truncate_prepared_to_boundary(prepared: &mut PreparedMessages, keep_msgs: usize) {
-    if keep_msgs >= prepared.message_boundaries.len() {
-        return;
-    }
-    let (wrapped_len, raw_len, user_prompt_len) = if keep_msgs == 0 {
-        (0, 0, 0)
-    } else {
-        let b = prepared.message_boundaries[keep_msgs - 1];
-        (b.wrapped_len, b.raw_len, b.user_prompt_len)
-    };
-
-    prepared.wrapped_lines.truncate(wrapped_len);
-    Arc::make_mut(&mut prepared.wrapped_plain_lines).truncate(wrapped_len);
-    Arc::make_mut(&mut prepared.wrapped_copy_offsets).truncate(wrapped_len);
-    Arc::make_mut(&mut prepared.wrapped_line_map).truncate(wrapped_len);
-    Arc::make_mut(&mut prepared.raw_plain_lines).truncate(raw_len);
-    prepared.user_prompt_texts.truncate(user_prompt_len);
-    prepared.message_boundaries.truncate(keep_msgs);
-
-    prepared.wrapped_user_indices.retain(|&i| i < wrapped_len);
-    // The prompt start/end arrays are parallel; drop any prompt that begins at
-    // or after the cut. A prompt cannot straddle the cut because the cut is a
-    // message boundary and a prompt belongs to exactly one message.
-    {
-        let starts = &mut prepared.wrapped_user_prompt_starts;
-        let ends = &mut prepared.wrapped_user_prompt_ends;
-        let keep = starts.iter().take_while(|&&s| s < wrapped_len).count();
-        starts.truncate(keep);
-        ends.truncate(keep);
-    }
-    prepared
-        .image_regions
-        .retain(|r| r.abs_line_idx < wrapped_len);
-    prepared
-        .edit_tool_ranges
-        .retain(|r| r.start_line < wrapped_len);
-    prepared.copy_targets.retain(|t| t.start_line < wrapped_len);
-
-    // The pending-mermaid placeholder may have lived in the dropped tail;
-    // recompute so a stale-positive stamp cannot force rebuilds forever.
-    if prepared.mermaid_pending_epoch.is_some()
-        && !prepared
-            .wrapped_lines
-            .iter()
-            .any(markdown::line_is_mermaid_pending_placeholder)
-    {
-        prepared.mermaid_pending_epoch = None;
-    }
-}
-
-/// Longest message prefix length `k` such that `base.message_boundaries[..k]`
-/// hashes match the first `k` messages of `messages`. Returns `0` when nothing
-/// matches (caller then does a full rebuild). Bounded by the shorter of the two
-/// lengths.
-pub(super) fn matching_prefix_len(base: &PreparedMessages, messages: &[DisplayMessage]) -> usize {
-    let limit = base.message_boundaries.len().min(messages.len());
-    let mut k = 0;
-    while k < limit && base.message_boundaries[k].msg_hash == messages[k].stable_cache_hash() {
-        k += 1;
-    }
-    k
-}
-
-/// Longest message suffix length `s` such that the last `s` boundaries of
-/// `base` hash-match the last `s` entries of `messages`. Used to detect a
-/// prepend (older compacted history loaded above an unchanged tail).
-pub(super) fn matching_suffix_len(base: &PreparedMessages, messages: &[DisplayMessage]) -> usize {
-    let base_n = base.message_boundaries.len();
-    let msg_n = messages.len();
-    let limit = base_n.min(msg_n);
-    let mut s = 0;
-    while s < limit
-        && base.message_boundaries[base_n - 1 - s].msg_hash
-            == messages[msg_n - 1 - s].stable_cache_hash()
-    {
-        s += 1;
-    }
-    s
-}
-
-/// Whether a cached body whose message suffix matches the current transcript
-/// can be reused verbatim below a freshly rendered head. The reused lines bake
-/// in per-prompt state, so this verifies that state is invariant under the
-/// prepend:
-///
-/// - Displayed prompt numbers: the base rendered `local_num + base_offset`; a
-///   full rebuild renders `new_local_num + current_offset`. They agree exactly
-///   when `dropped_prompts + base_offset == head_prompts + current_offset`
-///   (loading compacted history reveals prompts, decreasing the hidden-prompt
-///   offset by the same amount, so this holds in the real flow).
-/// - Prompt-anchored inline images embed window-relative prompt ordinals that
-///   all shift under a prepend, so any `by_prompt` anchors force a rebuild.
-///
-/// Rainbow prompt-number colors and todo "what changed" deltas may be slightly
-/// stale in the reused suffix (they can depend on messages outside it). Both
-/// are cosmetic, match the existing staleness of the append/prefix-reuse path,
-/// and self-correct on any full rebuild (e.g. a width change).
-pub(super) fn suffix_reuse_compatible(
-    app: &dyn TuiState,
-    messages: &[DisplayMessage],
-    head_count: usize,
-    base: &PreparedMessages,
-    drop_msgs: usize,
-    base_prompt_offset: usize,
-) -> bool {
-    if drop_msgs == 0 || drop_msgs >= base.message_boundaries.len() {
-        return false;
-    }
-    let anchored = super::inline_image_ui::resolve_anchored_items_cached(app);
-    if !anchored.by_prompt.is_empty() {
-        return false;
-    }
-    let dropped_prompts = base.message_boundaries[drop_msgs - 1].user_prompt_len;
-    let head_prompts = messages[..head_count.min(messages.len())]
-        .iter()
-        .filter(|msg| msg.effective_role() == "user")
-        .count();
-    dropped_prompts + base_prompt_offset == head_prompts + app.compacted_hidden_user_prompts()
-}
-
-/// Rebuild a body as `freshly rendered head + reused suffix of a cached base`,
-/// in place on `prev`. This is the prepend analogue of
-/// [`prepare_body_incremental`]: when older compacted history is loaded above
-/// an unchanged tail, only the new head (marker + revealed messages) is
-/// rendered and wrapped; the prepared suffix is kept and its line/raw indices
-/// are shifted. Returns `Err(prev)` untouched when the stitch would not be
-/// sound so the caller can fall back to the prefix/full paths.
-pub(super) fn prepare_body_prepended(
-    app: &dyn TuiState,
-    width: u16,
-    mut prev: Arc<PreparedMessages>,
-    drop_msgs: usize,
-    head_count: usize,
-) -> Result<Arc<PreparedMessages>, Arc<PreparedMessages>> {
-    let messages = app.display_messages();
-    if drop_msgs == 0
-        || drop_msgs >= prev.message_boundaries.len()
-        || head_count == 0
-        || head_count > messages.len()
-    {
-        return Err(prev);
-    }
-
-    let (cut_wrapped, cut_raw, cut_prompt) = {
-        let b = prev.message_boundaries[drop_msgs - 1];
-        (b.wrapped_len, b.raw_len, b.user_prompt_len)
-    };
-    // The cut must land inside every parallel array, and the suffix's wrapped
-    // lines must map to raws at or after the raw cut (message-contiguous raws
-    // are guaranteed by the shared body renderer, but a synthetic/legacy base
-    // could violate it; bail instead of stitching garbage).
-    if cut_wrapped > prev.wrapped_lines.len()
-        || cut_wrapped > prev.wrapped_plain_lines.len()
-        || cut_wrapped > prev.wrapped_copy_offsets.len()
-        || cut_wrapped > prev.wrapped_line_map.len()
-        || cut_raw > prev.raw_plain_lines.len()
-        || cut_prompt > prev.user_prompt_texts.len()
-    {
-        return Err(prev);
-    }
-    if prev.wrapped_line_map[cut_wrapped..]
-        .iter()
-        .any(|map| map.raw_line < cut_raw)
-    {
-        return Err(prev);
-    }
-
-    let centered = app.centered_mode();
-    markdown::set_center_code_blocks(centered);
-
-    let ctx = BodyRenderCtx {
-        app: Some(app),
-        diff_mode: app.diff_mode(),
-        width,
-        centered,
-        prompt_number_offset: app.compacted_hidden_user_prompts(),
-        total_prompts: app.display_user_message_count(),
-        pending_count: input_ui::pending_prompt_count(app),
-        anchored_images: super::inline_image_ui::resolve_anchored_items_cached(app),
-        inline_images_visible: app.inline_images_visible(),
-        messages,
-        swarm_members: app.swarm_members_for_transcript(),
-    };
-
-    // The head sits at the very top of the transcript, so it starts with the
-    // same blank-separator state as a full rebuild (no content above it).
-    let mut acc = BodyAcc::default();
-    for (idx, msg) in messages[..head_count].iter().enumerate() {
-        render_message_into(&ctx, &mut acc, msg, idx);
-    }
-
-    let head = wrap_lines_with_map(
-        acc.lines,
-        &acc.raw_plain_lines,
-        &acc.line_raw_overrides,
-        &acc.line_copy_offsets,
-        &acc.user_line_indices,
-        &acc.user_prompt_texts,
-        width,
-        &acc.edit_tool_line_ranges,
-        &acc.copy_targets,
-        &acc.segments,
-    );
-
-    // Blank-separator continuity at the seam: the suffix's first message baked
-    // a leading blank iff the dropped prefix rendered content; a full rebuild
-    // gives it one iff the head renders content. Both sides are non-empty in
-    // the real compacted flow; bail on the degenerate mismatch.
-    if (cut_wrapped > 0) == head.wrapped_lines.is_empty() {
-        return Err(prev);
-    }
-
-    let head_pending_epoch = head.mermaid_pending_epoch;
-    let head_wrapped_len = head.wrapped_lines.len();
-    let head_raw_len = head.raw_plain_lines.len();
-    let head_prompt_len = head.user_prompt_texts.len();
-    let msg_index_delta = head_count as isize - drop_msgs as isize;
-    let shift_wrapped = |idx: usize| idx - cut_wrapped + head_wrapped_len;
-
-    let prepared = Arc::make_mut(&mut prev);
-
-    prepared
-        .wrapped_lines
-        .splice(0..cut_wrapped, head.wrapped_lines);
-    Arc::make_mut(&mut prepared.wrapped_plain_lines).splice(
-        0..cut_wrapped,
-        Arc::try_unwrap(head.wrapped_plain_lines).unwrap_or_else(|arc| (*arc).clone()),
-    );
-    Arc::make_mut(&mut prepared.wrapped_copy_offsets).splice(
-        0..cut_wrapped,
-        Arc::try_unwrap(head.wrapped_copy_offsets).unwrap_or_else(|arc| (*arc).clone()),
-    );
-    Arc::make_mut(&mut prepared.raw_plain_lines).splice(
-        0..cut_raw,
-        Arc::try_unwrap(head.raw_plain_lines).unwrap_or_else(|arc| (*arc).clone()),
-    );
-
-    {
-        let map = Arc::make_mut(&mut prepared.wrapped_line_map);
-        for entry in map[cut_wrapped..].iter_mut() {
-            entry.raw_line = entry.raw_line - cut_raw + head_raw_len;
-        }
-        map.splice(
-            0..cut_wrapped,
-            Arc::try_unwrap(head.wrapped_line_map).unwrap_or_else(|arc| (*arc).clone()),
-        );
-    }
-
-    {
-        let keep_from = prepared
-            .wrapped_user_indices
-            .partition_point(|&idx| idx < cut_wrapped);
-        let mut indices = head.wrapped_user_indices;
-        indices.extend(
-            prepared.wrapped_user_indices[keep_from..]
-                .iter()
-                .map(|&idx| shift_wrapped(idx)),
-        );
-        prepared.wrapped_user_indices = indices;
-    }
-    {
-        // Starts/ends are parallel; a prompt cannot straddle the cut because the
-        // cut is a message boundary.
-        let keep_from = prepared
-            .wrapped_user_prompt_starts
-            .partition_point(|&idx| idx < cut_wrapped);
-        let mut starts = head.wrapped_user_prompt_starts;
-        starts.extend(
-            prepared.wrapped_user_prompt_starts[keep_from..]
-                .iter()
-                .map(|&idx| shift_wrapped(idx)),
-        );
-        let mut ends = head.wrapped_user_prompt_ends;
-        ends.extend(
-            prepared.wrapped_user_prompt_ends[keep_from..]
-                .iter()
-                .map(|&idx| shift_wrapped(idx)),
-        );
-        prepared.wrapped_user_prompt_starts = starts;
-        prepared.wrapped_user_prompt_ends = ends;
-    }
-
-    prepared
-        .user_prompt_texts
-        .splice(0..cut_prompt, head.user_prompt_texts);
-
-    {
-        let mut regions = head.image_regions;
-        regions.extend(
-            prepared
-                .image_regions
-                .iter()
-                .filter(|region| region.abs_line_idx >= cut_wrapped)
-                .map(|region| ImageRegion {
-                    abs_line_idx: shift_wrapped(region.abs_line_idx),
-                    end_line: shift_wrapped(region.end_line),
-                    ..*region
-                }),
-        );
-        prepared.image_regions = regions;
-    }
-
-    {
-        let mut ranges = head.edit_tool_ranges;
-        let head_edit_count = ranges.len();
-        ranges.extend(
-            prepared
-                .edit_tool_ranges
-                .iter()
-                .filter(|range| range.start_line >= cut_wrapped)
-                .enumerate()
-                .map(|(seq, range)| EditToolRange {
-                    edit_index: head_edit_count + seq,
-                    msg_index: (range.msg_index as isize + msg_index_delta).max(0) as usize,
-                    file_path: range.file_path.clone(),
-                    start_line: shift_wrapped(range.start_line),
-                    end_line: shift_wrapped(range.end_line),
-                    expandable: range.expandable,
-                }),
-        );
-        prepared.edit_tool_ranges = ranges;
-    }
-
-    {
-        let mut targets = head.copy_targets;
-        targets.extend(
-            prepared
-                .copy_targets
-                .iter()
-                .filter(|target| target.start_line >= cut_wrapped)
-                .map(|target| CopyTarget {
-                    kind: target.kind.clone(),
-                    content: target.content.clone(),
-                    start_line: shift_wrapped(target.start_line),
-                    end_line: shift_wrapped(target.end_line),
-                    badge_line: shift_wrapped(target.badge_line),
-                }),
-        );
-        prepared.copy_targets = targets;
-    }
-
-    {
-        let mut boundaries = head.message_boundaries;
-        boundaries.extend(prepared.message_boundaries[drop_msgs..].iter().map(|b| {
-            MessageBoundary {
-                msg_hash: b.msg_hash,
-                wrapped_len: shift_wrapped(b.wrapped_len),
-                raw_len: b.raw_len - cut_raw + head_raw_len,
-                user_prompt_len: b.user_prompt_len - cut_prompt + head_prompt_len,
-            }
-        }));
-        prepared.message_boundaries = boundaries;
-    }
-
-    prepared.mermaid_pending_epoch = match (prepared.mermaid_pending_epoch, head_pending_epoch) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
-
-    Ok(prev)
-}
-
-fn prepare_streaming_cached(
-    app: &dyn TuiState,
-    width: u16,
-    prefix_blank: bool,
-) -> PreparedMessages {
-    let streaming = app.streaming_text();
-    if streaming.is_empty() {
-        return empty_prepared_messages();
-    }
-
-    // Read before rendering: see `stamp_mermaid_pending`.
-    let mermaid_epoch_before = crate::tui::mermaid::deferred_render_epoch();
-    let centered = app.centered_mode();
-    markdown::set_center_code_blocks(centered);
-    let display_width = width.saturating_sub(4) as usize;
-
-    let content_width = if centered {
-        display_width.clamp(1, 96)
-    } else {
-        display_width
-    };
-    let mut md_lines = app.render_streaming_markdown(content_width);
-    if centered {
-        markdown::recenter_structured_blocks_for_display(&mut md_lines, display_width);
-    }
-    let align = if centered {
-        ratatui::layout::Alignment::Center
-    } else {
-        ratatui::layout::Alignment::Left
-    };
-
-    // The renderer names the leading lines it did not re-render. They are
-    // only reusable here when a blank line follows them: display recentering
-    // above works on runs of non-blank lines, so a run that crossed the
-    // boundary could have shifted them.
-    let (stable_generation, stable_len) = app.streaming_markdown_stable_prefix();
-    let head_md_lines = if stable_len > 0
-        && md_lines
-            .get(stable_len)
-            .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()))
-    {
-        stable_len
-    } else {
-        0
-    };
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    if prefix_blank {
-        lines.push(Line::from(""));
-    }
-    for line in md_lines {
-        lines.push(align_if_unset(line, align));
-    }
-
-    let mut prepared = if head_md_lines == 0 {
-        wrap_lines(lines, &[], &[], &[], width)
-    } else {
-        let head_len = head_md_lines + usize::from(prefix_blank);
-        let key = StreamingHeadKey {
-            generation: stable_generation,
-            head_len,
-            width,
-            centered,
-            prefix_blank,
-        };
-        let tail_lines = lines.split_off(head_len);
-        let head = STREAMING_HEAD_WRAP.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            match cache.as_ref() {
-                Some((cached_key, head)) if *cached_key == key => Arc::clone(head),
-                _ => {
-                    let head = Arc::new(wrap_lines(lines, &[], &[], &[], width));
-                    *cache = Some((key, Arc::clone(&head)));
-                    head
-                }
-            }
-        });
-        append_wrapped_tail(&head, wrap_lines(tail_lines, &[], &[], &[], width))
-    };
-    stamp_mermaid_pending(&mut prepared, mermaid_epoch_before);
-    prepared
-}
-
-/// Identifies the wrapped form of the stable head of a streaming reply.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct StreamingHeadKey {
-    generation: u64,
-    head_len: usize,
-    width: u16,
-    centered: bool,
-    prefix_blank: bool,
-}
-
-thread_local! {
-    // One entry: only the reply being streamed on this thread is ever asked for.
-    static STREAMING_HEAD_WRAP: std::cell::RefCell<Option<(StreamingHeadKey, Arc<PreparedMessages>)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Join two separately wrapped runs of lines into what wrapping them together
-/// would have produced. Only valid for plain lines (no user prompts, edit
-/// ranges or copy targets), which is all `wrap_lines` emits for streaming.
-fn append_wrapped_tail(head: &PreparedMessages, tail: PreparedMessages) -> PreparedMessages {
-    let head_rows = head.wrapped_lines.len();
-    let head_raw = head.raw_plain_lines.len();
-
-    let mut wrapped_lines = Vec::with_capacity(head_rows + tail.wrapped_lines.len());
-    wrapped_lines.extend(head.wrapped_lines.iter().cloned());
-    wrapped_lines.extend(tail.wrapped_lines);
-
-    let mut wrapped_plain_lines = Vec::with_capacity(wrapped_lines.len());
-    wrapped_plain_lines.extend(head.wrapped_plain_lines.iter().cloned());
-    wrapped_plain_lines.extend(tail.wrapped_plain_lines.iter().cloned());
-
-    let mut wrapped_copy_offsets = Vec::with_capacity(wrapped_lines.len());
-    wrapped_copy_offsets.extend(head.wrapped_copy_offsets.iter().copied());
-    wrapped_copy_offsets.extend(tail.wrapped_copy_offsets.iter().copied());
-
-    let mut raw_plain_lines = Vec::with_capacity(head_raw + tail.raw_plain_lines.len());
-    raw_plain_lines.extend(head.raw_plain_lines.iter().cloned());
-    raw_plain_lines.extend(tail.raw_plain_lines.iter().cloned());
-
-    let mut wrapped_line_map = Vec::with_capacity(wrapped_lines.len());
-    wrapped_line_map.extend(head.wrapped_line_map.iter().copied());
-    wrapped_line_map.extend(tail.wrapped_line_map.iter().map(|map| WrappedLineMap {
-        raw_line: map.raw_line + head_raw,
-        ..*map
-    }));
-
-    let mut image_regions = head.image_regions.clone();
-    image_regions.extend(tail.image_regions.iter().map(|region| {
-        let mut region = *region;
-        region.abs_line_idx += head_rows;
-        region.end_line += head_rows;
-        region
-    }));
-
-    PreparedMessages {
-        wrapped_lines,
-        wrapped_plain_lines: Arc::new(wrapped_plain_lines),
-        wrapped_copy_offsets: Arc::new(wrapped_copy_offsets),
-        raw_plain_lines: Arc::new(raw_plain_lines),
-        wrapped_line_map: Arc::new(wrapped_line_map),
-        image_regions,
-        ..tail
-    }
-}
+#[path = "ui_prepare/body_prep.rs"]
+mod body_prep;
+#[allow(unused_imports)]
+pub(crate) use body_prep::*;
 
 pub(super) fn prepare_body(
     app: &dyn TuiState,
@@ -2542,7 +1143,6 @@ pub(super) fn prepare_body(
         anchored_images,
         inline_images_visible: app.inline_images_visible(),
         messages,
-        swarm_members: app.swarm_members_for_transcript(),
     };
     let ctx_ms = images_start.elapsed().as_millis() - images_ms;
 
@@ -2589,6 +1189,12 @@ pub(super) fn prepare_body(
         if centered {
             markdown::recenter_structured_blocks_for_display(&mut md_lines, display_width);
         }
+        let line_offset = acc.lines.len();
+        acc.copy_targets.extend(
+            assistant_message_copy_targets(app.streaming_text(), &md_lines)
+                .into_iter()
+                .map(|target| offset_copy_target(target, line_offset)),
+        );
         let align = default_message_alignment("assistant", centered);
         for line in md_lines {
             acc.lines.push(align_if_unset(line, align));
@@ -2964,3 +1570,10 @@ fn prep_cache_bypassed() -> bool {
         false
     }
 }
+
+#[cfg(test)]
+#[path = "ui_prepare/preview_fallback.rs"]
+mod preview_fallback;
+#[cfg(test)]
+#[path = "ui_prepare/viewport_preview_tests.rs"]
+mod viewport_preview_tests;

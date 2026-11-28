@@ -8,13 +8,22 @@
 
 - UI chrome must not wrap: startup headers, account rows, status labels, and
   other compact UI rows should fit their available terminal-cell width or
-  truncate with an ellipsis. Count Unicode display cells, not characters.
+  truncate with an ellipsis.
   Preserve one logical row per visual row, including at narrow widths.
   Chat prose and other intentionally multiline content may wrap normally.
-- Reuse the info widget's limit-bar renderer for usage indicators instead of
-  introducing a different bar glyph, color, or used/remaining convention.
+- Usage colors and used/remaining labels follow the info widget's conventions.
 
 ## Development Workflow
+
+| Contract | Enforcement |
+| --- | --- |
+| Swarm registry locks follow the canonical order and never span unrelated awaits | `python3 scripts/check_lock_order.py` (zero-violation budget) |
+| Test helpers isolate persistent homes and machine hooks together, never in production builds | `python3 scripts/check_test_isolation.py` (Cargo feature graph) |
+| Header, status and info-widget measurements use display cells and shared truncation | `python3 scripts/check_tui_chrome.py` (zero scalar-width budget) |
+| Quota bar glyphs have one owner, distinct from task-progress glyphs | `python3 scripts/check_usage_bar_owner.py` (no copied builders) |
+| Every runtime slot and compatible endpoint participates in cached and forced catalog refresh | `python3 scripts/check_catalog_fanout.py` (derived slot census and shared consumer) |
+| An idle Desktop-like client stays within daemon connection, state rewrite, log, and CPU budgets | `python3 scripts/check_idle_load.py <built-jcode>` (isolated 60-second runtime check, also run in Linux CI) |
+| Tracked files and file names describe features in general terms and never name private harnesses or repos | `python3 scripts/check_private_refs.py` (zero-hit budget, allowlist only for serde aliases) |
 
 - **Commit and push as you go** - Make small, scoped commits and push them to
   the current branch's remote as meaningful work is completed, rather than
@@ -47,8 +56,7 @@
 - Implement both cached prefetch and explicit refresh. Explicit refresh must
   bypass fresh caches. Preserve the last good catalog on network, authentication,
   or malformed-response failures, and scope persistent caches to their endpoint.
-- Wire new providers into the shared refresh fanout and model-update publication,
-  including long-lived sessions, not only startup or login.
+- Publish model updates to long-lived sessions, not only startup or login.
 - Regression tests must discover an arbitrary future model absent from all
   fallback arrays, using the provider's actual response schema. Check picker
   routes, forced refresh with a fresh cache, and last-good behavior on failure.
@@ -66,6 +74,17 @@
 
 ## Verifying a change at runtime
 
+### Keep benchmark sessions out of user history
+
+For synthetic prompts and streaming/CPU/power benchmarks, set a dedicated
+`JCODE_HOME` and `JCODE_TEST_SESSION=1` for both the server and its clients,
+in addition to using a unique `--socket`. A private socket alone isolates the
+daemon, not persisted sessions. Never run synthetic benchmark prompts against
+the user's normal session storage. On Unix, also give the server and clients the
+same private `TMPDIR`: background task status and output use the OS temp
+folder (`$TMPDIR/jcode-bg-tasks`), not `JCODE_HOME`. Without this, an isolated
+benchmark and the regular daemon can see each other's background tasks.
+
 `cargo build` alone proves nothing about behavior. `jcode run` and interactive
 sessions are served by the long-lived daemon at
 `~/.jcode/builds/shared-server/jcode`, which is a symlink into
@@ -78,8 +97,17 @@ run your build against its own socket:
 
 ```bash
 cargo build --profile selfdev
-./target/selfdev/jcode run --no-update --socket /run/user/1000/jcode-mytest.sock '<prompt>'
+(
+  root=$(mktemp -d) || exit 1
+  export JCODE_HOME="$root/home" TMPDIR="$root/tmp" JCODE_TEST_SESSION=1
+  mkdir -m 700 "$JCODE_HOME" "$TMPDIR" || exit 1
+  printf 'Isolated run directory: %s\n' "$root"
+  ./target/selfdev/jcode run --no-update --socket "$root/server.sock" '<prompt>'
+)
 ```
+
+Remove the printed directory only after the isolated daemon and its background
+tasks have stopped and you no longer need their output.
 
 Two things that waste time otherwise:
 
@@ -91,5 +119,13 @@ Two things that waste time otherwise:
   with `readlink -f` first.
 
 ## Fork notes (xenking/jcode, keep at end for clean upstream merges)
-- Fork-only features: codemode (`crates/jcode-codemode`, docs `CODEMODE.md`, `[features] code_mode`), MCP `MCP-Protocol-Version` header on initialize, Soniox realtime `stt-rt-v6` in `crates/jcode-voice` (`[dictation] backend`), native `ask` tool (`crates/jcode-app-core/src/tool/ask.rs`, exposed on harness API), self-update source defaults to `xenking/jcode` branch `master`.
-- Verify a slice: `justrust check -p jcode-codemode -p jcode-voice`. Upstream merges: keep this section last.
+- [Fork ledger](docs/FORK_LEDGER.md): CLI and Desktop features, confirmed removals, current owners and sync checks.
+- Fork-only features: codemode (`crates/jcode-codemode`, docs `CODEMODE.md`, `[features] code_mode`), MCP `MCP-Protocol-Version` header on initialize, Soniox realtime `stt-rt-v6` in `crates/jcode-voice` (`[dictation] backend`), native `ask` tool (`crates/jcode-app-core/src/tool/ui/ask.rs`, exposed on harness API), self-update source defaults to `xenking/jcode` branch `master`.
+- For fork development and rollout, use `/selfdev`. Keep this section last on upstream merges.
+- Use `justrust check`, `justrust test`, and `justrust clippy` for affected Rust crates. Verify a CLI slice with `justrust check -p jcode-codemode -p jcode-voice`. For install and runtime proof, follow the dedicated workflow above.
+- Store local jcode secret files at mode `0600`; never print or commit their values.
+- Upstream sync: `scripts/xk-upstream-agent.sh` starts a separate jcode session that runs `scripts/xk-upstream-sync.sh` (jcode + Desktop) and OpenRig's catch-up; `--dry-run` shows the gap.
+- Before pushing any upstream sync, run `scripts/check_fork_removals.py jcode . HEAD` and `scripts/check_fork_removals.py desktop ../jcode-desktop HEAD` on the candidate commits. The sync script enforces this even with `--skip-checks`, including after a clean merge or a late merge from origin. Keep deliberate removals and owner changes from the ledger. Absence alone does not establish intent.
+- Parallel agents (swarm workers, other sessions) never share a checkout: each works in its own `git worktree` under `~/.jcode/wt/<name>-<repo>` off origin, ships by rebase + fast-forward push to the primary branch, then removes the worktree and branch. This overrides "Prefer master/main" for parallel work.
+- Run [`deslop-please`](https://github.com/deterministic-machines/deslop-please) `--allow .deslop-please.allow` before publishing Rust changes. `.deslop-please.allow` is a burn-down list, not permission: the target is an empty file. New `module-cycle`, `tangle`, `field-leak`, `shallow-module`, `wide-directory` or `long-file` errors fail the check, and code you touch must leave its entries fixed, not kept. Fix them from first principles: decide which layer each module belongs to, why the fields or functions exist and what narrow interface hides them. Fix leaks of one type together, never by mechanical moves that only hide the error. After removing debt, run `--update-allow .deslop-please.allow` so the list only shrinks. Entries under `ratatui_core` are vendored upstream code.
+- Before writing, reviewing or refactoring Rust, load the `rust-router` skill and the sub-skill it routes to (`m15-anti-pattern`, `m05-type-driven`, `m09-domain`, `rust-refactor-helper`, `m10-performance`, `m07-concurrency`), plus `rust-skills` for the rule checklist. Swarm worker briefs must say which of these skills to load.

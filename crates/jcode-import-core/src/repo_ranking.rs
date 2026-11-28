@@ -650,7 +650,7 @@ mod tests {
 
         let selected = most_recent_repository(&locations, &[home]);
 
-        assert_eq!(selected, Some(recent_repo));
+        assert_eq!(selected, Some(normalize_path(&recent_repo)));
     }
 
     fn repo(path: &str, score: f64) -> RankedRepo {

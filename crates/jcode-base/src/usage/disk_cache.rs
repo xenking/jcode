@@ -36,6 +36,8 @@ struct Snapshot {
     #[serde(default)]
     model_scoped: Vec<(String, f32, Option<String>)>,
     extra_usage_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credits: Option<jcode_usage_types::CreditsReport>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -43,6 +45,14 @@ struct Entry {
     /// Reset metadata from the same coordinated usage response. Contains no credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reset_status: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reset_observed_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    imported_reset: Option<ImportedReset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    import_probe: Option<ImportProbe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    import_suppress_until_ms: Option<i64>,
     last_good: Option<Snapshot>,
     /// Latest failure and when it happened, for cross-process backoff.
     error: Option<String>,
@@ -52,6 +62,88 @@ struct Entry {
     adaptive_interval_secs: u64,
     #[serde(default)]
     retry_not_before_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct ImportedReset {
+    status: serde_json::Value,
+    token_hash: String,
+    report_fetched_ms: i64,
+    verified_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct ImportProbe {
+    token_hash: String,
+    attempted_ms: i64,
+}
+
+/// Rate-limit identity probes across CLI and desktop processes.
+pub(super) fn begin_import_probe(key: &str, token: &str) -> bool {
+    let token_hash = token_hash(token);
+    let mut allowed = false;
+    update(key, |entry| {
+        if entry
+            .import_suppress_until_ms
+            .is_some_and(|until| until > now_ms())
+        {
+            return;
+        }
+        if entry.import_probe.as_ref().is_some_and(|p| {
+            p.token_hash == token_hash
+                && p.attempted_ms <= now_ms()
+                && age(p.attempted_ms) < Duration::from_secs(5 * 60)
+        }) {
+            return;
+        }
+        entry.import_probe = Some(ImportProbe {
+            token_hash,
+            attempted_ms: now_ms(),
+        });
+        allowed = true;
+    });
+    allowed
+}
+
+fn token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+pub(super) fn store_imported_reset_status(
+    key: &str,
+    token: &str,
+    status: serde_json::Value,
+    report_fetched_ms: i64,
+) {
+    update(key, |entry| {
+        if entry
+            .import_suppress_until_ms
+            .is_some_and(|until| until > now_ms())
+        {
+            return;
+        }
+        entry.imported_reset = Some(ImportedReset {
+            status,
+            token_hash: token_hash(token),
+            report_fetched_ms,
+            verified_ms: now_ms(),
+        })
+    });
+}
+
+pub(super) fn imported_reset_status(key: &str, token: &str) -> Option<serde_json::Value> {
+    let entry = load().remove(key)?;
+    let imported = entry.imported_reset?;
+    let now = now_ms();
+    if imported.token_hash != token_hash(token)
+        || imported.verified_ms > now
+        || imported.report_fetched_ms > now
+        || age(imported.verified_ms) >= Duration::from_secs(5 * 60)
+        || age(imported.report_fetched_ms) >= LAST_GOOD_MAX_AGE
+    {
+        return None;
+    }
+    Some(imported.status)
 }
 
 fn path() -> Option<PathBuf> {
@@ -137,12 +229,21 @@ fn update(key: &str, change: impl FnOnce(&mut Entry)) -> Entry {
         return entry;
     };
     let mut map = load();
+    let size_before = map.len();
+    let had_entry = map.contains_key(key);
     let entry = map.entry(key.to_string()).or_default();
+    let previous = entry.clone();
     change(entry);
     let result = entry.clone();
+    if result == previous {
+        return result;
+    }
     // Drop logins whose only data is long expired.
     map.retain(|_, entry| {
         entry.adaptive_interval_secs > 0
+            || entry
+                .import_suppress_until_ms
+                .is_some_and(|at| at > now_ms())
             || entry.retry_not_before_ms.is_some_and(|at| at > now_ms())
             || entry
                 .last_good
@@ -152,7 +253,11 @@ fn update(key: &str, change: impl FnOnce(&mut Entry)) -> Entry {
                 .error_unix_ms
                 .is_some_and(|at| age(at) < RATE_LIMIT_BACKOFF)
     });
-    let _ = crate::storage::write_json_secret(&path, &map);
+    // An update to a previously absent account can be immediately pruned.
+    // Do not publish an unchanged map just because its temporary entry changed.
+    if had_entry || map.len() != size_before || map.contains_key(key) {
+        let _ = crate::storage::write_json_secret_cache(&path, &map);
+    }
     result
 }
 
@@ -179,6 +284,7 @@ fn to_usage(snapshot: &Snapshot, last_error: Option<String>) -> UsageData {
             )
             .collect(),
         extra_usage_enabled: snapshot.extra_usage_enabled,
+        credits: snapshot.credits.clone(),
         fetched_at: Some(instant_for(snapshot.fetched_unix_ms)),
         last_success_at: Some(instant_for(snapshot.fetched_unix_ms)),
         refresh_after: None,
@@ -198,9 +304,19 @@ fn interval(entry: &Entry) -> Duration {
 }
 
 fn deadline(entry: &Entry) -> Option<i64> {
-    let success = entry.last_good.as_ref().map(|good| {
-        good.fetched_unix_ms
-            .saturating_add(interval(entry).as_millis() as i64)
+    // A usage-API snapshot is fresh for one interval. A snapshot built only
+    // from model response headers is fresh for one interval from the first
+    // observation, then rides the frozen `retry_not_before_ms`, so a steady
+    // stream of headers can never postpone the next real probe forever.
+    let success = entry.last_good.as_ref().and_then(|good| {
+        let header_only = good.five_observed_ms.is_some() || good.seven_observed_ms.is_some();
+        let own = good
+            .fetched_unix_ms
+            .saturating_add(interval(entry).as_millis() as i64);
+        match (header_only, entry.retry_not_before_ms) {
+            (true, Some(_)) => None,
+            _ => Some(own),
+        }
     });
     let failure = entry
         .error
@@ -247,7 +363,13 @@ fn entry_usage(entry: &Entry) -> UsageData {
 
 pub(super) fn reset_status(key: &str) -> Option<serde_json::Value> {
     let entry = load().remove(key)?;
-    if entry.error.is_some() || deadline(&entry)? <= now_ms() {
+    let observed = entry.reset_observed_ms.or_else(|| {
+        entry.last_good.as_ref().and_then(|good| {
+            (good.five_observed_ms.is_none() && good.seven_observed_ms.is_none())
+                .then_some(good.fetched_unix_ms)
+        })
+    })?;
+    if entry.error.is_some() || age(observed) >= interval(&entry) {
         return None;
     }
     entry.last_good.as_ref()?;
@@ -257,6 +379,23 @@ pub(super) fn reset_status(key: &str) -> Option<serde_json::Value> {
 pub(super) fn fresh(key: &str) -> Option<UsageData> {
     let entry = load().remove(key)?;
     (deadline(&entry)? > now_ms()).then(|| entry_usage(&entry))
+}
+
+/// Cold-start routing can reuse a dated last-good quota even after the polling
+/// deadline expired. Never import token scopes or error-only zero placeholders.
+/// The caller runs outside rendering and only fills missing in-memory entries.
+pub(super) fn saved_account_last_good() -> HashMap<String, UsageData> {
+    load()
+        .into_iter()
+        .filter_map(|(key, entry)| {
+            let label = key.strip_prefix("label:")?;
+            if label.trim().is_empty() || label == "default" {
+                return None;
+            }
+            let good = entry.last_good.as_ref()?;
+            (age(good.fetched_unix_ms) < LAST_GOOD_MAX_AGE).then(|| (key, entry_usage(&entry)))
+        })
+        .collect()
 }
 
 /// Last good limits for a failed request, if any are recent enough to show.
@@ -282,6 +421,12 @@ pub(super) fn store_response_limits(
     let entry = update(key, |entry| {
         // Freeze any outstanding probe deadline before replacing last_good.
         entry.retry_not_before_ms = deadline(entry);
+        if entry.reset_status.is_some() && entry.reset_observed_ms.is_none() {
+            entry.reset_observed_ms = entry.last_good.as_ref().and_then(|good| {
+                (good.five_observed_ms.is_none() && good.seven_observed_ms.is_none())
+                    .then_some(good.fetched_unix_ms)
+            });
+        }
         let extra_usage_enabled = entry
             .last_good
             .as_ref()
@@ -289,33 +434,39 @@ pub(super) fn store_response_limits(
         // Retain a separately observed window only briefly. The negative
         // sentinel represents an unknown ratio and is never displayed.
         let previous = entry.last_good.as_ref();
-        let five_time = five
-            .as_ref()
-            .map(|_| now_ms())
-            .or_else(|| previous.map(|good| good.five_observed_ms.unwrap_or(good.fetched_unix_ms)));
-        let seven_time = seven.as_ref().map(|_| now_ms()).or_else(|| {
-            previous.map(|good| good.seven_observed_ms.unwrap_or(good.fetched_unix_ms))
+        let observed_at = now_ms();
+        let five_time = five.as_ref().map(|_| observed_at).or_else(|| {
+            let previous = previous?;
+            let observed = previous
+                .five_observed_ms
+                .unwrap_or(previous.fetched_unix_ms);
+            (previous.five_hour_resets_at.is_some() && age(observed) < ANTHROPIC_CACHE_DURATION)
+                .then_some(observed)
+        });
+        let seven_time = seven.as_ref().map(|_| observed_at).or_else(|| {
+            let previous = previous?;
+            let observed = previous
+                .seven_observed_ms
+                .unwrap_or(previous.fetched_unix_ms);
+            (previous.seven_day_resets_at.is_some() && age(observed) < ANTHROPIC_CACHE_DURATION)
+                .then_some(observed)
         });
         let five = five.or_else(|| {
-            previous
-                .filter(|_| five_time.is_some_and(|at| age(at) < ANTHROPIC_CACHE_DURATION))
-                .and_then(|good| {
-                    good.five_hour_resets_at
-                        .clone()
-                        .map(|reset| (good.five_hour, reset))
-                })
+            previous.filter(|_| five_time.is_some()).and_then(|good| {
+                good.five_hour_resets_at
+                    .clone()
+                    .map(|reset| (good.five_hour, reset))
+            })
         });
         let seven = seven.or_else(|| {
-            previous
-                .filter(|_| seven_time.is_some_and(|at| age(at) < ANTHROPIC_CACHE_DURATION))
-                .and_then(|good| {
-                    good.seven_day_resets_at
-                        .clone()
-                        .map(|reset| (good.seven_day, reset))
-                })
+            previous.filter(|_| seven_time.is_some()).and_then(|good| {
+                good.seven_day_resets_at
+                    .clone()
+                    .map(|reset| (good.seven_day, reset))
+            })
         });
-        entry.last_good = Some(Snapshot {
-            fetched_unix_ms: now_ms(),
+        let snapshot = Snapshot {
+            fetched_unix_ms: observed_at,
             five_hour: five.as_ref().map_or(-1.0, |value| value.0),
             five_hour_resets_at: five.map(|value| value.1),
             five_observed_ms: five_time,
@@ -323,12 +474,35 @@ pub(super) fn store_response_limits(
             seven_day_resets_at: seven.map(|value| value.1),
             seven_observed_ms: seven_time,
             extra_usage_enabled,
+            // Response headers carry no credit figures. Keep what the last
+            // full response said.
+            credits: previous.and_then(|good| good.credits.clone()),
             ..Default::default()
+        };
+        // Genuine changes remain immediately visible to other processes; an
+        // equivalent response only needs to refresh the expiry clock occasionally.
+        let timestamp_only = previous.is_some_and(|previous| {
+            (0..10_000).contains(&observed_at.saturating_sub(previous.fetched_unix_ms))
+                && snapshot.five_hour == previous.five_hour
+                && snapshot.five_hour_resets_at == previous.five_hour_resets_at
+                && snapshot.seven_day == previous.seven_day
+                && snapshot.seven_day_resets_at == previous.seven_day_resets_at
+                && snapshot.five_observed_ms.is_some() == previous.five_observed_ms.is_some()
+                && snapshot.seven_observed_ms.is_some() == previous.seven_observed_ms.is_some()
+                && previous.seven_day_opus.is_none()
+                && previous.model_scoped.is_empty()
         });
+        if !timestamp_only {
+            entry.last_good = Some(snapshot);
+            // The first header establishes the deadline in the same write.
+            // The next identical header then doesn't need a second write.
+            if entry.retry_not_before_ms.is_none() {
+                entry.retry_not_before_ms = deadline(entry);
+            }
+        }
         entry.error = None;
         entry.error_unix_ms = None;
-        // These headers did not observe reset eligibility or availability.
-        entry.reset_status = None;
+        // Headers neither observe nor refresh reset eligibility.
     });
     entry_usage(&entry)
 }
@@ -360,6 +534,7 @@ pub(super) fn clear_auth_failure(key: &str) {
             // A new login must not inherit the rejected login's quotas.
             entry.last_good = None;
             entry.reset_status = None;
+            entry.reset_observed_ms = None;
         }
     });
 }
@@ -384,6 +559,7 @@ pub(super) fn store_success_with_reset_status(
             .map(|w| (w.model_name.clone(), w.utilization, w.resets_at.clone()))
             .collect(),
         extra_usage_enabled: data.extra_usage_enabled,
+        credits: data.credits.clone(),
     };
     let entry = update(key, |entry| {
         // Migrate an old rate-limit record before clearing its error.
@@ -391,7 +567,23 @@ pub(super) fn store_success_with_reset_status(
             entry.adaptive_interval_secs = RATE_LIMIT_BACKOFF.as_secs() * 2;
         }
         entry.last_good = Some(snapshot);
-        entry.reset_status = reset_status;
+        // A surface-gated placeholder carries no grant or session facts. It
+        // must not erase a still-fresh evaluation or extend that evaluation's
+        // lifetime. Never resurrect an expired result.
+        let surface_only = reset_status.as_ref().is_some_and(|status| {
+            ["cedar_ember", "juniper_tide"].iter().all(|name| {
+                let block = &status[*name];
+                block.is_null() || super::anthropic_banked::not_evaluated(block)
+            })
+        });
+        let prior_fresh = entry.reset_status.is_some()
+            && entry
+                .reset_observed_ms
+                .is_some_and(|at| age(at) < interval(entry));
+        if !surface_only || !prior_fresh {
+            entry.reset_observed_ms = reset_status.as_ref().map(|_| now_ms());
+            entry.reset_status = reset_status;
+        }
         entry.error = None;
         entry.error_unix_ms = None;
         // Do not clear learned slowdown or a provider's outstanding deadline.
@@ -503,6 +695,13 @@ pub(super) fn invalidate(matches: impl Fn(&str) -> bool) {
             // A quota reset invalidates ratios, not provider polling policy.
             entry.retry_not_before_ms = deadline(entry);
             entry.last_good = None;
+            entry.reset_status = None;
+            entry.reset_observed_ms = None;
+            entry.imported_reset = None;
+            // The importing tool may preserve a pre-redemption grant list while refreshing its
+            // usage timestamp. Do not resurrect it after a local redemption.
+            entry.import_suppress_until_ms =
+                Some(now_ms().saturating_add(LAST_GOOD_MAX_AGE.as_millis() as i64));
             if entry.adaptive_interval_secs == 0
                 && entry.error.as_deref().is_some_and(is_rate_limit)
             {
@@ -516,6 +715,100 @@ pub(super) fn invalidate(matches: impl Fn(&str) -> bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_resets_are_account_bound_throttled_and_invalidated_after_spend() {
+        with_home(|| {
+            let key = "label:import-fixture";
+            store_success(key, &sample());
+            assert!(begin_import_probe(key, "token-a"));
+            assert!(!begin_import_probe(key, "token-a"));
+            let status = serde_json::json!({"cedar_ember": {"eligible": true, "grants": []}});
+            store_imported_reset_status(key, "token-a", status.clone(), now_ms());
+            assert_eq!(imported_reset_status(key, "token-a"), Some(status.clone()));
+            assert_eq!(imported_reset_status(key, "token-b"), None);
+            invalidate(|candidate| candidate == key);
+            assert_eq!(imported_reset_status(key, "token-a"), None);
+            assert!(!begin_import_probe(key, "token-a"));
+            // A profile request already in flight must not restore old grants.
+            store_imported_reset_status(key, "token-a", status, now_ms());
+            assert_eq!(imported_reset_status(key, "token-a"), None);
+        });
+    }
+
+    #[test]
+    fn claude_grants_share_one_snapshot_across_reports_and_account_rows() {
+        with_home(|| {
+            let label = "fixture-grants";
+            let key = format!("label:{label}");
+            let mut status: serde_json::Value =
+                serde_json::from_str(include_str!("fixtures/claude_usage_cedar_ember.json"))
+                    .unwrap();
+            status["cedar_ember"]["grants"][0]["ends_at"] = "2099-01-01T00:00:00Z".into();
+            status["cedar_ember"]["grants"][1]["ends_at"] = "2099-02-01T00:00:00Z".into();
+            store_success_with_reset_status(&key, &sample(), Some(status));
+            store_response_limits(&key, Some((0.2, "2099-01-01T00:00:00Z".into())), None);
+            let report =
+                super::super::anthropic_banked::cached_banked_resets("fixture-token", Some(label))
+                    .unwrap();
+            let row = super::super::cached_account_banked_resets(
+                super::super::MultiAccountProviderKind::Anthropic,
+                label,
+            )
+            .unwrap();
+            assert_eq!((report.usable_count, report.available_count), (1, 2));
+            assert_eq!((row.usable, row.available), (Some(1), 2));
+            assert_eq!(report.expires_at, row.expires_at);
+            assert!(
+                super::super::cached_account_banked_resets(
+                    super::super::MultiAccountProviderKind::Anthropic,
+                    "other-account"
+                )
+                .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn surface_placeholder_does_not_erase_or_extend_fresh_grants() {
+        with_home(|| {
+            let key = "label:surface-fixture";
+            let status = serde_json::json!({"cedar_ember": {"eligible": true, "grants": []}});
+            let surface = serde_json::json!({"cedar_ember": {"eligible": false, "ineligible_reason": "surface", "grants": []}, "juniper_tide": {"eligible": false, "ineligible_reason": "surface"}});
+            store_success_with_reset_status(key, &sample(), Some(status.clone()));
+            let observed = load()[key].reset_observed_ms;
+            store_success_with_reset_status(key, &sample(), Some(surface.clone()));
+            assert_eq!(reset_status(key), Some(status));
+            assert_eq!(load()[key].reset_observed_ms, observed);
+            update(key, |entry| {
+                entry.reset_observed_ms = Some(now_ms() - 3_600_000)
+            });
+            store_success_with_reset_status(key, &sample(), Some(surface.clone()));
+            assert_eq!(reset_status(key), Some(surface));
+        });
+    }
+
+    #[test]
+    fn response_headers_preserve_recent_reset_status_without_extending_its_age() {
+        with_home(|| {
+            let key = "label:reset-header";
+            let status = serde_json::json!({"cedar_ember": {"eligible": true, "grants": []}});
+            store_success_with_reset_status(key, &sample(), Some(status.clone()));
+            update(key, |entry| entry.reset_observed_ms = None); // Legacy cache.
+            store_response_limits(key, Some((0.2, "2099-01-01T00:00:00Z".into())), None);
+            assert_eq!(reset_status(key), Some(status));
+            update(key, |entry| {
+                entry.reset_observed_ms = Some(now_ms() - 3_600_000);
+                entry.retry_not_before_ms = Some(now_ms() - 1);
+            });
+            store_response_limits(key, Some((0.3, "2099-01-01T00:00:00Z".into())), None);
+            assert_eq!(reset_status(key), None);
+            assert!(
+                fresh(key).is_none(),
+                "headers must not postpone a probe forever"
+            );
+        });
+    }
 
     const WORKER_ENV: &str = "JCODE_USAGE_CACHE_TEST_WORKER";
 
@@ -679,6 +972,45 @@ mod tests {
         result
     }
 
+    #[test]
+    fn write_amp_unchanged_quota_updates_do_not_replace_the_cache() {
+        with_home(|| {
+            let key = "label:write-amp";
+            store_success(key, &sample());
+            let path = path().unwrap();
+            let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+            for _ in 0..20 {
+                update(key, |_| {});
+            }
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+                before
+            );
+            assert!(!path.with_extension("bak").exists());
+            assert_eq!(fresh(key).unwrap().five_hour, 0.4);
+        });
+    }
+
+    #[test]
+    fn write_amp_equivalent_response_burst_keeps_one_write_but_updates_changed_quota() {
+        with_home(|| {
+            let key = "label:write-amp-headers";
+            let reset = "2999-01-01T00:00:00Z";
+            store_response_limits(key, Some((0.4, reset.into())), None);
+            let path = path().unwrap();
+            let first = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let first_deadline = load()[key].retry_not_before_ms;
+            for _ in 0..20 {
+                store_response_limits(key, Some((0.4, reset.into())), None);
+            }
+            assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), first);
+            assert_eq!(load()[key].retry_not_before_ms, first_deadline);
+            store_response_limits(key, Some((0.5, reset.into())), None);
+            assert_eq!(fresh(key).unwrap().five_hour, 0.5);
+            assert!(!path.with_extension("bak").exists());
+        });
+    }
+
     fn sample() -> UsageData {
         UsageData {
             five_hour: 0.4,
@@ -686,6 +1018,42 @@ mod tests {
             five_hour_resets_at: Some("2999-01-01T00:00:00Z".into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn routing_hydration_only_imports_recent_saved_last_good_samples() {
+        with_home(|| {
+            let mut good = sample();
+            good.seven_day = 1.0;
+            good.seven_day_resets_at = Some("2999-01-01T00:00:00Z".into());
+            for key in [
+                "label:routing-dated",
+                "label:routing-old",
+                "label:default",
+                "label:",
+                "token:external",
+            ] {
+                store_success(key, &good);
+            }
+            update("label:routing-dated", |entry| {
+                entry.last_good.as_mut().unwrap().fetched_unix_ms -= 3_600_000;
+            });
+            update("label:routing-old", |entry| {
+                entry.last_good.as_mut().unwrap().fetched_unix_ms -= 86_401_000;
+            });
+            store_error_with_hint("label:routing-dated", "Usage API error (429)", Some("7200"));
+            store_error("label:routing-error-only", "Usage API error (401)");
+            let imported = saved_account_last_good();
+            assert_eq!(imported.len(), 1);
+            let usage = &imported["label:routing-dated"];
+            assert_eq!(usage.seven_day, 1.0);
+            assert!(usage.last_success_at.unwrap().elapsed() >= Duration::from_secs(3600));
+            assert!(usage.last_error.as_deref().unwrap().contains("429"));
+            assert!(
+                usage.refresh_after.unwrap().duration_since(Instant::now())
+                    > Duration::from_secs(7198)
+            );
+        });
     }
 
     #[test]

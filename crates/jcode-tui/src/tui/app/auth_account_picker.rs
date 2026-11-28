@@ -160,7 +160,7 @@ impl App {
             .iter()
             .position(|entry| entry.is_current)
             .unwrap_or(0);
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.inline_interactive_state = Some(crate::tui::InlineInteractiveState {
             kind: crate::tui::PickerKind::Account,
             filtered: (0..entries.len()).collect(),
@@ -326,7 +326,7 @@ impl App {
             }
         }
 
-        self.inline_view_state = None;
+        self.clear_inline_view();
         self.inline_interactive_state = Some(crate::tui::InlineInteractiveState {
             kind: crate::tui::PickerKind::Account,
             filtered: (0..models.len()).collect(),
@@ -366,6 +366,7 @@ impl App {
                 available: true,
                 detail,
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action,
             selected_option: 0,
@@ -410,6 +411,37 @@ impl App {
                     .is_empty(),
                 _ => false,
             };
+            // Every labelled API key is its own row, so several keys for one
+            // provider can be told apart and switched between.
+            if let LoginProviderTarget::OpenAiCompatible(profile) = provider.target {
+                for account in crate::provider_catalog::api_key_accounts(profile.id)
+                    .into_iter()
+                    .filter(|account| account.label.is_some())
+                {
+                    let label = account.label.clone().unwrap_or_default();
+                    let mut entry = Self::account_credential_entry(
+                        format!("{} [{label}]", provider.display_name),
+                        provider.auth_kind.label().to_string(),
+                        if account.active { "active" } else { "saved" }.to_string(),
+                        format!(
+                            "{} · {} · /usage shows its limits",
+                            account.id,
+                            match account.source {
+                                crate::provider_catalog::ApiKeySource::KeyCommand => "key_command",
+                                _ => "stored key",
+                            }
+                        ),
+                        crate::tui::PickerAction::Account(
+                            crate::tui::AccountPickerAction::Switch {
+                                provider_id: profile.id.to_string(),
+                                label,
+                            },
+                        ),
+                    );
+                    entry.is_current = account.active;
+                    entries.push(entry);
+                }
+            }
             let assessment = status.assessment_for_provider(provider);
             if has_named_accounts || !assessment.is_configured() {
                 continue;
@@ -528,6 +560,7 @@ impl App {
                         plan
                     ),
                     estimated_reference_cost_micros: None,
+                    icon: None,
                 }],
                 action: crate::tui::PickerAction::Account(
                     crate::tui::AccountPickerAction::Switch {
@@ -582,6 +615,7 @@ impl App {
                     available: true,
                     detail: format!("{} - {} - acct {}", email, status, account_id),
                     estimated_reference_cost_micros: None,
+                    icon: None,
                 }],
                 action: crate::tui::PickerAction::Account(
                     crate::tui::AccountPickerAction::Switch {
@@ -610,6 +644,7 @@ impl App {
                 available: true,
                 detail: format!("create {}", next_claude),
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add {
                 provider_id: "claude".to_string(),
@@ -634,6 +669,7 @@ impl App {
                 available: true,
                 detail: format!("create {}", next_openai),
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add {
                 provider_id: "openai".to_string(),
@@ -668,6 +704,7 @@ impl App {
                     format!("refresh {}", replace_claude)
                 },
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Replace {
                 provider_id: "claude".to_string(),
@@ -703,6 +740,7 @@ impl App {
                     format!("refresh {}", replace_openai)
                 },
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Replace {
                 provider_id: "openai".to_string(),
@@ -795,6 +833,7 @@ impl App {
                         plan
                     ),
                     estimated_reference_cost_micros: None,
+                    icon: None,
                 }],
                 action: crate::tui::PickerAction::Account(
                     crate::tui::AccountPickerAction::Switch {
@@ -823,6 +862,7 @@ impl App {
                 available: true,
                 detail: format!("create {}", next_label),
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add {
                 provider_id: "claude".to_string(),
@@ -857,6 +897,7 @@ impl App {
                     format!("refresh {}", replace_target)
                 },
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Replace {
                 provider_id: "claude".to_string(),
@@ -924,6 +965,7 @@ impl App {
                     available: true,
                     detail: format!("{} - {} - acct {}", email, status, account_id),
                     estimated_reference_cost_micros: None,
+                    icon: None,
                 }],
                 action: crate::tui::PickerAction::Account(
                     crate::tui::AccountPickerAction::Switch {
@@ -952,6 +994,7 @@ impl App {
                 available: true,
                 detail: format!("create {}", next_label),
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Add {
                 provider_id: "openai".to_string(),
@@ -986,6 +1029,7 @@ impl App {
                     format!("refresh {}", replace_target)
                 },
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Replace {
                 provider_id: "openai".to_string(),
@@ -1026,50 +1070,6 @@ impl App {
             ));
         }
         (models, selected)
-    }
-
-    pub(crate) fn handle_account_picker_command(
-        &mut self,
-        command: crate::tui::account_picker::AccountPickerCommand,
-    ) {
-        match command {
-            crate::tui::account_picker::AccountPickerCommand::OpenAccountCenter {
-                provider_filter,
-            } => self.open_account_center(provider_filter.as_deref()),
-            crate::tui::account_picker::AccountPickerCommand::OpenAddReplaceFlow {
-                provider_filter,
-            } => self.open_account_add_replace_flow(provider_filter.as_deref()),
-            crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) => {
-                self.input = input;
-                self.cursor_pos = self.input.len();
-                self.submit_input();
-            }
-            crate::tui::account_picker::AccountPickerCommand::PromptValue {
-                prompt,
-                command_prefix,
-                empty_value,
-                status_notice,
-            } => self.prompt_account_value(prompt, command_prefix, empty_value, status_notice),
-            crate::tui::account_picker::AccountPickerCommand::PromptNew { provider } => {
-                match provider {
-                    crate::tui::account_picker::AccountProviderKind::Anthropic => {
-                        self.input = "/account claude add".to_string();
-                        self.cursor_pos = self.input.len();
-                        self.submit_input();
-                    }
-                    crate::tui::account_picker::AccountProviderKind::OpenAi => {
-                        self.input = "/account openai add".to_string();
-                        self.cursor_pos = self.input.len();
-                        self.submit_input();
-                    }
-                }
-            }
-            other => {
-                if let Some(command) = crate::tui::app::auth::account_command_from_picker(&other) {
-                    crate::tui::app::auth::execute_account_command_local(self, command);
-                }
-            }
-        }
     }
 
     pub(crate) fn prompt_new_account_label(

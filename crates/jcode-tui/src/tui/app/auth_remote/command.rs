@@ -388,7 +388,7 @@ async fn execute(
 
 pub(super) struct Task {
     cancel: Option<oneshot::Sender<()>>,
-    pub(super) reply: oneshot::Receiver<Result<Reply, &'static str>>,
+    reply: oneshot::Receiver<Result<Reply, &'static str>>,
 }
 
 pub(super) fn cleanup_detached(target: Target, provider: String, flow: String) {
@@ -408,6 +408,18 @@ pub(super) fn cleanup_detached(target: Target, provider: String, flow: String) {
     }
 }
 impl Task {
+    /// The task's reply if it has finished. `stopped` is reported when the task ended without one.
+    pub(super) fn try_reply(
+        &mut self,
+        stopped: &'static str,
+    ) -> Option<Result<Reply, &'static str>> {
+        match self.reply.try_recv() {
+            Ok(reply) => Some(reply),
+            Err(oneshot::error::TryRecvError::Empty) => None,
+            Err(_) => Some(Err(stopped)),
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn ready(result: Result<Reply, &'static str>) -> Self {
         let (sender, reply) = oneshot::channel();

@@ -1,6 +1,14 @@
 use super::*;
 
 impl MultiProvider {
+    pub(super) fn speed_provider(&self) -> Option<Arc<dyn Provider>> {
+        match self.active_provider() {
+            ActiveProvider::OpenAI => self.openai_provider(),
+            ActiveProvider::Claude => self.anthropic_provider(),
+            _ => None,
+        }
+    }
+
     pub(super) fn anthropic_provider(&self) -> Option<Arc<dyn Provider>> {
         self.anthropic
             .read()
@@ -56,6 +64,14 @@ impl MultiProvider {
 
     pub(super) fn active_openrouter_execution_provider(&self) -> Option<Arc<dyn Provider>> {
         ProviderRegistry::new(self).active_openrouter_execution()
+    }
+
+    /// The runtime whose API key a session can bind: the active direct
+    /// OpenAI-compatible profile, when the OpenAI-compatible slot is active.
+    pub(super) fn active_labelled_key_runtime(&self) -> Option<Arc<dyn Provider>> {
+        (self.active_provider() == ActiveProvider::OpenRouter)
+            .then(|| self.active_openrouter_execution_provider())
+            .flatten()
     }
 
     pub(super) fn clear_active_openai_compatible_profile(&self) {

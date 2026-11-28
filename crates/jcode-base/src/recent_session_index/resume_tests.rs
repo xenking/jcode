@@ -76,11 +76,11 @@ fn save_populates_resume_index_before_any_resume_lookup() -> Result<()> {
     // No title lookup or file scan has run before this query.
     let entries = resume_entries()?;
     let entry = entries
-        .get(&session.id)
+        .get(session.id())
         .expect("save must eagerly index resume metadata");
     assert_eq!(entry.short_name, session.short_name);
     assert_eq!(entry.title.as_deref(), Some("Persisted title"));
-    assert_eq!(entry.updated_at, session.updated_at);
+    assert_eq!(entry.updated_at, session.updated_at());
     Ok(())
 }
 
@@ -91,19 +91,19 @@ fn generic_metadata_upsert_invalidates_all_resume_fields() -> Result<()> {
     let _home = HomeGuard::set(home.path());
     let mut session = session("session_sqlite_invalidate", "Original title");
     session.save()?;
-    assert!(resume_entries()?.contains_key(&session.id));
+    assert!(resume_entries()?.contains_key(session.id()));
     let mut metadata = recent(10)?
         .into_iter()
-        .find(|entry| entry.session_id == session.id)
+        .find(|entry| entry.session_id == session.id())
         .unwrap();
     metadata.generated_title = Some("Metadata-only change".into());
     upsert(&metadata)?;
-    assert!(!resume_entries()?.contains_key(&session.id));
+    assert!(!resume_entries()?.contains_key(session.id()));
     with_connection(|connection| {
         let fields: (Option<String>, Option<String>, Option<String>) = connection.query_row(
             "SELECT resume_short_name, resume_fingerprint, resume_updated_at
              FROM recent_sessions WHERE session_id = ?1",
-            [&session.id],
+            [session.id()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         assert_eq!(fields, (None, None, None));
@@ -111,7 +111,7 @@ fn generic_metadata_upsert_invalidates_all_resume_fields() -> Result<()> {
     })?;
     // A subsequent real session save makes the row usable again.
     session.save()?;
-    assert!(resume_entries()?.contains_key(&session.id));
+    assert!(resume_entries()?.contains_key(session.id()));
     Ok(())
 }
 
@@ -128,17 +128,17 @@ fn malformed_fingerprint_does_not_discard_other_resume_entries() -> Result<()> {
         with_connection(|connection| {
             connection.execute(
                 "UPDATE recent_sessions SET resume_fingerprint = ?2 WHERE session_id = ?1",
-                params![corrupt.id, malformed],
+                params![corrupt.id(), malformed],
             )?;
             Ok(())
         })?;
         let entries = resume_entries()?;
         assert!(
-            entries.contains_key(&healthy.id),
+            entries.contains_key(healthy.id()),
             "bad row must not poison valid rows"
         );
         assert!(
-            !entries.contains_key(&corrupt.id),
+            !entries.contains_key(corrupt.id()),
             "invalid fingerprint: {malformed}"
         );
     }
@@ -158,20 +158,20 @@ fn malformed_timestamp_does_not_discard_other_resume_entries() -> Result<()> {
         with_connection(|connection| {
             connection.execute(
                 "UPDATE recent_sessions SET resume_updated_at = ?2 WHERE session_id = ?1",
-                params![corrupt.id, malformed],
+                params![corrupt.id(), malformed],
             )?;
             Ok(())
         })?;
         let entries = resume_entries()?;
-        assert!(entries.contains_key(&healthy.id));
-        assert!(!entries.contains_key(&corrupt.id));
+        assert!(entries.contains_key(healthy.id()));
+        assert!(!entries.contains_key(corrupt.id()));
     }
     // Skipped rows remain recoverable from the authoritative snapshot.
     assert_eq!(
         crate::session::find_session_by_name_or_id("Corrupt title")?,
-        corrupt.id
+        corrupt.id()
     );
-    assert!(resume_entries()?.contains_key(&corrupt.id));
+    assert!(resume_entries()?.contains_key(corrupt.id()));
     Ok(())
 }
 
@@ -216,9 +216,9 @@ fn resume_title_precedence_excludes_todo_title() -> Result<()> {
     let home = tempfile::tempdir()?;
     let _home = HomeGuard::set(home.path());
     let mut session = session("session_sqlite_titles", "Generated resume title");
-    session.saved = true;
-    session.save_label = Some("Saved resume label".into());
-    session.custom_title = Some("Custom resume title".into());
+    session.set_saved_for_tests(true);
+    session.set_save_label_for_tests(Some("Saved resume label".into()));
+    session.set_custom_title_for_tests(Some("Custom resume title".into()));
     session.save()?;
     for (custom, saved, label, expected) in [
         (
@@ -241,26 +241,26 @@ fn resume_title_precedence_excludes_todo_title() -> Result<()> {
         ),
         (Some("  "), true, Some("  "), Some("Generated resume title")),
     ] {
-        session.custom_title = custom.map(str::to_owned);
-        session.saved = saved;
-        session.save_label = label.map(str::to_owned);
+        session.set_custom_title_for_tests(custom.map(str::to_owned));
+        session.set_saved_for_tests(saved);
+        session.set_save_label_for_tests(label.map(str::to_owned));
         session.save()?;
         with_connection(|connection| {
             connection.execute(
                 "UPDATE recent_sessions SET todo_title = 'Todo-only forbidden resume title'
                  WHERE session_id = ?1",
-                [&session.id],
+                [session.id()],
             )?;
             Ok(())
         })?;
-        assert_eq!(resume_entries()?[&session.id].title.as_deref(), expected);
+        assert_eq!(resume_entries()?[session.id()].title.as_deref(), expected);
     }
     assert!(
         crate::session::find_session_by_name_or_id("Todo-only forbidden resume title").is_err()
     );
     assert_eq!(
         crate::session::find_session_by_name_or_id("Generated resume title")?,
-        session.id
+        session.id()
     );
     Ok(())
 }
@@ -274,16 +274,16 @@ fn metadata_only_row_is_backfilled_by_resume_file_scan() -> Result<()> {
     session.save()?;
     let metadata = recent(10)?
         .into_iter()
-        .find(|entry| entry.session_id == session.id)
+        .find(|entry| entry.session_id == session.id())
         .unwrap();
     upsert(&metadata)?;
     assert!(resume_entries()?.is_empty());
     assert_eq!(
         crate::session::find_session_by_name_or_id("Backfill unique title")?,
-        session.id
+        session.id()
     );
     assert_eq!(
-        resume_entries()?[&session.id].title.as_deref(),
+        resume_entries()?[session.id()].title.as_deref(),
         Some("Backfill unique title")
     );
     Ok(())
@@ -296,13 +296,15 @@ fn resume_timestamp_roundtrip_preserves_nanoseconds() -> Result<()> {
     let _home = HomeGuard::set(home.path());
     let mut session = session("session_sqlite_precision", "Precise title");
     session.save()?;
-    session.updated_at = chrono::DateTime::parse_from_rfc3339("2026-10-29T12:34:56.123456789Z")?
-        .with_timezone(&chrono::Utc);
-    crate::storage::write_json_fast(&crate::session::session_path(&session.id)?, &session)?;
+    session.set_updated_at_for_tests(
+        chrono::DateTime::parse_from_rfc3339("2026-10-29T12:34:56.123456789Z")?
+            .with_timezone(&chrono::Utc),
+    );
+    crate::storage::write_json_fast(&crate::session::session_path(session.id())?, &session)?;
     upsert_session(&session)?;
     assert_eq!(
-        resume_entries()?[&session.id].updated_at,
-        session.updated_at
+        resume_entries()?[session.id()].updated_at,
+        session.updated_at()
     );
     Ok(())
 }
@@ -314,16 +316,19 @@ fn stale_backfill_cannot_overwrite_a_newer_save() -> Result<()> {
     let _home = HomeGuard::set(home.path());
     let mut current = session("session_sqlite_race", "Old backfill title");
     current.save()?;
-    let older = Session::load_startup_stub(&current.id)?;
-    let fingerprint = SessionFingerprint::read(&crate::session::session_path(&current.id)?)
+    let older = Session::load_startup_stub(current.id())?;
+    let fingerprint = SessionFingerprint::read(&crate::session::session_path(current.id())?)
         .expect("saved snapshot fingerprint");
     current.rename_title(Some("New title saved during backfill".into()));
     current.save()?;
     backfill_resume_session(&older, &fingerprint)?;
     assert_eq!(
-        resume_entries()?[&current.id].title.as_deref(),
+        resume_entries()?[current.id()].title.as_deref(),
         current.display_title()
     );
-    assert_eq!(recent(1)?[0].custom_title, current.custom_title);
+    assert_eq!(
+        recent(1)?[0].custom_title.as_deref(),
+        current.custom_title()
+    );
     Ok(())
 }

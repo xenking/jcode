@@ -35,6 +35,7 @@ impl Server {
                     }
                     Err(error) => panic!("accept: {error}"),
                 };
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
@@ -64,9 +65,13 @@ impl Server {
                 // Content-Length is deliberately correct, including for the
                 // truncated SSE fixture. This is a clean HTTP EOF, not a
                 // reqwest transport error that was already retryable.
-                write!(socket,
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(), body).unwrap();
+                if body.starts_with("HTTP/1.1 ") {
+                    socket.write_all(body.as_bytes()).unwrap();
+                } else {
+                    write!(socket,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body).unwrap();
+                }
             }
             requests
         });
@@ -103,6 +108,7 @@ fn run_azure(base: String) -> Vec<Result<StreamEvent>> {
             Duration::from_secs(10),
             run_stream_with_retries(
                 reqwest::Client::new(),
+                jcode_base::egress::Transport::default(),
                 base,
                 ProviderAuth::None {
                     label: "test".into(),
@@ -125,6 +131,20 @@ fn run_azure(base: String) -> Vec<Result<StreamEvent>> {
         }
         events
     })
+}
+
+#[test]
+fn oversized_retry_after_returns_error_instead_of_retrying_early() {
+    let body = r#"{"error":"rate limited"}"#;
+    let response = format!(
+        "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3600\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let server = Server::new(vec![response, COMPLETE.into()]);
+    let events = run_azure(server.base.clone());
+    assert_eq!(server.finish().len(), 1);
+    assert!(events.into_iter().any(|event| event.is_err()));
 }
 
 #[test]

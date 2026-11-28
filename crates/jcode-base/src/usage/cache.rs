@@ -31,6 +31,51 @@ pub(super) fn openai_usage_cache() -> &'static std::sync::Mutex<HashMap<String, 
     OPENAI_ACCOUNT_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Serializes the tests that read or write the process-global usage caches.
+///
+/// The two caches and [`OPENAI_USAGE_GENERATION`] are shared by every test in
+/// this binary. Without taking turns, one test's store lands between another
+/// test's generation capture and its write, or simply holds a lock when the
+/// other test's non-blocking reader runs: [`OPENAI_USAGE_GENERATION`] silently
+/// drops the write and the reader's `.unwrap()` panics on `None`. Production
+/// paths stay deliberately non-blocking; only tests serialize.
+///
+/// Lock order, when a test needs both: this lock is taken *after*
+/// [`crate::storage::lock_test_env`], never before it, so two tests cannot wait
+/// on each other.
+#[cfg(test)]
+pub(super) fn lock_usage_cache_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Last in-memory Claude usage for a saved login, stale or not. Never blocks or
+/// probes. Callers judge freshness from `fetched_at`/`last_error`.
+pub fn cached_anthropic_usage_for_label(label: &str) -> Option<UsageData> {
+    let map = anthropic_usage_cache().try_lock().ok()?;
+    map.get(&format!("label:{}", label.trim())).cloned()
+}
+
+/// Prime cold-start account routing with known exhausted quotas from the
+/// authoritative per-account usage cache, not the advisory UI startup snapshot. Call only during provider
+/// initialization, never from a quota accessor or renderer. Live process state
+/// wins over disk, including newer probes and explicit quota resets.
+pub(crate) fn hydrate_persisted_account_usage() {
+    let persisted = super::disk_cache::saved_account_last_good();
+    if persisted.is_empty() {
+        return;
+    }
+    if let Ok(mut cache) = anthropic_usage_cache().lock() {
+        for (key, usage) in persisted {
+            if anthropic_known_exhausted(&usage) {
+                cache.entry(key).or_insert(usage);
+            }
+        }
+    }
+}
+
 /// Read fresh usage attributed to a saved account without probing credentials,
 /// reading files, waiting for a cache lock, or scheduling a network refresh.
 /// Missing, stale, and failed reports are unknown, not zero usage.
@@ -44,6 +89,7 @@ pub fn cached_account_usage_snapshot(
 /// Read fresh account-scoped usage, including failed probes for status indicators.
 /// A failed probe must not be interpreted as zero usage or an exhausted quota.
 /// Like the quota-only accessor, this never probes or blocks the render thread.
+/// A contended or poisoned cache yields unknown, never zero or usable quota.
 pub fn cached_account_usage_status_snapshot(
     provider: super::MultiAccountProviderKind,
     label: &str,
@@ -140,8 +186,10 @@ fn openai_known_exhausted(data: &OpenAIUsageData) -> bool {
         return true;
     }
     // OpenAI can round to 100% while still serving, so a stale sample only
-    // counts when the provider also enforced the limit.
+    // counts when the provider also enforced the limit and no credit balance
+    // was funding the overage.
     data.hard_limit_reached
+        && !data.credit_overage
         && [data.five_hour.as_ref(), data.seven_day.as_ref()]
             .into_iter()
             .flatten()
@@ -154,6 +202,58 @@ fn openai_known_exhausted(data: &OpenAIUsageData) -> bool {
 mod account_snapshot_tests {
     use super::*;
     use crate::usage::{MultiAccountProviderKind, OpenAIUsageWindow};
+
+    #[test]
+    fn persisted_routing_hydration_honors_resets_and_never_replaces_live_usage() {
+        let _guard = crate::storage::lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", dir.path());
+        for (label, reset) in [
+            ("hydrate-future", "2999-01-01T00:00:00Z"),
+            ("hydrate-reset", "2020-01-01T00:00:00Z"),
+            ("hydrate-invalid", "invalid"),
+            ("hydrate-live", "2999-01-01T00:00:00Z"),
+        ] {
+            super::super::disk_cache::store_success(
+                &format!("label:{label}"),
+                &UsageData {
+                    seven_day: 1.0,
+                    seven_day_resets_at: Some(reset.into()),
+                    ..Default::default()
+                },
+            );
+        }
+        let live = UsageData {
+            seven_day: 0.2,
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        };
+        store_anthropic_usage("label:hydrate-live".into(), live.clone());
+        hydrate_persisted_account_usage();
+        let mut cache = anthropic_usage_cache().lock().unwrap();
+        assert!(anthropic_known_exhausted(&cache["label:hydrate-future"]));
+        assert!(!cache.contains_key("label:hydrate-reset"));
+        assert!(!cache.contains_key("label:hydrate-invalid"));
+        assert_eq!(cache["label:hydrate-live"].seven_day, live.seven_day);
+        for label in [
+            "hydrate-future",
+            "hydrate-reset",
+            "hydrate-invalid",
+            "hydrate-live",
+        ] {
+            cache.remove(&format!("label:{label}"));
+        }
+    }
 
     #[test]
     fn stale_samples_stay_exhausted_until_their_window_resets() {
@@ -270,6 +370,7 @@ mod account_snapshot_tests {
 
     #[test]
     fn cached_account_snapshot_is_scoped_fresh_and_nonblocking() {
+        let _shared = lock_usage_cache_tests();
         let label = "router-cache-only-test";
         let key = format!("label:{label}");
         let provider = MultiAccountProviderKind::Anthropic;
@@ -325,12 +426,15 @@ mod account_snapshot_tests {
 
     #[test]
     fn pool_prefers_fresh_quota_within_priority_tier() {
+        let _shared = lock_usage_cache_tests();
         use crate::auth::account_pool::AccountPool;
         let unknown = "claude:quota-order-unknown".to_string();
         let healthy = "claude:quota-order-healthy".to_string();
         let lower = "claude:quota-order-lower".to_string();
-        let mut pool = AccountPool::default();
-        pool.members = vec![unknown.clone(), healthy.clone(), lower.clone()];
+        let mut pool = AccountPool {
+            members: vec![unknown.clone(), healthy.clone(), lower.clone()],
+            ..Default::default()
+        };
         pool.set_priority(&unknown, 0);
         pool.set_priority(&healthy, 0);
         pool.set_priority(&lower, 1);
@@ -680,6 +784,14 @@ pub(super) fn provider_report_from_usage_data(
             format!("{minutes}m ago (cached; usage API rate limited)"),
         ));
     }
+    if limits.is_empty() && data.credits.is_none() {
+        // No window and no balance came back: the usage is not readable, which
+        // is different from nothing being used.
+        extra_info.push((
+            "Usage".to_string(),
+            "Unknown (this account reports no limits)".to_string(),
+        ));
+    }
     extra_info.push((
         "Extra usage (long context)".to_string(),
         if data.extra_usage_enabled {
@@ -694,10 +806,14 @@ pub(super) fn provider_report_from_usage_data(
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: data.credits.clone(),
     }
 }
 
@@ -761,6 +877,7 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
         seven_day_opus: seven_day_opus.map(|limit| usage_percent_to_ratio(limit.usage_percent)),
         model_scoped,
         extra_usage_enabled: extra_usage_enabled.unwrap_or(false),
+        credits: report.credits.clone(),
         fetched_at: Some(Instant::now()),
         // Reports do not carry the original probe timestamp or retry deadline.
         // Only a successful report with actual limits proves last-good quota.
@@ -774,8 +891,14 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
 pub(super) fn openai_usage_data_from_provider_report(report: &ProviderUsage) -> OpenAIUsageData {
     let mut data = classify_openai_limits(&report.limits);
     data.hard_limit_reached = report.hard_limit_reached;
+    data.credit_overage = report.openai_credit_overage;
     data.openai_reset_credits = if report.error.is_none() {
         report.openai_reset_credits.clone()
+    } else {
+        None
+    };
+    data.credits = if report.error.is_none() {
+        report.credits.clone()
     } else {
         None
     };
@@ -824,10 +947,14 @@ pub(super) fn provider_report_from_openai_usage_data(
         limits,
         extra_info: Vec::new(),
         hard_limit_reached: data.hard_limit_reached,
+        openai_credit_overage: data.credit_overage,
         openai_reset_credits: data.openai_reset_credits.clone(),
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: data.credits.clone(),
     }
 }
 
@@ -878,29 +1005,117 @@ pub(super) fn openai_snapshot_from_usage(
     }
 }
 
+/// Ratio of one Anthropic window, or `None` when the sample cannot speak for
+/// the window right now.
+///
+/// Error timestamps alone are not evidence of known quota: failed first probes
+/// contain default zeroes. Only a real last-good sample with a still-open,
+/// explicitly dated window is safe to show as stale.
+fn anthropic_window_ratio(usage: &UsageData, value: f32, reset: Option<&str>) -> Option<f32> {
+    anthropic_window_ratio_at(usage, value, reset, chrono::Utc::now().timestamp())
+}
+
+/// [`anthropic_window_ratio`] judged at `now` (unix seconds).
+pub(super) fn anthropic_window_ratio_at(
+    usage: &UsageData,
+    value: f32,
+    reset: Option<&str>,
+    now: i64,
+) -> Option<f32> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return None;
+    }
+    let future_reset = reset
+        .and_then(|reset| chrono::DateTime::parse_from_rfc3339(reset).ok())
+        .is_some_and(|reset| reset.timestamp() > now);
+    if usage.last_error.is_none() {
+        // A success can remain cached across a reset while polling backs
+        // off. Never route or display the rolled-over window as current.
+        return (reset.is_none() || future_reset).then_some(value);
+    }
+    (usage.last_success_at.is_some() && usage.fetched_at.is_some() && future_reset).then_some(value)
+}
+
+/// Every Anthropic window with the deadline that belongs to that window.
+/// Reset policy needs each window's own deadline: the display snapshot keeps a
+/// single shared deadline, which cannot express a five-hour window with
+/// headroom next to an exhausted weekly window.
+fn anthropic_usage_windows(usage: &UsageData) -> Vec<(f32, Option<String>)> {
+    let mut windows = Vec::new();
+    if let Some(ratio) =
+        anthropic_window_ratio(usage, usage.five_hour, usage.five_hour_resets_at.as_deref())
+    {
+        windows.push((ratio, usage.five_hour_resets_at.clone()));
+    }
+    if let Some(ratio) =
+        anthropic_window_ratio(usage, usage.seven_day, usage.seven_day_resets_at.as_deref())
+    {
+        windows.push((ratio, usage.seven_day_resets_at.clone()));
+    }
+    for window in &usage.model_scoped {
+        if let Some(ratio) =
+            anthropic_window_ratio(usage, window.utilization, window.resets_at.as_deref())
+        {
+            windows.push((ratio, window.resets_at.clone()));
+        }
+    }
+    if let Some(value) = usage.seven_day_opus
+        && let Some(ratio) =
+            anthropic_window_ratio(usage, value, usage.seven_day_resets_at.as_deref())
+    {
+        windows.push((ratio, usage.seven_day_resets_at.clone()));
+    }
+    windows
+}
+
+fn openai_usage_windows(usage: &OpenAIUsageData) -> Vec<(f32, Option<String>)> {
+    usage
+        .five_hour
+        .iter()
+        .chain(usage.seven_day.iter())
+        .chain(usage.spark.iter())
+        .chain(usage.additional_windows.iter())
+        .map(|window| (window.usage_ratio, window.resets_at.clone()))
+        .collect()
+}
+
+/// Windows with their own deadlines for reset policy, from the same caches the
+/// account snapshot reads. A remote snapshot carries only the shared display
+/// deadline, so it keeps the snapshot mapping.
+/// Never probes or blocks on a contended cache lock.
+pub fn cached_account_usage_windows(
+    provider: super::MultiAccountProviderKind,
+    label: &str,
+) -> Option<Vec<(f32, Option<String>)>> {
+    if let Some(remote) = super::remote_accounts::cached(provider, label) {
+        return remote.map(|snapshot| snapshot.window_ratios());
+    }
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    match provider {
+        super::MultiAccountProviderKind::Anthropic => {
+            let usage = cached_anthropic_usage_for_label(label)?;
+            (usage.last_error.is_none() && !usage.is_stale())
+                .then(|| anthropic_usage_windows(&usage))
+        }
+        super::MultiAccountProviderKind::OpenAI => {
+            let usage = cached_openai_usage(&format!("label:{label}"))?;
+            usage
+                .last_error
+                .is_none()
+                .then(|| openai_usage_windows(&usage))
+        }
+    }
+}
+
 pub(super) fn anthropic_snapshot_from_usage(
     label: String,
     email: Option<String>,
     usage: &UsageData,
 ) -> AccountUsageSnapshot {
-    // Error timestamps alone are not evidence of known quota: failed first
-    // probes contain default zeroes. Only a real last-good sample with a
-    // still-open, explicitly dated window is safe to show as stale.
-    let ratio = |value: f32, reset: Option<&str>| {
-        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-            return None;
-        }
-        let future_reset = reset
-            .and_then(|reset| chrono::DateTime::parse_from_rfc3339(reset).ok())
-            .is_some_and(|reset| reset > chrono::Utc::now());
-        if usage.last_error.is_none() {
-            // A success can remain cached across a reset while polling backs
-            // off. Never route or display the rolled-over window as current.
-            return (reset.is_none() || future_reset).then_some(value);
-        }
-        (usage.last_success_at.is_some() && usage.fetched_at.is_some() && future_reset)
-            .then_some(value)
-    };
+    let ratio = |value: f32, reset: Option<&str>| anthropic_window_ratio(usage, value, reset);
     let five_hour_ratio = ratio(usage.five_hour, usage.five_hour_resets_at.as_deref());
     let seven_day_ratio = ratio(usage.seven_day, usage.seven_day_resets_at.as_deref());
     AccountUsageSnapshot {
@@ -979,8 +1194,12 @@ mod stale_account_snapshot_tests {
         assert_eq!(snapshot.additional_windows[1].label, "Future Zenith 界 7d");
         assert_eq!(snapshot.additional_windows[1].usage_ratio, 0.61);
         assert_eq!(snapshot.additional_windows[2].label, "Opus 7d");
-        assert!(snapshot.summary().contains("Fable 7d 73%"));
-        assert!(snapshot.summary().contains("Future Zenith 界 7d 61%"));
+        assert!(snapshot.summary_with(true).contains("Fable 7d 73% used"));
+        assert!(
+            snapshot
+                .summary_with(false)
+                .contains("Future Zenith 界 7d 39% left")
+        );
 
         let limits = [
             "5-hour",

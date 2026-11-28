@@ -149,6 +149,29 @@ pub fn anthropic_context_mode_is_verified(model: &str) -> bool {
     }
 }
 
+/// Models that accept a mid-conversation `role: "system"` message carrying
+/// `output_config.effort` (beta `mid-conversation-output-config-2026-07-01`) on
+/// Anthropic's own API. Lets an effort change mid-session keep the top-level
+/// `output_config`, which is part of the prompt-cache key, byte-stable.
+/// Support matrix: Opus >= 5, Sonnet >= 5.5, Haiku 5.5, Fable >= 5.1 and
+/// Mythos >= 5.1. Vertex, Bedrock and other gateways reject the field.
+pub fn anthropic_per_message_effort(model: &str) -> bool {
+    let base = normalized_claude_caps_key(model);
+    if !base.starts_with("claude-") {
+        return false;
+    }
+    let (family, Some(version)) = parse_claude_family_version(&base) else {
+        return false;
+    };
+    match family {
+        Some("opus") => version >= (5, 0),
+        Some("sonnet") => version >= (5, 5),
+        Some("haiku") => ((5, 5)..(6, 0)).contains(&version),
+        Some("fable" | "mythos") => version >= (5, 1),
+        _ => false,
+    }
+}
+
 /// Models whose adaptive thinking is mandatory. Match normalized versions, not
 /// prefixes, so Opus 5 and Fable 5 keep their existing optional-thinking behavior.
 /// Verified against the Opus 5.5 migration guide (2026-09-22). Fable 5.2 was
@@ -422,6 +445,34 @@ pub fn anthropic_map_tool_name_from_oauth(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::ALL_CLAUDE_MODELS;
+
+    #[test]
+    fn per_message_effort_matches_official_support_matrix() {
+        for model in [
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-opus-5.5[1m]",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+            "claude-fable-5-2",
+            "claude-mythos-5-1",
+        ] {
+            assert!(anthropic_per_message_effort(model), "{model}");
+        }
+        for model in [
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+            "claude-haiku-6",
+            "claude-fable-5",
+            "claude-mythos-5",
+            "gpt-6.2-sol",
+        ] {
+            assert!(!anthropic_per_message_effort(model), "{model}");
+        }
+    }
 
     #[test]
     fn opus_55_documented_capabilities_and_mandatory_thinking() {

@@ -81,7 +81,7 @@ impl App {
         self.side_panel_user_hidden = false;
         self.side_panel_explicit_hidden = false;
         self.apply_side_panel_snapshot(snapshot);
-        let _ = crate::catchup::mark_seen(&session.id, session.updated_at);
+        let _ = crate::catchup::mark_seen(session.id(), session.updated_at());
     }
 
     pub(super) fn snapshot_without_catchup(&self) -> SidePanelSnapshot {

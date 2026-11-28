@@ -1,4 +1,5 @@
 use super::*;
+use jcode_config_types::env::{parse_bool as parse_env_bool, parse_list as parse_env_list};
 
 impl Config {
     /// Apply environment variable overrides
@@ -7,6 +8,11 @@ impl Config {
         reason = "Environment override parsing is intentionally explicit and grouped by config area"
     )]
     pub(crate) fn apply_env_overrides(&mut self) {
+        if let Ok(endpoint) = std::env::var("JCODE_JARVIS_SPEECH_ENDPOINT") {
+            // Preserve an explicitly empty value so endpoint validation fails
+            // rather than silently changing the selected voice to eSpeak.
+            self.jarvis.speech.endpoint = Some(endpoint);
+        }
         if let Ok(value) = std::env::var("JCODE_BROWSER_HANDOFF") {
             self.tools.browser_handoff = value == "1" || value.eq_ignore_ascii_case("true");
         }
@@ -180,186 +186,7 @@ impl Config {
         }
 
         // Display
-        if let Ok(v) = std::env::var("JCODE_DIFF_MODE") {
-            match v.to_lowercase().as_str() {
-                "off" | "none" | "0" | "false" => self.display.diff_mode = DiffDisplayMode::Off,
-                "inline" | "on" | "1" | "true" => self.display.diff_mode = DiffDisplayMode::Inline,
-                "full-inline" | "full_inline" | "fullinline" | "inline-full" | "inline_full"
-                | "inlinefull" | "full" => {
-                    self.display.diff_mode = DiffDisplayMode::FullInline;
-                }
-                "file" => self.display.diff_mode = DiffDisplayMode::File,
-                _ => {}
-            }
-        } else if let Ok(v) = std::env::var("JCODE_SHOW_DIFFS")
-            && let Some(parsed) = parse_env_bool(&v)
-        {
-            self.display.diff_mode = if parsed {
-                DiffDisplayMode::Inline
-            } else {
-                DiffDisplayMode::Off
-            };
-        }
-        if let Ok(v) = std::env::var("JCODE_PIN_IMAGES")
-            && let Some(parsed) = parse_env_bool(&v)
-        {
-            self.display.pin_images = parsed;
-        }
-        if let Ok(v) = std::env::var("JCODE_PIN_TODOS")
-            && let Some(parsed) = parse_env_bool(&v)
-        {
-            self.display.pin_todos = parsed;
-        }
-        if let Ok(v) = std::env::var("JCODE_DISPLAY_CENTERED") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.centered = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_QUEUE_MODE") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.queue_mode = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_AUTO_SERVER_RELOAD") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.auto_server_reload = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_MOUSE_CAPTURE") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.mouse_capture = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_DEBUG_SOCKET") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.debug_socket = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_NO_EMOJI")
-            && let Some(parsed) = parse_env_bool(&v)
-        {
-            self.display.emoji = !parsed;
-        }
-        if let Ok(v) = std::env::var("JCODE_SHOW_THINKING") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.show_thinking = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_REASONING_DISPLAY") {
-            if let Some(mode) = crate::config::ReasoningDisplayMode::parse(&v) {
-                self.display.set_reasoning_display(mode);
-            }
-        }
-        // A front-end default, applied only when the user has not made an
-        // explicit choice. The desktop uses this so its transcript shows live
-        // thinking out of the box without silently overriding config.
-        if !self.display.has_explicit_reasoning_display()
-            && let Ok(v) = std::env::var("JCODE_DEFAULT_REASONING_DISPLAY")
-            && let Some(mode) = crate::config::ReasoningDisplayMode::parse(&v)
-        {
-            self.display.set_reasoning_display(mode);
-        }
-        if let Ok(v) = std::env::var("JCODE_MARKDOWN_SPACING") {
-            match v.trim().to_lowercase().as_str() {
-                "compact" => self.display.markdown_spacing = MarkdownSpacingMode::Compact,
-                "document" | "doc" => {
-                    self.display.markdown_spacing = MarkdownSpacingMode::Document;
-                }
-                _ => {}
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_IDLE_ANIMATION") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.idle_animation = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_PROMPT_ENTRY_ANIMATION") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.prompt_entry_animation = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_DISABLED_ANIMATIONS") {
-            self.display.disabled_animations = parse_env_list(&v);
-        }
-        if let Ok(v) = std::env::var("JCODE_ACTIVE_SESSIONS_MANAGER") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.active_sessions_manager = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_EXTERNAL_SESSIONS") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.external_sessions = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_RESUME_PROJECT_SCOPE") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.resume_project_scope = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_RESUME_TIME") {
-            if let Some(parsed) = super::ResumeTimeMode::parse(&v) {
-                self.display.resume_time = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_RESUME_OPEN_ELSEWHERE") {
-            if let Some(parsed) = super::ResumeOpenElsewhere::parse(&v) {
-                self.display.resume_open_elsewhere = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_PERFORMANCE") {
-            let trimmed = v.trim().to_lowercase();
-            if matches!(trimmed.as_str(), "auto" | "full" | "reduced" | "minimal") {
-                self.display.performance = trimmed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_ANIMATION_FPS") {
-            if let Ok(fps) = v.trim().parse::<u32>() {
-                self.display.animation_fps = fps.clamp(1, 120);
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_REDRAW_FPS") {
-            if let Ok(fps) = v.trim().parse::<u32>() {
-                self.display.redraw_fps = fps.clamp(1, 120);
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_COPY_BADGE_ALT_LABEL") {
-            self.display.copy_badge_alt_label = v;
-        }
-        if let Ok(v) = std::env::var("JCODE_COMPACT_NOTIFICATIONS") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.compact_notifications = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_SHOW_AGENTGREP_OUTPUT") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.show_agentgrep_output = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_SHOW_BASH_OUTPUT") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.show_bash_output = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_TOOL_CALL_DETAILS") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.tool_call_details = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_LATEX_RENDERING")
-            && let Some(mode) = LatexRenderingMode::parse(&v)
-        {
-            self.display.latex_rendering = mode;
-        }
-        if let Ok(v) = std::env::var("JCODE_CHAT_NATIVE_SCROLLBAR") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.native_scrollbars.chat = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_SIDE_PANEL_NATIVE_SCROLLBAR") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.native_scrollbars.side_panel = parsed;
-            }
-        }
+        self.display.apply_env_overrides();
 
         // Features
         if let Ok(v) = std::env::var("JCODE_MEMORY_ENABLED") {
@@ -419,109 +246,7 @@ impl Config {
         }
 
         // Agents (spawned helper sessions)
-        if let Ok(v) = std::env::var("JCODE_SWARM_MODEL") {
-            let trimmed = v.trim();
-            self.agents.swarm_model = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            };
-        }
-        if let Ok(v) = std::env::var("JCODE_SWARM_EFFORT") {
-            let trimmed = v.trim();
-            self.agents.swarm_effort = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            };
-        }
-        if let Ok(value) = std::env::var("JCODE_SWARM_ROOT_EFFORT") {
-            let value = value.trim();
-            self.agents.swarm_root_effort = (!value.is_empty()).then(|| value.to_string());
-        }
-        if let Ok(v) = std::env::var("JCODE_SWARM_SPAWN_MODE") {
-            if let Some(parsed) = SwarmSpawnMode::parse(&v) {
-                self.agents.swarm_spawn_mode = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_SWARM_STRIP_LAYOUT") {
-            if let Some(parsed) = SwarmStripLayout::parse(&v) {
-                self.agents.swarm_strip_layout = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_SWARM_MAX_CONCURRENT_AGENTS") {
-            if let Ok(parsed) = v.trim().parse::<usize>() {
-                self.agents.swarm_max_concurrent_agents = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_SWARM_STALL_AFTER_SECS") {
-            if let Ok(parsed) = v.trim().parse::<u64>() {
-                self.agents.swarm_stall_after_secs = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_SWARM_STALL_NUDGE") {
-            match v.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => self.agents.swarm_stall_nudge = true,
-                "0" | "false" | "no" | "off" => self.agents.swarm_stall_nudge = false,
-                _ => {}
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
-            self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
-        }
-        for (key, target) in [
-            ("JCODE_MEMORY_JEV_MODEL", &mut self.agents.memory_jev_model),
-            (
-                "JCODE_BROWSER_JEV_MODEL",
-                &mut self.agents.browser_jev_model,
-            ),
-            ("JCODE_VOICE_JEV_MODEL", &mut self.agents.voice_jev_model),
-        ] {
-            if let Ok(value) = std::env::var(key) {
-                let value = value.trim();
-                *target = (!value.is_empty()).then(|| value.to_string());
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
-            let trimmed = v.trim();
-            self.agents.memory_model = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            };
-        }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_SIDECAR_ENABLED") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.agents.memory_sidecar_enabled = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_BACKEND") {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                self.agents.memory_embedding_backend = trimmed.to_string();
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_MODEL") {
-            let trimmed = v.trim();
-            self.agents.memory_embedding_model = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            };
-        }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_BASE_URL") {
-            let trimmed = v.trim();
-            self.agents.memory_embedding_base_url = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            };
-        }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_EMBEDDING_DIM") {
-            if let Ok(parsed) = v.trim().parse::<usize>() {
-                self.agents.memory_embedding_dim = Some(parsed);
-            }
-        }
+        self.agents.apply_env_overrides();
 
         // Terminal spawning
         if let Ok(v) = std::env::var("JCODE_SPAWN_HOOK") {
@@ -973,20 +698,4 @@ impl Config {
             }
         }
     }
-}
-
-fn parse_env_bool(raw: &str) -> Option<bool> {
-    match raw.trim().to_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
-
-fn parse_env_list(raw: &str) -> Vec<String> {
-    raw.split([',', '\n'])
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(ToString::to_string)
-        .collect()
 }

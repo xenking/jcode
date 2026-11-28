@@ -8,7 +8,7 @@ use crate::{
 
 use super::{
     args::{Args, Command},
-    dispatch, hot_exec, output, terminal,
+    dispatch, hot_exec, output, terminal, worktree_launch,
 };
 
 fn sync_output_style_from_config() {
@@ -18,7 +18,8 @@ fn sync_output_style_from_config() {
 pub async fn run() -> Result<()> {
     // Parse once, before startup side effects. Invalid arguments and --help
     // must not harden credential files or create configuration/telemetry state.
-    let args = Args::parse();
+    let mut args = Args::parse();
+    worktree_launch::prepare(&mut args)?;
     // Data belongs to the executable, not to the application/TUI dependency
     // chain. Every entrypoint using this startup path gets version-matched docs.
     crate::register_bundled_docs();
@@ -112,7 +113,7 @@ pub async fn run() -> Result<()> {
     crate::memory::register_synthetic_entry_provider(|| {
         let global = crate::skill::SkillRegistry::shared_snapshot();
         crate::skill::SkillRegistry::effective_for_working_dir(&global, None)
-            .list()
+            .list_for_model()
             .into_iter()
             .map(|skill| skill.as_memory_entry())
             .collect()
@@ -310,6 +311,21 @@ fn parse_and_prepare_args(args: Args) -> Result<Args> {
     }
 
     output::set_quiet_enabled(args.quiet);
+    if args.jarvis || args.jarvis_always_on || args.jarvis_screen {
+        anyhow::ensure!(
+            args.command.is_none(),
+            "--jarvis currently supports the interactive TUI only"
+        );
+        // Validate the selected backend before entering raw terminal mode.
+        drop(crate::tui::jarvis::create_speech_player()?);
+        crate::tui::jarvis::enable();
+        if args.jarvis_always_on {
+            crate::tui::jarvis::enable_always_on();
+        }
+        if args.jarvis_screen {
+            crate::tui::jarvis::enable_screen();
+        }
+    }
 
     if let Some(cwd) = &args.cwd {
         std::env::set_current_dir(cwd)?;
@@ -353,7 +369,9 @@ fn remote_working_dir_is_absolute(path: &str) -> bool {
 }
 
 fn spawn_background_update_check(args: &Args) {
-    let check_updates = should_spawn_background_update_check(args);
+    // JCODE_NO_AUTO_UPDATE disables the whole background check (release and source builds).
+    let check_updates = should_spawn_background_update_check(args)
+        && std::env::var_os("JCODE_NO_AUTO_UPDATE").is_none();
     let auto_update = should_auto_install_update(args);
 
     if !check_updates {
@@ -367,7 +385,10 @@ fn spawn_background_update_check(args: &Args) {
                 update::UpdateCheckResult::UpdateAvailable {
                     current, latest, ..
                 } => {
-                    logging::info(&format!("Update available: {} -> {}", current, latest));
+                    logging::info(&format!(
+                        "Update available: {} -> {}. Run `jcode update` to install it.",
+                        current, latest
+                    ));
                 }
                 update::UpdateCheckResult::UpdateInstalled { version, path } => {
                     // When an interactive TUI session is running, hand the switch
@@ -443,9 +464,7 @@ fn spawn_background_update_check(args: &Args) {
                             ));
                         }
                     } else {
-                        logging::info(
-                            "Update available! Run `jcode update` or `/reload` to update.",
-                        );
+                        logging::info("Update available! Run `jcode update` to install it.");
                     }
                 }
             } else {
@@ -502,7 +521,7 @@ fn should_spawn_background_update_check_with_config(args: &Args, check_updates: 
             Some(Command::Update { .. })
                 | Some(Command::Serve { .. })
                 | Some(Command::Server { .. })
-                | Some(Command::Acp)
+                | Some(Command::Acp { .. })
         )
         && args.resume.is_none()
 }
@@ -560,6 +579,56 @@ mod tests {
         };
         assert_eq!(current, jcode_build_meta::version());
         assert_eq!(latest, "latest source");
+    }
+
+    /// 2026-11-18 incident: auto-update pulled and built inside the checkout
+    /// the user was working in, then installed whatever `target/release` held.
+    #[test]
+    fn auto_update_target_is_read_from_upstream_without_touching_the_checkout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = ProcessCommand::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args([
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let upstream = dir.path().join("upstream");
+        let checkout = dir.path().join("checkout");
+        std::fs::create_dir_all(&upstream).unwrap();
+        git(&upstream, &["init", "-q", "-b", "master"]);
+        git(&upstream, &["commit", "-q", "--allow-empty", "-m", "old"]);
+        git(dir.path(), &["clone", "-q", "upstream", "checkout"]);
+        let local_head = git(&checkout, &["rev-parse", "HEAD"]);
+        git(&upstream, &["commit", "-q", "--allow-empty", "-m", "new"]);
+        let upstream_head = git(&upstream, &["rev-parse", "HEAD"]);
+        git(&checkout, &["fetch", "-q"]);
+
+        let (remote, sha) = hot_exec::upstream_update_target(&checkout).expect("target");
+        assert_eq!(sha, upstream_head, "the update is the upstream commit");
+        assert_eq!(
+            std::fs::canonicalize(&remote).unwrap(),
+            std::fs::canonicalize(&upstream).unwrap()
+        );
+        assert_eq!(
+            git(&checkout, &["rev-parse", "HEAD"]),
+            local_head,
+            "the working checkout is not pulled"
+        );
+        assert!(!checkout.join("target").exists(), "nothing is built in it");
     }
 
     #[test]
@@ -715,22 +784,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_install_allowed_without_live_terminal() {
+    fn auto_install_is_off_by_default_and_opt_in_via_flag() {
         let args = parse_args(&["jcode", "login"]);
-        assert!(should_auto_install_update(&args));
-    }
-
-    #[test]
-    fn auto_install_allowed_with_live_terminal_attached() {
-        let args = parse_args(&["jcode", "login"]);
-        assert!(should_auto_install_update(&args));
-    }
-
-    #[test]
-    fn auto_install_respects_explicit_disable_even_without_terminal() {
-        let mut args = parse_args(&["jcode", "login"]);
-        args.auto_update = false;
         assert!(!should_auto_install_update(&args));
+        let args = parse_args(&["jcode", "--auto-update", "login"]);
+        assert!(should_auto_install_update(&args));
     }
 
     #[test]
@@ -752,7 +810,7 @@ mod tests {
         let args = parse_args(&["jcode", "update"]);
         assert!(matches!(args.command, Some(Command::Update { .. })));
         assert!(!should_spawn_background_update_check(&args));
-        assert!(should_auto_install_update(&args));
+        assert!(!should_auto_install_update(&args));
     }
 
     #[test]

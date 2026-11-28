@@ -16,11 +16,11 @@ impl App {
 
         let event = if force {
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(category, reason)
-                .with_session_id(self.session.id.clone())
+                .with_session_id(self.session.id().to_owned())
                 .force_attribution()
         } else {
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(category, reason)
-                .with_session_id(self.session.id.clone())
+                .with_session_id(self.session.id().to_owned())
         };
 
         let now = Instant::now();
@@ -110,7 +110,7 @@ impl App {
                 crate::runtime_memory_log::RuntimeMemoryLogTrigger {
                     category: "process_heartbeat".to_string(),
                     reason: "periodic".to_string(),
-                    session_id: Some(self.session.id.clone()),
+                    session_id: Some(self.session.id().to_owned()),
                     detail: None,
                 },
                 controller.build_sampling_for_process(None),
@@ -126,7 +126,7 @@ impl App {
                     crate::runtime_memory_log::RuntimeMemoryLogTrigger {
                         category: "process_heartbeat".to_string(),
                         reason: "threshold_flush".to_string(),
-                        session_id: Some(self.session.id.clone()),
+                        session_id: Some(self.session.id().to_owned()),
                         detail: None,
                     },
                     sampling,
@@ -147,7 +147,7 @@ impl App {
                 crate::runtime_memory_log::RuntimeMemoryLogTrigger {
                     category: "attribution_heartbeat".to_string(),
                     reason: "preflight".to_string(),
-                    session_id: Some(self.session.id.clone()),
+                    session_id: Some(self.session.id().to_owned()),
                     detail: None,
                 },
                 crate::runtime_memory_log::RuntimeMemoryLogSampling::default(),
@@ -163,7 +163,7 @@ impl App {
                     crate::runtime_memory_log::RuntimeMemoryLogTrigger {
                         category: "attribution_heartbeat".to_string(),
                         reason: "periodic".to_string(),
-                        session_id: Some(self.session.id.clone()),
+                        session_id: Some(self.session.id().to_owned()),
                         detail: None,
                     },
                     sampling,
@@ -258,7 +258,7 @@ impl App {
     fn runtime_memory_client_info(&self) -> crate::runtime_memory_log::ClientRuntimeMemoryClient {
         crate::runtime_memory_log::ClientRuntimeMemoryClient {
             client_instance_id: self.remote_client_instance_id.clone(),
-            session_id: self.session.id.clone(),
+            session_id: self.session.id().to_owned(),
             remote_session_id: self.remote_session_id.clone(),
             provider: self.provider.name().to_string(),
             model: self.provider.model(),

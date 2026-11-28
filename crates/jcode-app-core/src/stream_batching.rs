@@ -168,6 +168,17 @@ struct Pending {
     flush_at: Instant,
 }
 
+/// Sends events that carry no ordering with held text, such as keepalives and
+/// progress notes. A disconnected receiver is the receiver's concern here.
+#[derive(Clone)]
+pub(crate) struct UnbatchedSender(mpsc::UnboundedSender<ServerEvent>);
+
+impl UnbatchedSender {
+    pub(crate) fn send(&self, event: ServerEvent) {
+        let _ = self.0.send(event);
+    }
+}
+
 /// A turn's event sender that holds back streamed text while the session is
 /// batched. Every other event flushes the held text first, so ordering between
 /// text and tool calls, completion and errors is unchanged.
@@ -193,14 +204,19 @@ impl BatchingSender {
     }
 
     fn flush_locked(&self, pending: &mut Option<Pending>) {
-        if let Some(pending) = pending.take() {
-            let _ = self.tx.send(pending.kind.event(pending.text));
+        if let Some(pending) = pending.take()
+            && self.tx.send(pending.kind.event(pending.text)).is_err()
+        {
+            crate::logging::info(&format!(
+                "Stream receiver disconnected for session {}",
+                self.session_id
+            ));
         }
     }
 
-    /// The unbatched sender, for events that carry no ordering with the text.
-    pub(crate) fn raw(&self) -> &mpsc::UnboundedSender<ServerEvent> {
-        &self.tx
+    /// A handle for events that carry no ordering with the held text.
+    pub(crate) fn unbatched(&self) -> UnbatchedSender {
+        UnbatchedSender(self.tx.clone())
     }
 
     /// When held text must be flushed, if any is held.
@@ -213,10 +229,11 @@ impl BatchingSender {
         self.flush_locked(&mut pending);
     }
 
+    #[allow(clippy::result_large_err)]
     pub(crate) fn send(
         &self,
         event: ServerEvent,
-    ) -> Result<(), mpsc::error::SendError<ServerEvent>> {
+    ) -> Result<(), Box<mpsc::error::SendError<ServerEvent>>> {
         let (kind, text) = match event {
             ServerEvent::TextDelta { text } => (Kind::Text, text),
             ServerEvent::ReasoningDelta { text } => (Kind::Reasoning, text),
@@ -224,17 +241,17 @@ impl BatchingSender {
             other => {
                 let mut pending = self.pending();
                 self.flush_locked(&mut pending);
-                return self.tx.send(other);
+                return self.tx.send(other).map_err(Box::new);
             }
         };
         let mut pending = self.pending();
         let Some(period) = session_batch_period(&self.session_id) else {
             self.flush_locked(&mut pending);
-            return self.tx.send(kind.event(text));
+            return self.tx.send(kind.event(text)).map_err(Box::new);
         };
         if self.tx.is_closed() {
             *pending = None;
-            return Err(mpsc::error::SendError(kind.event(text)));
+            return Err(Box::new(mpsc::error::SendError(kind.event(text))));
         }
         let now = Instant::now();
         match &mut *pending {
@@ -290,6 +307,38 @@ mod tests {
 
     fn ids(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn disconnected_sender_returns_original_payload_for_all_send_paths() {
+        for batched in [false, true] {
+            let session = format!("batch-closed-{batched}");
+            let connection = format!("{session}-client");
+            if batched {
+                set_connection_focus(&connection, &session, false, false);
+                note_session_targets(&session, &ids(&[&connection]));
+            }
+            let (tx, rx) = mpsc::unbounded_channel();
+            let sender = BatchingSender::new(tx, session);
+            drop(rx);
+            let payload = "original delta".repeat(128);
+            let original = payload.as_ptr();
+            let error = sender
+                .send(ServerEvent::TextDelta { text: payload })
+                .unwrap_err();
+            let ServerEvent::TextDelta { text } = error.0 else {
+                panic!("expected original text delta");
+            };
+            assert_eq!(text.as_ptr(), original);
+            assert!(matches!(
+                sender.send(ServerEvent::TextDone).unwrap_err().0,
+                ServerEvent::TextDone
+            ));
+            assert!(sender.deadline().is_none());
+            if batched {
+                forget_connection(&connection);
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]

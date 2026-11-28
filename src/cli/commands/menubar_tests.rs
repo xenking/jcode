@@ -2,12 +2,12 @@ use super::*;
 use crate::session::SessionCounts;
 
 #[test]
-fn title_no_sessions_is_icon_only() {
+fn title_no_sessions_remains_visible_without_an_icon() {
     let title = format_menubar_title(SessionCounts {
         total: 0,
         streaming: 0,
     });
-    assert_eq!(title, "");
+    assert_eq!(title, "0/0");
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn session_menu_item_title_is_icon_only_without_meaningful_title() {
 }
 
 #[test]
-fn session_menu_item_title_loads_persisted_todo_title() {
+fn session_menu_item_title_prefers_generated_title_then_persisted_todo_title() {
     let _guard = crate::storage::lock_test_env();
     let previous_home = std::env::var_os("JCODE_HOME");
     let temp = tempfile::tempdir().expect("create temporary JCODE_HOME");
@@ -89,6 +89,8 @@ fn session_menu_item_title_loads_persisted_todo_title() {
     crate::todo::save_todos(
         session_id,
         &[crate::todo::TodoItem {
+            lane_speed: None,
+            lane_profile: None,
             content: "Use todo context in the menu bar".to_string(),
             status: "in_progress".to_string(),
             priority: "high".to_string(),
@@ -110,6 +112,15 @@ fn session_menu_item_title_loads_persisted_todo_title() {
     )
     .expect("save todos");
 
+    assert_eq!(
+        format_session_menu_item_title(session_id, false),
+        "🐃 Generated session title"
+    );
+    session.apply_titles(crate::session::Titles {
+        title: None,
+        ..session.titles()
+    });
+    session.save().expect("clear generated session title");
     assert_eq!(
         format_session_menu_item_title(session_id, false),
         "🐃 Meaningful menu labels"
@@ -134,6 +145,7 @@ fn menu_presence_includes_only_user_root_sessions() {
         None,
         Some("Root work".to_string()),
     );
+    root.set_debug(false);
     root.mark_active();
     root.save().expect("save root session");
 
@@ -148,9 +160,10 @@ fn menu_presence_includes_only_user_root_sessions() {
 
     let mut child = crate::session::Session::create_with_id(
         "session_bear_child".to_string(),
-        Some(root.id.clone()),
+        Some(root.id().to_owned()),
         Some("Child work".to_string()),
     );
+    child.set_debug(false);
     child.mark_active();
     child.save().expect("save child session");
 

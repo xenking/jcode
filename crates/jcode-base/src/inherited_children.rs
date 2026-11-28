@@ -17,13 +17,14 @@
 /// from detached work that is meant to outlive a reload.
 pub const MCP_CHILD_MARKER_ENV: &str = "JCODE_MCP_CHILD";
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod imp {
     use std::collections::HashSet;
     use std::time::Duration;
 
     const REAP_INTERVAL: Duration = Duration::from_secs(30);
 
+    #[cfg(target_os = "linux")]
     fn children_of(pid: u32) -> HashSet<i32> {
         let mut out = HashSet::new();
         let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
@@ -49,6 +50,7 @@ mod imp {
         out
     }
 
+    #[cfg(target_os = "linux")]
     fn has_mcp_marker(pid: i32) -> bool {
         let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
             return false;
@@ -57,6 +59,75 @@ mod imp {
         environ
             .split(|b| *b == 0)
             .any(|entry| entry.starts_with(needle.as_bytes()))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn children_of(pid: u32) -> HashSet<i32> {
+        // Unlike proc_listchildpids, this libproc query has a byte count and
+        // includes zombies. PROC_PPID_ONLY is defined in sys/proc_info.h.
+        const PROC_PPID_ONLY: u32 = 6;
+        let pid_size = std::mem::size_of::<libc::pid_t>();
+        // SAFETY: a null buffer requests the buffer size only.
+        let needed = unsafe { libc::proc_listpids(PROC_PPID_ONLY, pid, std::ptr::null_mut(), 0) };
+        if needed <= 0 {
+            return HashSet::new();
+        }
+        let mut pids = vec![0; needed as usize / pid_size + 32];
+        let size = (pids.len() * pid_size) as libc::c_int;
+        // SAFETY: pids owns a writable buffer of size bytes.
+        let written =
+            unsafe { libc::proc_listpids(PROC_PPID_ONLY, pid, pids.as_mut_ptr().cast(), size) };
+        pids.truncate(written.max(0) as usize / pid_size);
+        pids.into_iter().filter(|&pid| pid > 0).collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn has_mcp_marker(pid: i32) -> bool {
+        // SAFETY: this sysconf query has no pointer arguments.
+        let max_args = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+        if max_args <= 0 {
+            return false;
+        }
+        let mut data = vec![0u8; max_args as usize];
+        let mut len = data.len();
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        // SAFETY: data is writable for len bytes, mib has three components,
+        // and the null new-value pointer makes this a read-only query.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as _,
+                data.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        rc == 0 && macos_args_have_mcp_marker(&data[..len.min(data.len())])
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_args_have_mcp_marker(data: &[u8]) -> bool {
+        // KERN_PROCARGS2 returns argc, the executable path, NUL padding,
+        // argc arguments and then the environment. An argv string matching
+        // the marker must not cause a non-MCP child to be killed.
+        let Some((argc, strings)) = data.split_first_chunk::<{ std::mem::size_of::<i32>() }>()
+        else {
+            return false;
+        };
+        let argc = i32::from_ne_bytes(*argc);
+        let Some(path_end) = strings.iter().position(|&byte| byte == 0) else {
+            return false;
+        };
+        let Some(argv_start) = strings[path_end..].iter().position(|&byte| byte != 0) else {
+            return false;
+        };
+        let key = super::MCP_CHILD_MARKER_ENV.as_bytes();
+        argc > 0
+            && strings[path_end + argv_start..]
+                .split(|&byte| byte == 0)
+                .skip(argc as usize)
+                .any(|entry| entry.strip_prefix(key).is_some_and(|v| v.starts_with(b"=")))
     }
 
     /// Reap whatever has exited. Returns the PIDs still alive.
@@ -109,7 +180,7 @@ mod imp {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     mod tests {
         #[test]
         fn reaps_exited_inherited_child() {
@@ -158,6 +229,40 @@ mod imp {
             let _ = plain.wait();
         }
     }
+
+    #[cfg(all(test, target_os = "macos"))]
+    mod macos_tests {
+        #[test]
+        fn detects_darwin_child_mcp_environment_marker() {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "inherited_children::imp::macos_tests::sleep_for_marker_probe",
+                ])
+                .env(super::super::MCP_CHILD_MARKER_ENV, "1")
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let marked = super::has_mcp_marker(child.id() as i32);
+            let _ = child.kill();
+            child.wait().unwrap();
+            assert!(marked);
+        }
+
+        #[test]
+        #[ignore = "child process for the environment marker probe"]
+        fn sleep_for_marker_probe() {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+
+        #[test]
+        fn darwin_marker_in_argv_is_not_an_environment_marker() {
+            let mut data = 2_i32.to_ne_bytes().to_vec();
+            data.extend_from_slice(b"/bin/probe\0\0probe\0JCODE_MCP_CHILD=1\0OTHER=1\0");
+            assert!(!super::macos_args_have_mcp_marker(&data));
+        }
+    }
 }
 
 /// Kill stale MCP servers and reap exited children inherited from a previous
@@ -167,8 +272,68 @@ pub fn start() {
     // reload too), and the server calls it again. A second snapshot taken
     // after this image spawned children would steal their exit statuses.
     static ONCE: std::sync::Once = std::sync::Once::new();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     ONCE.call_once(imp::start);
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     ONCE.call_once(|| {});
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod exec_tests {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    const PHASE: &str = "JCODE_TEST_INHERITED_CHILD_PHASE";
+    const HELPER: &str = "inherited_children::exec_tests::exec_with_exited_child";
+
+    #[test]
+    fn startup_reaps_a_zombie_inherited_across_exec() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", HELPER])
+            .env(PHASE, "spawn")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "exec probe failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[test]
+    #[ignore = "run in a dedicated process by the exec regression"]
+    fn exec_with_exited_child() {
+        let phase = std::env::var(PHASE).expect("exec probe phase");
+        if phase == "spawn" {
+            #[allow(clippy::zombie_processes)] // The next image must reap this child.
+            let child = Command::new("/usr/bin/true").spawn().unwrap();
+            let pid = child.id();
+            // Wait for exit without reaping the child before exec.
+            let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    info.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            assert_eq!(rc, 0, "waitid: {}", std::io::Error::last_os_error());
+            let error = Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", "--exact", HELPER])
+                .env(PHASE, pid.to_string())
+                .exec();
+            panic!("exec: {error}");
+        }
+
+        let pid = phase.parse::<libc::pid_t>().unwrap();
+        super::start();
+        let result = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(result, -1, "inherited child was not reaped at startup");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
 }

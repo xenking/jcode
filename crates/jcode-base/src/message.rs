@@ -9,11 +9,12 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 pub use jcode_message_types::{
-    CacheControl, ConnectionPhase, ContentBlock, InputShellResult, Message, Role, StreamEvent,
-    TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition, cache_relevant_message_hashes,
-    cache_relevant_message_value, cache_relevant_messages, ends_with_fresh_user_turn,
-    extend_stable_hash, messages_with_dynamic_system_context, provider_native, replace_text_suffix,
-    sanitize_tool_id, stable_message_hash,
+    CacheControl, ConnectionPhase, ContentBlock, Estimator, InputShellResult, Message, Role,
+    SharedContent, StreamEvent, TOOL_OUTPUT_MISSING_TEXT, TokenFamily, ToolCall, ToolDefinition,
+    cache_relevant_message_hashes, cache_relevant_message_value, cache_relevant_messages,
+    ends_with_fresh_user_turn, estimate_text, extend_stable_hash,
+    messages_with_dynamic_system_context, provider_native, replace_text_suffix, sanitize_tool_id,
+    stable_message_hash,
 };
 
 mod notifications;
@@ -31,6 +32,12 @@ pub use notifications::{
 
 /// Legacy persisted wakes can retain the provider's user role even though
 /// their display role is a background notification, never a human prompt.
+/// Whether `provider_name` names Anthropic, whose thinking blocks carry
+/// signatures that must be replayed as stored.
+pub(crate) fn is_anthropic_reasoning_provider(provider_name: &str) -> bool {
+    provider_name.eq_ignore_ascii_case("anthropic") || provider_name.eq_ignore_ascii_case("claude")
+}
+
 pub fn is_background_task_notification_content(content: &str) -> bool {
     let trimmed = content.trim_start();
     if trimmed.starts_with("🐝 **Swarm await finished**") {
@@ -61,6 +68,71 @@ fn compile_static_regexes(patterns: &[&str]) -> Vec<Regex> {
         .iter()
         .filter_map(|pattern| compile_static_regex(pattern))
         .collect()
+}
+
+fn replace_redaction_matches(text: &mut String, pattern: &Regex, replacement: &str) {
+    // Regex already returns a borrowed value when there are no matches. Keep
+    // the existing allocation instead of turning that borrow into a full copy
+    // for every pattern in the redaction pipeline.
+    if let std::borrow::Cow::Owned(replaced) = pattern.replace_all(text.as_str(), replacement) {
+        *text = replaced;
+    }
+}
+
+/// Redact secrets from a short one-line preview of user or agent text, such as
+/// a swarm member's status detail or task label.
+///
+/// Previews differ from persisted tool output in two ways that defeat
+/// [`redact_secrets`] alone: whitespace is collapsed, so a `KEY=value`
+/// assignment is no longer at the start of a line, and the text is truncated,
+/// so a token may be cut below the length the strict patterns require.
+pub fn redact_preview_secrets(text: &str) -> String {
+    static INLINE_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    static PARTIAL_TOKEN_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+
+    let mut redacted = text.to_string();
+    let inline = INLINE_PATTERNS.get_or_init(|| {
+        compile_static_regexes(&[
+            // `DB_PASSWORD=...`, `api-key: ...`, `token = "..."` anywhere in the line.
+            // The name must end in the keyword, so prose such as
+            // `tokenizer: ...` is left alone.
+            r#"(?i)\b([A-Za-z0-9_.-]*(?:api[_-]?key|token|secret|password|passwd|pwd|credentials?|cookie)\s*[:=]\s*)(?:"[^"]*"?|'[^']*'?|[^\s,;]+)"#,
+            r"(?i)\b(authorization\s*[:=]\s*(?:bearer\s+|basic\s+)?)[^\s,;]+",
+            // Credentials embedded in a URL: scheme://user:secret@host
+            r"([a-zA-Z][a-zA-Z0-9+.-]*://[^\s/:@]+:)[^\s/@]+@",
+        ])
+    });
+    for (index, re) in inline.iter().enumerate() {
+        let replacement = if index == 2 {
+            "${1}[REDACTED_SECRET]@"
+        } else {
+            "${1}[REDACTED_SECRET]"
+        };
+        replace_redaction_matches(&mut redacted, re, replacement);
+    }
+    // `redact_secrets` treats a known `KEY=` at line start as owning the rest
+    // of the line, which is right for env files but would erase the request
+    // that follows an inline credential. End the line after each value already
+    // redacted so only the value is removed. Previews collapse whitespace, so
+    // turning that newline back into a space loses nothing.
+    let mut redacted =
+        redact_secrets(&redacted.replace("[REDACTED_SECRET] ", "[REDACTED_SECRET]\n"))
+            .replace("[REDACTED_SECRET]\n", "[REDACTED_SECRET] ");
+    let partial = PARTIAL_TOKEN_PATTERNS.get_or_init(|| {
+        compile_static_regexes(&[
+            r"\bsk-[A-Za-z0-9_-]{6,}(?:\.\.\.|…)?",
+            r"\b(?:ghp_|github_pat_|gho_|ghs_)[A-Za-z0-9_]{4,}(?:\.\.\.|…)?",
+            r"\bxox[baprs]-[A-Za-z0-9-]{4,}(?:\.\.\.|…)?",
+            r"\bAKIA[0-9A-Z]{8,}(?:\.\.\.|…)?",
+            r"\bAIza[0-9A-Za-z_-]{8,}(?:\.\.\.|…)?",
+            r"\beyJ[A-Za-z0-9_-]{10,}[A-Za-z0-9._-]*(?:\.\.\.|…)?",
+            r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{6,}(?:\.\.\.|…)?",
+        ])
+    });
+    for re in partial {
+        replace_redaction_matches(&mut redacted, re, "[REDACTED_SECRET]");
+    }
+    redacted
 }
 
 /// Redact likely secrets from persisted tool output.
@@ -200,13 +272,11 @@ pub fn redact_secrets(text: &str) -> String {
     .collect();
 
     for re in direct_patterns {
-        redacted = re.replace_all(&redacted, "[REDACTED_SECRET]").into_owned();
+        replace_redaction_matches(&mut redacted, re, "[REDACTED_SECRET]");
     }
 
     for re in assignment_patterns {
-        redacted = re
-            .replace_all(&redacted, "${1}[REDACTED_SECRET]")
-            .into_owned();
+        replace_redaction_matches(&mut redacted, re, "${1}[REDACTED_SECRET]");
     }
 
     // Also redact custom API key variable names configured at runtime.
@@ -240,9 +310,7 @@ pub fn redact_secrets(text: &str) -> String {
             logging::debug(&format!(
                 "adding custom secret redaction pattern for key={key_name}"
             ));
-            redacted = re
-                .replace_all(&redacted, "${1}[REDACTED_SECRET]")
-                .into_owned();
+            replace_redaction_matches(&mut redacted, &re, "${1}[REDACTED_SECRET]");
         }
     }
 
@@ -272,36 +340,115 @@ pub fn push_reasoning_blocks(
     reasoning_signature: Option<&str>,
     store_replay_context: bool,
 ) {
+    let anthropic = is_anthropic_reasoning_provider(provider_name);
+    if store_replay_context
+        && anthropic
+        && let Some(signature) = reasoning_signature.filter(|s| !s.is_empty())
+    {
+        blocks.insert(
+            0,
+            ContentBlock::AnthropicThinking {
+                thinking: reasoning_content.to_string(),
+                signature: signature.to_string(),
+            },
+        );
+        return;
+    }
+
     if reasoning_content.is_empty() {
         return;
     }
 
-    // Whether the replay block we stored already contains the readable text.
-    let mut readable_replay_stored = false;
-    if store_replay_context {
-        if provider_name.eq_ignore_ascii_case("anthropic") {
-            if let Some(signature) = reasoning_signature.filter(|s| !s.is_empty()) {
-                blocks.push(ContentBlock::AnthropicThinking {
-                    thinking: reasoning_content.to_string(),
-                    signature: signature.to_string(),
-                });
-                readable_replay_stored = true;
-            }
-        } else if provider_name.eq_ignore_ascii_case("openai") {
-            // OpenAI native reasoning items carry encrypted content, not readable
-            // text, so a separate history trace is still required below.
+    let text = reasoning_content.to_string();
+    // OpenAI replay items carry encrypted content, not the readable trace.
+    blocks.push(
+        if store_replay_context && !anthropic && !provider_name.eq_ignore_ascii_case("openai") {
+            ContentBlock::Reasoning { text }
         } else {
-            blocks.push(ContentBlock::Reasoning {
-                text: reasoning_content.to_string(),
-            });
-            readable_replay_stored = true;
+            ContentBlock::ReasoningTrace { text }
+        },
+    );
+}
+
+/// Reasoning captured during one stream attempt. Completed signed blocks move
+/// into the ordered response, leaving only non-replayed text in the history trace.
+pub struct TurnReasoning<'a> {
+    provider_name: &'a str,
+    store_replay_context: bool,
+    replay_anthropic: bool,
+    trace: String,
+    signature: String,
+    block_start: usize,
+    signed_text_len: usize,
+    signed_has_text: bool,
+}
+
+impl<'a> TurnReasoning<'a> {
+    pub fn new(provider_name: &'a str, store_replay_context: bool) -> Self {
+        Self {
+            provider_name,
+            store_replay_context,
+            replay_anthropic: store_replay_context
+                && is_anthropic_reasoning_provider(provider_name),
+            trace: String::new(),
+            signature: String::new(),
+            block_start: 0,
+            signed_text_len: 0,
+            signed_has_text: false,
         }
     }
 
-    if !readable_replay_stored {
-        blocks.push(ContentBlock::ReasoningTrace {
-            text: reasoning_content.to_string(),
-        });
+    pub fn push_text(&mut self, delta: &str) {
+        self.trace.push_str(delta);
+    }
+
+    pub fn push_signature(&mut self, delta: &str) {
+        if self.replay_anthropic {
+            self.signature.push_str(delta);
+        }
+    }
+
+    pub fn finish_block(
+        &mut self,
+        items: &mut provider_native::ProviderNativeItems,
+        text_len: usize,
+    ) {
+        if !self.replay_anthropic {
+            return;
+        }
+        if !self.signature.is_empty() {
+            let thinking = if self.block_start == 0 {
+                std::mem::take(&mut self.trace)
+            } else {
+                self.trace.split_off(self.block_start)
+            };
+            self.signed_text_len += thinking.len();
+            self.signed_has_text |= !thinking.trim().is_empty();
+            items.push_anthropic_thinking(text_len, thinking, std::mem::take(&mut self.signature));
+        }
+        self.block_start = self.trace.len();
+    }
+
+    pub fn text_len(&self) -> usize {
+        self.signed_text_len + self.trace.len()
+    }
+
+    pub fn has_text(&self) -> bool {
+        self.signed_has_text || !self.trace.trim().is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::new(self.provider_name, self.store_replay_context);
+    }
+
+    pub fn append_history(&self, blocks: &mut Vec<ContentBlock>) {
+        push_reasoning_blocks(
+            blocks,
+            self.provider_name,
+            &self.trace,
+            None,
+            self.store_replay_context,
+        );
     }
 }
 
@@ -393,6 +540,7 @@ pub fn generated_image_rendered_image(
 ) -> Option<jcode_session_types::RenderedImage> {
     let (media_type, data) = generated_image_payload(path, output_format)?;
     Some(jcode_session_types::RenderedImage {
+        session_image: None,
         history_message_index: None,
         media_type,
         data,

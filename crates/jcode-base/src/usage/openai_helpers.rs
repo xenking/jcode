@@ -12,6 +12,10 @@ pub(super) struct ParsedOpenAIUsageReport {
     pub(super) hard_limit_reached: bool,
     pub(super) available_reset_count: Option<u64>,
     pub(super) ordinary_usage_allowed: Option<bool>,
+    /// Paid credits fund requests past the spent plan window.
+    pub(super) credit_overage: bool,
+    /// Credit balance and spend, when the account is paid in credits.
+    pub(super) credits: Option<jcode_usage_types::CreditsReport>,
 }
 
 fn normalize_ratio_value(raw: f32) -> f32 {
@@ -258,6 +262,34 @@ pub(super) fn parse_openai_hard_limit_reached(json: &serde_json::Value) -> bool 
         == Some(false)
 }
 
+/// Whether paid credits keep a spent plan window usable. `/wham/usage` only
+/// describes the plan allowance; Codex CLI keeps serving from the credit
+/// balance once it is spent, so a funded account must not be parked until the
+/// weekly reset (the Codex CLI makes the same call). Only plan
+/// exhaustion qualifies: a refusal for any other reason is not something a
+/// balance can pay for.
+fn parse_openai_credit_overage(json: &serde_json::Value, plan_limit_reached: bool) -> bool {
+    if !plan_limit_reached {
+        return false;
+    }
+    let Some(credits) = json.get("credits").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    let flag = |obj: &serde_json::Map<String, serde_json::Value>, key: &str| {
+        obj.get(key).and_then(parse_bool_value) == Some(true)
+    };
+    if !flag(credits, "unlimited") && !flag(credits, "has_credits") {
+        return false;
+    }
+    if flag(credits, "overage_limit_reached") {
+        return false;
+    }
+    !json
+        .get("spend_control")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|spend| flag(spend, "reached"))
+}
+
 fn parse_window_seconds(obj: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
     ["limit_window_seconds", "window_seconds"]
         .iter()
@@ -291,11 +323,19 @@ fn parse_wham_window(window: &serde_json::Value, fallback_name: &str) -> Option<
         .get("used_percent")
         .and_then(parse_f32_value)
         .map(clamp_percent)?;
-    let resets_at = obj.get("reset_at").and_then(parse_f32_value).map(|ts| {
-        chrono::DateTime::from_timestamp(ts as i64, 0)
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_else(|| format!("{}", ts as i64))
-    });
+    // Epoch seconds need f64: an f32 cannot hold a current timestamp to the minute.
+    let resets_at = obj
+        .get("reset_at")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+        })
+        .map(|ts| {
+            chrono::DateTime::from_timestamp(ts as i64, 0)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| format!("{}", ts as i64))
+        });
     Some(UsageLimit {
         name: parse_window_seconds(obj)
             .map(window_duration_label)
@@ -337,8 +377,11 @@ fn qualify_additional_limit(limit_name: &str, mut limit: UsageLimit) -> UsageLim
 }
 
 pub(super) fn parse_openai_usage_payload(json: &serde_json::Value) -> ParsedOpenAIUsageReport {
+    let hard_limit_reached = parse_openai_hard_limit_reached(json);
     let mut parsed = ParsedOpenAIUsageReport {
-        hard_limit_reached: parse_openai_hard_limit_reached(json),
+        hard_limit_reached,
+        credit_overage: parse_openai_credit_overage(json, hard_limit_reached),
+        credits: super::credits::openai_credits(json),
         available_reset_count: json
             .get("rate_limit_reset_credits")
             .and_then(|credits| credits.get("available_count"))

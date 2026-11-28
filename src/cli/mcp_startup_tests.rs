@@ -27,6 +27,7 @@ fn echo_definition() -> McpToolDef {
         name: "echo".into(),
         description: Some("Test-only cached schema".into()),
         input_schema: json!({"type": "object"}),
+        ..Default::default()
     }
 }
 

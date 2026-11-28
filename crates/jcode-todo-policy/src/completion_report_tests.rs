@@ -11,6 +11,8 @@ fn uncapped_and_preserves_every_todo_field() {
             group: Some("lane".into()),
             lane_after: None,
             lane_owner: None,
+            lane_speed: None,
+            lane_profile: None,
             details: Some(format!("Full details {i}")),
             confidence: Some(ConfidenceState::Verified),
             completion_confidence: Some(ConfidenceState::Validated),
@@ -46,10 +48,10 @@ fn improved_histories_remain_prominent_and_all_goal_fields_render() {
     let plan = TodoPlan {
         title: None,
         user_intention: Some("Deliver outcome".into()),
-        understands_user_intent: Some(IntentUnderstanding::Complete),
+        understands_user_intent: Some(IntentUnderstanding::Clear),
         understands_user_intent_history: vec![
             IntentUnderstanding::Uncertain,
-            IntentUnderstanding::Complete,
+            IntentUnderstanding::Clear,
         ],
     };
     let goal = TodoGoal {

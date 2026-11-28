@@ -26,8 +26,7 @@ pub(super) fn handle_overnight_command(app: &mut App, trimmed: &str) -> bool {
         Ok(OvernightCommand::Start { duration, mission }) => {
             let working_dir = app
                 .session
-                .working_dir
-                .as_deref()
+                .working_dir()
                 .map(std::path::PathBuf::from)
                 .filter(|path| path.is_dir())
                 .or_else(|| std::env::current_dir().ok());
@@ -134,8 +133,7 @@ fn overnight_provider_for_app(app: &mut App) -> Arc<dyn Provider> {
     let provider: Arc<dyn Provider> = Arc::new(crate::provider::MultiProvider::new_fast());
     if let Some(model) = app
         .session
-        .model
-        .as_deref()
+        .model()
         .map(str::trim)
         .filter(|model| !model.is_empty() && *model != "unknown")
         && let Err(error) = provider.set_model(model)
@@ -522,7 +520,7 @@ fn overnight_fingerprint_for_app(
         task_active: task_summary.counts.active,
         task_blocked: task_summary.counts.blocked,
         task_validated: task_summary.validated,
-        session_message_count: app.session.messages.len(),
+        session_message_count: app.session.message_count(),
         review_notes_mtime: file_mtime_secs(&manifest.review_notes_path),
         validation_files: count_files(&manifest.validation_dir),
     }

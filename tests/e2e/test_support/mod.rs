@@ -262,6 +262,7 @@ fn pair_test_device(token: &str) -> Result<()> {
     let token_hash = format!("sha256:{}", hex::encode(hasher.finalize()));
     registry.devices.retain(|d| d.id != "test-device-ws");
     registry.devices.push(jcode::gateway::PairedDevice {
+        scope: Default::default(),
         id: "test-device-ws".to_string(),
         name: "WS Test Device".to_string(),
         token_hash,
@@ -369,6 +370,7 @@ impl WsTestClient {
             system_prompt: None,
             supports_pdf_panels: false,
             supports_user_response: false,
+            supports_applets: None,
             supports_server_failover: false,
             supports_turn_identity: false,
             crash_on_disconnect: false,
@@ -396,7 +398,9 @@ impl WsTestClient {
         let id = self.next_id;
         self.next_id += 1;
         self.send_request(Request::Message {
+            attachments: Vec::new(),
             id,
+            jarvis_voice: false,
             content: content.to_string(),
             images: vec![],
             system_reminder: None,
@@ -704,6 +708,8 @@ pub(crate) async fn run_websocket_transport_scenario() -> Result<TransportScenar
                 port: gateway_port,
                 bind_addr: "127.0.0.1".to_string(),
                 enabled: true,
+                harness_enabled: false,
+                ..Default::default()
             });
     let server_handle = tokio::spawn(async move { server_instance.run().await });
 

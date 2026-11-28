@@ -1,7 +1,9 @@
 pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
+pub mod cache_keepalive;
 pub mod catalog_refresh;
+pub mod context_pricing;
 pub mod failover;
 pub mod fallback_pick;
 pub mod fingerprint;
@@ -9,6 +11,8 @@ pub mod model_id;
 pub mod model_names;
 pub mod models;
 pub mod openai_schema;
+pub mod picker_hidden;
+pub mod picker_order;
 pub mod pricing;
 pub mod reasoning;
 pub mod request_compression;
@@ -18,6 +22,52 @@ pub mod service_tier;
 pub mod transport;
 pub mod ws_deflate;
 
+tokio::task_local! {
+    static PIN_WORKER_REQUEST: ();
+}
+
+/// Model and effort have already passed the swarm admission policy for this request.
+pub async fn with_pinned_worker_request<F: std::future::Future>(
+    pin: bool,
+    request: F,
+) -> F::Output {
+    if pin {
+        PIN_WORKER_REQUEST.scope((), request).await
+    } else {
+        request.await
+    }
+}
+
+pub fn worker_request_is_pinned() -> bool {
+    PIN_WORKER_REQUEST.try_with(|_| ()).is_ok()
+}
+
+tokio::task_local! {
+    static ACCOUNT_LIMITS_FAIL_FAST: ();
+}
+
+/// Run a provider request that must surface an account limit (rate limit or
+/// usage exhaustion) on its first occurrence. The routing service sets this
+/// when another eligible account can take the turn, so retrying the limited
+/// one only burns time. Transient 5xx and network retries are unaffected.
+pub async fn with_account_limit_fail_fast<F: std::future::Future>(
+    fail_fast: bool,
+    request: F,
+) -> F::Output {
+    if fail_fast {
+        ACCOUNT_LIMITS_FAIL_FAST.scope((), request).await
+    } else {
+        request.await
+    }
+}
+
+/// Whether the request being built runs under [`with_account_limit_fail_fast`].
+/// Providers read it while building the request, before any spawned task, and
+/// carry the value into their retry loop.
+pub fn account_limit_fail_fast() -> bool {
+    ACCOUNT_LIMITS_FAIL_FAST.try_with(|_| ()).is_ok()
+}
+
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use transport::is_transient_transport_error;
 
@@ -25,7 +75,8 @@ pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
     AnthropicReasoningCaps, anthropic_context_mode, anthropic_effectively_1m,
     anthropic_is_1m_model, anthropic_map_tool_name_for_oauth, anthropic_map_tool_name_from_oauth,
-    anthropic_oauth_beta_headers, anthropic_reasoning_caps, anthropic_strip_1m_suffix,
+    anthropic_oauth_beta_headers, anthropic_per_message_effort, anthropic_reasoning_caps,
+    anthropic_strip_1m_suffix,
 };
 pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
@@ -34,7 +85,7 @@ pub use auth_mode::{
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
-    is_definitive_usage_exhaustion, parse_failover_prompt_message,
+    is_definitive_usage_exhaustion, is_exhausted_account_limit, parse_failover_prompt_message,
 };
 pub use fallback_pick::{
     FallbackPickOptions, error_looks_like_credential_failure, model_generation_rank,
@@ -52,8 +103,10 @@ pub use models::{
     provider_for_model_with_hint as core_provider_for_model_with_hint, provider_key_from_hint,
 };
 pub use reasoning::{
-    DEEPSEEK_SELECTABLE_EFFORTS, OPENAI_SELECTABLE_EFFORTS, OPENROUTER_SELECTABLE_EFFORTS,
-    canonical_reasoning_effort, inferred_reasoning_efforts,
+    ANTIGRAVITY_EFFORT_SUFFIXES, DEEPSEEK_SELECTABLE_EFFORTS, OPENAI_SELECTABLE_EFFORTS,
+    OPENROUTER_SELECTABLE_EFFORTS, REASONING_EFFORT_MAX_RANK, antigravity_efforts_from_catalog,
+    canonical_reasoning_effort, inferred_reasoning_efforts, reasoning_effort_glyph,
+    reasoning_effort_rank, split_antigravity_model_effort,
 };
 pub use selection::{
     ActiveProvider, ProviderAvailability, auto_default_provider, cli_provider_arg_for_session_key,
@@ -83,6 +136,9 @@ pub trait Provider: Send + Sync {
     /// This is distinct from a provider response id used to resume a stream.
     /// Backends without session-affinity support can retain the default no-op.
     fn set_session_id(&self, _session_id: &str) {}
+
+    /// Signal the logical user turn before the first request or prewarm.
+    async fn begin_turn(&self, _turn_id: &str) {}
 
     /// Prepare provider-specific request state before the foreground completion.
     ///
@@ -175,6 +231,19 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Published long-context pricing for the active request route, when known.
+    fn active_long_context_pricing(&self) -> context_pricing::LongContextPricing {
+        if self.active_resolved_credential() == Some(ResolvedCredential::ApiKey) {
+            return self.api_key_long_context_pricing();
+        }
+        context_pricing::LongContextPricing::Unknown
+    }
+
+    /// Pricing for this endpoint if authenticated by a direct API key.
+    fn api_key_long_context_pricing(&self) -> context_pricing::LongContextPricing {
+        context_pricing::LongContextPricing::Unknown
+    }
+
     /// The credential the active dual-auth provider (Anthropic / OpenAI) will
     /// use *when the user has explicitly pinned one* (OAuth or API key), without
     /// resolving "auto".
@@ -196,6 +265,20 @@ pub trait Provider: Send + Sync {
             anyhow::bail!("This provider does not support named OAuth accounts");
         }
         Ok(())
+    }
+
+    /// Bind this runtime to one API key of its provider without changing the
+    /// global active key. `None` selects the unlabelled key. Forks keep the
+    /// binding, and a runtime that never binds follows the global active key.
+    fn set_api_key_account(&self, _label: Option<&str>) -> Result<()> {
+        anyhow::bail!("This provider does not support labelled API keys")
+    }
+
+    /// The API-key account this runtime sends right now (`provider[:label]`),
+    /// whether bound or following the global active key. `None` for providers
+    /// without labelled API keys.
+    fn serving_api_key_account(&self) -> Option<String> {
+        None
     }
 
     /// The explicitly bound OAuth account, independent of the global active login.
@@ -244,6 +327,21 @@ pub trait Provider: Send + Sync {
     /// by [`RouteSelection::runtime_key`] instead of reparsing a lossy model string.
     fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
         self.set_model(&selection.routed_model_spec())
+    }
+
+    /// Select a background route without changing this provider or process-wide
+    /// activation state. Orchestrators must fork the selected execution runtime,
+    /// not perform a foreground profile switch on a cloned orchestrator.
+    fn fork_for_background_route(&self, selection: &RouteSelection) -> Result<Arc<dyn Provider>> {
+        let fork = self.fork();
+        if std::ptr::eq(
+            self as *const Self as *const (),
+            Arc::as_ptr(&fork) as *const (),
+        ) {
+            anyhow::bail!("Provider does not offer an independent background fork");
+        }
+        fork.set_route_selection(selection)?;
+        Ok(fork)
     }
 
     /// List available models for this provider.
@@ -360,6 +458,33 @@ pub trait Provider: Send + Sync {
     /// Get ordered list of available reasoning effort levels.
     fn available_efforts(&self) -> Vec<&'static str> {
         vec![]
+    }
+
+    /// Describe the speed choices for this model on this credential route.
+    fn speed_options(&self, _model: &str) -> Vec<SpeedOption> {
+        vec![SpeedOption::standard()]
+    }
+
+    fn speed_mode(&self) -> SpeedMode {
+        SpeedMode::Standard
+    }
+
+    /// Opaque, non-secret identifier used to bind a saved premium selection
+    /// to the same credential route when restoring a session.
+    fn speed_route_identity(&self) -> Option<String> {
+        Some(format!(
+            "{}:{:?}:{:?}",
+            self.name(),
+            self.active_resolved_credential(),
+            self.serving_oauth_account_label()
+        ))
+    }
+
+    fn set_speed_mode(&self, mode: SpeedMode) -> Result<()> {
+        match mode {
+            SpeedMode::Standard => Ok(()),
+            _ => anyhow::bail!("This route does not support {mode:?} speed"),
+        }
     }
 
     /// Get the active service tier override (if applicable).
@@ -490,6 +615,12 @@ pub trait Provider: Send + Sync {
         self.supports_compaction()
     }
 
+    /// Whether a manual request can call the native compaction endpoint.
+    /// Provider-managed automatic compaction is a separate capability.
+    fn supports_explicit_native_compaction(&self) -> bool {
+        false
+    }
+
     /// Ask the provider to produce a native compaction artifact.
     async fn native_compact(
         &self,
@@ -575,16 +706,22 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
         content: vec![ContentBlock::Text {
             text: prompt.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
 
-    let mut provider_name = provider.name().to_string();
-    let mut model = provider.model();
+    // Cache counter semantics belong to the API transport, not the reseller
+    // or compute backend named by an UpstreamProvider event.
+    let provider_name = provider.name().to_string();
+    let model = provider.model();
     let response = provider.complete(&messages, &[], system, None).await?;
     let mut result = String::new();
-    let mut usage = SimpleCompletionUsage::default();
+    let mut usage = SimpleCompletionUsage {
+        requested_model: Some(model.clone()),
+        ..Default::default()
+    };
     tokio::pin!(response);
 
     while let Some(event) = response.next().await {
@@ -599,7 +736,6 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                 cache_read_input_tokens,
                 cache_creation_input_tokens,
             }) => {
-                model = provider.model();
                 usage.observe(
                     input_tokens,
                     output_tokens,
@@ -607,7 +743,19 @@ pub async fn collect_simple_completion<P: Provider + ?Sized>(
                     cache_creation_input_tokens,
                 );
             }
-            Ok(StreamEvent::UpstreamProvider { provider }) => provider_name = provider,
+            Ok(StreamEvent::ResolvedModel { model }) => {
+                if let Some(model) = nonempty_response_model(Some(&model)) {
+                    usage.resolved_model = Some(model.to_owned());
+                }
+            }
+            Ok(StreamEvent::RetryRollback { .. }) => {
+                result.clear();
+                usage = SimpleCompletionUsage {
+                    requested_model: Some(model.clone()),
+                    ..Default::default()
+                };
+            }
+            Ok(StreamEvent::UpstreamProvider { .. }) => {}
             Ok(StreamEvent::MessageEnd { stop_reason })
                 if is_guardrail_stop_reason(stop_reason.as_deref()) =>
             {
@@ -668,6 +816,8 @@ pub fn is_guardrail_stop_reason(stop_reason: Option<&str>) -> bool {
 #[derive(Debug)]
 pub struct SimpleCompletionError {
     pub usage: SimpleCompletionUsage,
+    /// Request API transport, retained for correct usage/cache normalization.
+    /// This is not the upstream compute vendor returned by a gateway.
     pub provider: String,
     pub model: String,
     source: anyhow::Error,
@@ -707,12 +857,21 @@ impl std::error::Error for SimpleCompletionError {
 /// input tokens and a final event with output tokens). Each field keeps the
 /// latest value reported, matching how the agent turn loop treats repeated
 /// `TokenUsage` events (they are cumulative snapshots, not deltas).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimpleCompletionUsage {
+    /// Model requested before the call, including private routing aliases.
+    pub requested_model: Option<String>,
+    /// Actual model explicitly reported by this response, never inferred.
+    pub resolved_model: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cache_read_input_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,
+}
+
+/// Normalize optional response metadata without falling back to a configured ID.
+pub fn nonempty_response_model(model: Option<&str>) -> Option<&str> {
+    model.map(str::trim).filter(|model| !model.is_empty())
 }
 
 impl SimpleCompletionUsage {
@@ -755,6 +914,20 @@ pub enum PremiumMode {
     Normal = 0,
     OnePerSession = 1,
     Zero = 2,
+}
+
+/// Which key of an API-key provider one runtime sends.
+///
+/// `Follow` reads the global active key at every request, so a login or
+/// `jcode login --account` switch moves every runtime that follows. `Account`
+/// binds this runtime alone: the routing service uses it so concurrent sessions
+/// can serve from different keys of one provider.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ApiKeyBinding {
+    #[default]
+    Follow,
+    /// `None` is the provider's unlabelled key.
+    Account(Option<String>),
 }
 
 /// Explicit OAuth-vs-API-key credential pin for dual-auth providers
@@ -843,86 +1016,18 @@ impl NativeToolResult {
     }
 }
 
+pub use jcode_message_types::{SpeedAvailability, SpeedMode, SpeedOption};
+
 /// Canonical User-Agent for generic outbound Jcode HTTP requests.
 pub const JCODE_USER_AGENT: &str = concat!("jcode/", env!("CARGO_PKG_VERSION"));
-
-/// Read an HTTP error body without hiding failures behind an empty string.
-///
-/// This is useful after a non-success status when the response is about to be
-/// converted into an error. If reading the body itself fails, the returned text
-/// preserves that failure so callers can include it in their error message.
-pub async fn http_error_body(response: reqwest::Response, context: &str) -> String {
-    match response.text().await {
-        Ok(body) => body,
-        Err(err) => format!("<failed to read {context} response body: {err}>"),
-    }
-}
-
-/// Shared HTTP client for all generic provider requests. Creating a `reqwest::Client` is expensive
-/// (~10ms due to TLS init, connection pool setup), so we reuse a single instance. Provider-specific
-/// transports may override the User-Agent on individual requests when they intentionally need to
-/// match an official client.
-pub fn shared_http_client() -> reqwest::Client {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .user_agent(JCODE_USER_AGENT)
-                .connect_timeout(Duration::from_secs(15))
-                .tcp_keepalive(Some(Duration::from_secs(30)))
-                // Proactively detect half-dead pooled HTTP/2 connections before we
-                // reuse them. Without keepalive pings, a stale multiplexed connection
-                // (common behind NAT/VPN/proxy or flaky Wi-Fi) surfaces as
-                // "http2 error: stream error received: unspecific protocol error".
-                // Pinging while idle lets reqwest drop the connection instead.
-                .http2_keep_alive_interval(Some(Duration::from_secs(30)))
-                .http2_keep_alive_timeout(Duration::from_secs(15))
-                .http2_keep_alive_while_idle(true)
-                .pool_idle_timeout(Duration::from_secs(90))
-                .pool_max_idle_per_host(8)
-                .build()
-                .unwrap_or_else(|err| {
-                    eprintln!("jcode: failed to build shared provider HTTP client: {err}");
-                    match reqwest::Client::builder()
-                        .user_agent(JCODE_USER_AGENT)
-                        .build()
-                    {
-                        Ok(client) => client,
-                        Err(fallback_err) => {
-                            eprintln!(
-                                "jcode: failed to build fallback provider HTTP client: {fallback_err}"
-                            );
-                            reqwest::Client::new()
-                        }
-                    }
-                })
-        })
-        .clone()
-}
-
-/// Fresh HTTP client for transport-fault retries.
-///
-/// Retrying on the shared pooled client can reuse *other* idle connections
-/// established through the same broken network path (corrupting middlebox,
-/// flaky NAT/VPN) that produced a TLS fault like `BadRecordMac` - so the
-/// retry fails the same way. This client disables connection pooling, which
-/// guarantees the retry opens a brand-new TCP+TLS connection (the property
-/// that makes transport-fault retries actually succeed). Building a client
-/// costs ~10ms, which is fine on a retry path that already backs off >=1s.
-pub fn fresh_transport_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(JCODE_USER_AGENT)
-        .connect_timeout(Duration::from_secs(15))
-        .tcp_keepalive(Some(Duration::from_secs(30)))
-        .http2_keep_alive_interval(Some(Duration::from_secs(30)))
-        .http2_keep_alive_timeout(Duration::from_secs(15))
-        .http2_keep_alive_while_idle(true)
-        // No pooled reuse: every request gets a fresh connection.
-        .pool_max_idle_per_host(0)
-        .build()
-        .unwrap_or_else(|_| shared_http_client())
-}
+#[path = "lib_http_client.rs"]
+mod http_client;
+pub use http_client::fresh_transport_client;
+pub use http_client::http_error_body;
+#[cfg(feature = "blocking-http")]
+pub use http_client::reqwest_blocking_builder;
+pub use http_client::shared_http_client;
+pub use http_client::{reqwest_builder, reqwest_http1_builder, websocket_tls_config};
 
 #[derive(Debug, Clone)]
 pub struct NativeCompactionResult {
@@ -935,6 +1040,11 @@ pub struct NativeCompactionResult {
 /// A single route to access a model: model + provider + API method
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelRoute {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speed_options: Vec<SpeedOption>,
+    /// Explicit provider values for this route. An omitted list is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
     pub model: String,
     pub provider: String,
     pub api_method: String,
@@ -944,6 +1054,13 @@ pub struct ModelRoute {
     pub cheapness: Option<RouteCheapnessEstimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<jcode_usage_types::ModelUsage>,
+    /// The account this route runs on (`provider:label`), for providers with
+    /// several saved logins. Absent for routes that name no account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// The account's resolved icon (configured override or the stable default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// Exact runtime identity for a selected model route.
@@ -1185,6 +1302,80 @@ pub fn oauth_account_label(method: &str) -> Option<&str> {
         return None;
     }
     Some(label)
+}
+
+/// Marks a route's detail line as the catalog's own account identity, never a
+/// later diagnostic: `account <label> [<display name>] · <email> · <note>`.
+const ACCOUNT_IDENTITY_PREFIX: &str = "account ";
+
+/// What a saved-account route says about its login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteAccountIdentity<'a> {
+    /// Internal label (`claude-fox`), the part after `@` in the api method.
+    pub label: &'a str,
+    /// What to show instead of the label: the user's name for the login, else
+    /// its organization or email, plus the plan (`team · Max 20x`).
+    pub display_name: Option<&'a str>,
+    /// Text after the identity: email first, then notes.
+    pub rest: &'a str,
+}
+
+impl<'a> RouteAccountIdentity<'a> {
+    /// The name a person recognises this login by.
+    pub fn title(&self) -> &'a str {
+        self.display_name.unwrap_or(self.label)
+    }
+
+    /// The email, when the first segment after the identity is one.
+    pub fn email(&self) -> Option<&'a str> {
+        self.rest
+            .split(" · ")
+            .next()
+            .filter(|email| email.contains('@') && !email.chars().any(char::is_whitespace))
+    }
+}
+
+/// The identity text a catalog puts in front of an account route's detail.
+/// `display_name` is left out when it only repeats the label.
+pub fn route_account_identity(label: &str, display_name: Option<&str>) -> String {
+    match display_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != label)
+    {
+        Some(name) => format!(
+            "{ACCOUNT_IDENTITY_PREFIX}{label} [{}]",
+            name.replace('[', "(").replace(']', ")")
+        ),
+        None => format!("{ACCOUNT_IDENTITY_PREFIX}{label}"),
+    }
+}
+
+/// Read the identity back from a route's detail. Scope tags such as
+/// `[global] ` are ignored. Older catalogs without a display name still parse.
+pub fn parse_route_account_identity(detail: &str) -> Option<RouteAccountIdentity<'_>> {
+    let detail = detail
+        .trim_start_matches("[global] ")
+        .trim_start_matches("[session] ");
+    let rest = detail.strip_prefix(ACCOUNT_IDENTITY_PREFIX)?;
+    let (label, after) = match rest.find([' ', '[']) {
+        Some(end) => rest.split_at(end),
+        None => (rest, ""),
+    };
+    if label.is_empty() {
+        return None;
+    }
+    let (display_name, after) = match after
+        .strip_prefix(" [")
+        .and_then(|tail| tail.split_once(']'))
+    {
+        Some((name, tail)) => (Some(name).filter(|name| !name.is_empty()), tail),
+        None => (None, after),
+    };
+    Some(RouteAccountIdentity {
+        label,
+        display_name,
+        rest: after.strip_prefix(" · ").unwrap_or(after),
+    })
 }
 
 impl ModelRouteApiMethod {

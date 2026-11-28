@@ -76,10 +76,16 @@ pub(super) fn agent_model_target_config_path(target: AgentModelTarget) -> &'stat
 pub(super) fn load_agent_model_override(target: AgentModelTarget) -> Option<String> {
     let cfg = crate::config::Config::load();
     match target {
-        AgentModelTarget::Swarm => cfg.agents.swarm_model,
+        AgentModelTarget::Swarm => cfg
+            .agents
+            .worker_model(crate::config::WorkerModelSlot::Swarm)
+            .map(str::to_string),
         AgentModelTarget::Review => cfg.autoreview.model,
         AgentModelTarget::Judge => cfg.autojudge.model,
-        AgentModelTarget::Memory => cfg.agents.memory_model,
+        AgentModelTarget::Memory => cfg
+            .agents
+            .worker_model(crate::config::WorkerModelSlot::Memory)
+            .map(str::to_string),
         AgentModelTarget::Ambient => cfg.ambient.model,
     }
 }
@@ -94,10 +100,14 @@ pub(super) fn save_agent_model_override(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     match target {
-        AgentModelTarget::Swarm => cfg.agents.swarm_model = value,
+        AgentModelTarget::Swarm => cfg
+            .agents
+            .set_worker_model(crate::config::WorkerModelSlot::Swarm, value),
         AgentModelTarget::Review => cfg.autoreview.model = value,
         AgentModelTarget::Judge => cfg.autojudge.model = value,
-        AgentModelTarget::Memory => cfg.agents.memory_model = value,
+        AgentModelTarget::Memory => cfg
+            .agents
+            .set_worker_model(crate::config::WorkerModelSlot::Memory, value),
         AgentModelTarget::Ambient => cfg.ambient.model = value,
     }
     cfg.save()
@@ -164,6 +174,8 @@ pub(super) fn picker_route_selection(
     route: &PickerOption,
 ) -> crate::provider::RouteSelection {
     crate::provider::RouteSelection::from_model_route(&crate::provider::ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model_entry_base_name(entry),
         provider: route.provider.clone(),
         api_method: route.api_method.clone(),
@@ -171,6 +183,8 @@ pub(super) fn picker_route_selection(
         detail: route.detail.clone(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     })
 }
 
@@ -235,21 +249,160 @@ pub(super) fn normalize_agent_model_summary(
 pub(super) fn agent_model_default_summary(target: AgentModelTarget, app: &App) -> String {
     let summary = match target {
         AgentModelTarget::Swarm => load_agent_model_override(target)
-            .or_else(|| app.session.subagent_model.clone())
+            .or_else(|| app.session.subagent_model().map(str::to_owned))
             .or_else(|| Some(app.provider.model())),
         AgentModelTarget::Review => load_agent_model_override(target)
             .or_else(|| super::commands::preferred_one_shot_review_override().map(|(m, _)| m))
-            .or_else(|| app.session.model.clone())
+            .or_else(|| app.session.model().map(str::to_owned))
             .or_else(|| Some(app.provider.model())),
         AgentModelTarget::Judge => load_agent_model_override(target)
             .or_else(|| super::commands::preferred_one_shot_review_override().map(|(m, _)| m))
-            .or_else(|| app.session.model.clone())
+            .or_else(|| app.session.model().map(str::to_owned))
             .or_else(|| Some(app.provider.model())),
         AgentModelTarget::Memory => load_agent_model_override(target),
         AgentModelTarget::Ambient => load_agent_model_override(target),
     };
 
     normalize_agent_model_summary(target, summary)
+}
+
+impl App {
+    pub(in crate::tui::app) fn picker_fuzzy_score(pattern: &str, text: &str) -> Option<i32> {
+        jcode_fuzzy::fuzzy_score_tokens(pattern, text)
+    }
+
+    pub(in crate::tui::app) fn is_login_starter_entry(entry: &crate::tui::PickerEntry) -> bool {
+        match entry.action {
+            crate::tui::PickerAction::AutoApiKey
+            | crate::tui::PickerAction::ExpandLoginProviders => true,
+            crate::tui::PickerAction::Login(provider) => matches!(
+                provider.target,
+                crate::provider_catalog::LoginProviderTarget::OpenAi
+                    | crate::provider_catalog::LoginProviderTarget::Claude
+                    | crate::provider_catalog::LoginProviderTarget::Antigravity
+                    | crate::provider_catalog::LoginProviderTarget::Gemini
+                    | crate::provider_catalog::LoginProviderTarget::AutoImport
+            ),
+            crate::tui::PickerAction::Account(_) => false,
+            _ => true,
+        }
+    }
+
+    pub(in crate::tui::app) fn apply_inline_interactive_filter(
+        picker: &mut InlineInteractiveState,
+    ) {
+        if picker.filter.is_empty() {
+            let collapsed_login = picker.kind == crate::tui::PickerKind::Login
+                && picker.entries.iter().any(|entry| {
+                    matches!(entry.action, crate::tui::PickerAction::ExpandLoginProviders)
+                });
+            if collapsed_login {
+                picker.filtered = picker
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, entry)| Self::is_login_starter_entry(entry).then_some(i))
+                    .collect();
+            } else {
+                picker.filtered = (0..picker.entries.len()).collect();
+            }
+        } else {
+            let query = picker.filter.trim();
+            // Prepare the query once per keystroke instead of re-parsing and
+            // re-lowercasing it for every entry.
+            let prepared = jcode_fuzzy::PreparedTokenQuery::new(&picker.filter);
+            let query_words: Vec<String> =
+                query.split_whitespace().map(|w| w.to_lowercase()).collect();
+            let mut scored: Vec<(usize, bool, i32)> = picker
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| {
+                    if matches!(m.action, crate::tui::PickerAction::ExpandLoginProviders) {
+                        return None;
+                    }
+                    let filter_text = picker.filter_text(m);
+                    prepared.score(&filter_text).map(|s| {
+                        // Usage and recommendation only nudge ranking. They
+                        // must never outweigh match quality, otherwise a
+                        // frequently used model that loosely matches the
+                        // query buries the model the user is typing.
+                        let usage_bonus = (m.usage_score / 10).min(30) as i32;
+                        let name_lower = m.name.to_lowercase();
+                        let literal_name_bonus =
+                            if query_words.iter().all(|w| name_lower.contains(w.as_str())) {
+                                80
+                            } else {
+                                0
+                            };
+                        let bonus =
+                            usage_bonus + literal_name_bonus + if m.recommended { 5 } else { 0 };
+                        (
+                            i,
+                            m.name.eq_ignore_ascii_case(query),
+                            s.saturating_add(bonus),
+                        )
+                    })
+                })
+                .collect();
+            scored.sort_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then(b.2.cmp(&a.2))
+                    .then(
+                        picker.entries[a.0]
+                            .recommendation_rank
+                            .cmp(&picker.entries[b.0].recommendation_rank),
+                    )
+                    .then(picker.entries[a.0].name.cmp(&picker.entries[b.0].name))
+            });
+            picker.filtered = scored.into_iter().map(|(i, _, _)| i).collect();
+        }
+        if picker.filtered.is_empty() {
+            picker.selected = 0;
+        } else {
+            picker.selected = picker.selected.min(picker.filtered.len() - 1);
+        }
+    }
+
+    pub(in crate::tui::app) fn tab_complete_inline_interactive_filter(
+        picker: &mut InlineInteractiveState,
+    ) {
+        if picker.filtered.is_empty() {
+            return;
+        }
+        if picker.filtered.len() == 1 {
+            let name = picker.entries[picker.filtered[0]].name.clone();
+            picker.filter = name;
+            Self::apply_inline_interactive_filter(picker);
+            return;
+        }
+        let names: Vec<&str> = picker
+            .filtered
+            .iter()
+            .map(|&i| picker.entries[i].name.as_str())
+            .collect();
+        let first = names[0].to_lowercase();
+        let first_chars: Vec<char> = first.chars().collect();
+        let mut prefix_len = first_chars.len();
+        for name in names.iter().skip(1) {
+            let lower = (*name).to_lowercase();
+            let chars: Vec<char> = lower.chars().collect();
+            let mut common = 0;
+            for (a, b) in first_chars.iter().zip(chars.iter()) {
+                if a == b {
+                    common += 1;
+                } else {
+                    break;
+                }
+            }
+            prefix_len = prefix_len.min(common);
+        }
+        if prefix_len > picker.filter.len() {
+            let first_original = &picker.entries[picker.filtered[0]].name;
+            picker.filter = first_original[..prefix_len].to_string();
+            Self::apply_inline_interactive_filter(picker);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +457,7 @@ mod tests {
             available: true,
             detail: String::new(),
             estimated_reference_cost_micros: None,
+            icon: None,
         }
     }
 

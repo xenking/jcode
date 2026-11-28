@@ -4,7 +4,7 @@ use super::manager::McpManager;
 use super::protocol::{ContentBlock, McpToolDef};
 use anyhow::Result;
 use async_trait::async_trait;
-use jcode_tool_core::{Tool, ToolContext};
+use jcode_tool_core::{McpApprovalRequest, Tool, ToolContext};
 use jcode_tool_types::ToolOutput;
 use serde_json::Value;
 use std::sync::Arc;
@@ -42,6 +42,19 @@ impl Tool for McpTool {
         Some((&self.server_name, &self.tool_def.name))
     }
 
+    async fn mcp_approval(&self, input: &Value) -> Option<McpApprovalRequest> {
+        let manager = self.manager.read().await;
+        let config = manager.live_server_config(&self.server_name)?;
+        config
+            .requires_approval(&self.tool_def)
+            .then(|| McpApprovalRequest {
+                server: self.server_name.clone(),
+                tool: self.tool_def.name.clone(),
+                arguments: input.clone(),
+                project_dir: manager.project_dir().map(std::path::Path::to_path_buf),
+            })
+    }
+
     fn description(&self) -> &str {
         self.tool_def.description.as_deref().unwrap_or("MCP tool")
     }
@@ -50,24 +63,23 @@ impl Tool for McpTool {
         self.tool_def.input_schema.clone()
     }
 
+    fn output_schema(&self) -> Option<Value> {
+        self.tool_def.output_schema.clone()
+    }
+
+    fn mcp_annotations(&self) -> Option<Value> {
+        self.tool_def
+            .annotations
+            .as_ref()
+            .and_then(|annotations| serde_json::to_value(annotations).ok())
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut input = if input.is_null() {
             Value::Object(serde_json::Map::new())
         } else {
             input
         };
-        // `intent` is a jcode-injected display-only parameter (see
-        // ensure_intent_in_schema). Strip it before forwarding unless the
-        // MCP server's own schema declares an `intent` property.
-        let server_declares_intent = self
-            .tool_def
-            .input_schema
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .is_some_and(|p| p.contains_key("intent"));
-        if !server_declares_intent && let Some(object) = input.as_object_mut() {
-            object.remove("intent");
-        }
         // The escape hatch is jcode's, not the server's: read it, never forward it.
         let accept_large_output = take_accept_large_output(&mut input);
         let manager = self.manager.read().await;
@@ -110,6 +122,11 @@ impl Tool for McpTool {
         }
 
         let output = output_parts.join("\n");
+        // A tool may return only `structuredContent`; the model still needs text.
+        let output = match (&result.structured_content, output.is_empty()) {
+            (Some(structured), true) => structured.to_string(),
+            _ => output,
+        };
         let output = if accept_large_output {
             output
         } else {
@@ -120,7 +137,15 @@ impl Tool for McpTool {
         if result.is_error {
             Ok(ToolOutput::new(format!("Error: {}", output)).with_title(title))
         } else {
-            Ok(ToolOutput::new(output).with_title(title))
+            let output = ToolOutput::new(output).with_title(title);
+            // Typed only when the tool declared a schema for it: the declared
+            // type is what scripts were told to expect.
+            Ok(match result.structured_content {
+                Some(structured) if self.tool_def.output_schema.is_some() => {
+                    output.with_structured(structured)
+                }
+                _ => output,
+            })
         }
     }
 }
@@ -322,6 +347,7 @@ mod tests {
             name: name.to_string(),
             description: None,
             input_schema: json!({"type": "object"}),
+            ..Default::default()
         }
     }
 
@@ -395,6 +421,7 @@ mod tests {
                     name: "query-docs".to_string(),
                     description: None,
                     input_schema: json!({"type": "object"}),
+                    ..Default::default()
                 },
             ),
             (
@@ -403,6 +430,7 @@ mod tests {
                     name: "query_docs".to_string(),
                     description: None,
                     input_schema: json!({"type": "object"}),
+                    ..Default::default()
                 },
             ),
         ];

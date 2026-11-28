@@ -1,9 +1,13 @@
 use anyhow::Result;
-use chrono::Utc;
-use std::path::PathBuf;
+use chrono::{DateTime, TimeDelta, Utc};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-use super::paths::{lock_path, state_path};
-use super::{AmbientCycleResult, AmbientState, AmbientStatus, CycleStatus, ScheduledItem};
+use super::{
+    AmbientCycleResult, AmbientState, AmbientStatus, CycleStatus, Priority, ScheduledItem,
+};
+use crate::ambient_paths::{lock_path, state_path};
 use crate::storage;
 
 #[cfg(test)]
@@ -16,9 +20,12 @@ mod queue_transaction_tests;
 
 impl AmbientState {
     pub fn load() -> Result<Self> {
-        let path = state_path()?;
+        Self::load_from(&state_path()?)
+    }
+
+    pub(crate) fn load_from(path: &Path) -> Result<Self> {
         if path.exists() {
-            storage::read_json(&path)
+            storage::read_json(path)
         } else {
             Ok(Self::default())
         }
@@ -54,6 +61,32 @@ impl AmbientState {
     }
 }
 
+#[derive(PartialEq, Eq)]
+pub(crate) struct FileRevision {
+    modified: Option<SystemTime>,
+    len: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl FileRevision {
+    pub(crate) fn read(path: &Path) -> std::io::Result<Option<Self>> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+
+        match std::fs::metadata(path) {
+            Ok(meta) => Ok(Some(Self {
+                modified: meta.modified().ok(),
+                len: meta.len(),
+                #[cfg(unix)]
+                inode: meta.ino(),
+            })),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ScheduledQueue
 // ---------------------------------------------------------------------------
@@ -82,22 +115,45 @@ fn read_queue(path: &std::path::Path) -> Result<Vec<ScheduledItem>> {
 pub struct ScheduledQueue {
     items: Vec<ScheduledItem>,
     path: PathBuf,
+    revision: Option<FileRevision>,
+    next_check: Option<DateTime<Utc>>,
 }
 
 impl ScheduledQueue {
     pub fn load(path: PathBuf) -> Self {
-        let items: Vec<ScheduledItem> = if path.exists() {
+        let revision = FileRevision::read(&path).ok().flatten();
+        let items = if revision.is_some() {
             read_queue(&path).unwrap_or_default()
         } else {
             Vec::new()
         };
-        Self { items, path }
+        let next_check = earliest_due(&items);
+        Self {
+            items,
+            path,
+            revision,
+            next_check,
+        }
+    }
+
+    pub(crate) fn refresh(&mut self) -> Result<()> {
+        let revision = FileRevision::read(&self.path)?;
+        if revision != self.revision {
+            self.revision = revision;
+            self.items = if self.revision.is_some() {
+                read_queue(&self.path)?
+            } else {
+                Vec::new()
+            };
+            self.next_check = earliest_due(&self.items);
+        }
+        Ok(())
     }
 
     /// Lock a separate stable inode: atomic JSON replacement must not replace
     /// the inode carrying the lock. Reload under lock, and publish only after
     /// the entire mutation was durably saved. Never write a cached snapshot.
-    pub(super) fn transact<T>(
+    pub(crate) fn transact<T>(
         &mut self,
         update: impl FnOnce(&mut Vec<ScheduledItem>) -> Result<T>,
     ) -> Result<T> {
@@ -122,6 +178,8 @@ impl ScheduledQueue {
             storage::write_json(&self.path, &latest)?;
         }
         self.items = latest;
+        self.revision = FileRevision::read(&self.path).ok().flatten();
+        self.next_check = earliest_due(&self.items);
         Ok(result)
     }
 
@@ -147,37 +205,84 @@ impl ScheduledQueue {
         })
     }
 
-    fn take_ready(&mut self, direct_only: bool) -> Result<Vec<ScheduledItem>> {
+    fn take_ready(&mut self) -> Result<Vec<ScheduledItem>> {
         self.transact(|items| {
             let now = Utc::now();
-            let (mut ready, remaining): (Vec<_>, Vec<_>) =
-                std::mem::take(items).into_iter().partition(|item| {
-                    item.scheduled_for <= now && (!direct_only || item.target.is_direct_delivery())
-                });
+            let (mut ready, remaining): (Vec<_>, Vec<_>) = std::mem::take(items)
+                .into_iter()
+                .partition(|item| item.scheduled_for <= now);
             *items = remaining;
-            ready.sort_by(|a, b| {
-                b.priority
-                    .cmp(&a.priority)
-                    .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
-            });
+            sort_ready(&mut ready);
             Ok(ready)
         })
     }
 
     pub fn pop_ready(&mut self) -> Vec<ScheduledItem> {
-        self.take_ready(false).unwrap_or_else(|error| {
+        self.take_ready().unwrap_or_else(|error| {
             crate::logging::warn(&format!("Failed to claim scheduled items: {error:#}"));
             Vec::new()
         })
     }
 
     pub fn take_ready_direct_items(&mut self) -> Vec<ScheduledItem> {
-        self.take_ready(true).unwrap_or_else(|error| {
-            crate::logging::warn(&format!(
-                "Failed to claim direct scheduled items: {error:#}"
-            ));
-            Vec::new()
-        })
+        self.maintain_and_take_direct(Utc::now())
+            .unwrap_or_else(|error| {
+                crate::logging::warn(&format!(
+                    "Failed to claim direct scheduled items: {error:#}"
+                ));
+                Vec::new()
+            })
+    }
+
+    pub(crate) fn maintain_and_take_direct(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ScheduledItem>> {
+        self.refresh()?;
+        if self.next_check.is_none_or(|due| due > now) {
+            return Ok(Vec::new());
+        }
+        let ready =
+            |item: &ScheduledItem| item.target.is_direct_delivery() && item.scheduled_for <= now;
+        let ready_items =
+            if self.items.iter().any(ready) || !stale_ambient_items(&self.items, now).is_empty() {
+                self.transact(|items| {
+                    let discard = stale_ambient_items(items, now);
+                    let mut direct = Vec::new();
+                    *items = std::mem::take(items)
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(idx, item)| {
+                            if ready(&item) {
+                                direct.push(item);
+                                None
+                            } else {
+                                (!discard.contains(&idx)).then_some(item)
+                            }
+                        })
+                        .collect();
+                    sort_ready(&mut direct);
+                    Ok(direct)
+                })?
+            } else {
+                Vec::new()
+            };
+        self.next_check = self
+            .items
+            .iter()
+            .map(|item| {
+                if item.target.is_direct_delivery() || item.scheduled_for > now {
+                    item.scheduled_for
+                } else {
+                    item.scheduled_for + AMBIENT_EXPIRY
+                }
+            })
+            .min();
+        Ok(ready_items)
+    }
+
+    pub(crate) fn next_maintenance(&self) -> Option<DateTime<Utc>> {
+        self.next_check
     }
 
     pub fn peek_next(&self) -> Option<&ScheduledItem> {
@@ -192,9 +297,76 @@ impl ScheduledQueue {
         self.items.is_empty()
     }
 
+    /// A copy of the queued items, in storage order.
+    pub fn snapshot(&self) -> Vec<ScheduledItem> {
+        self.items.clone()
+    }
+
+    #[cfg(test)]
     pub fn items(&self) -> &[ScheduledItem] {
         &self.items
     }
+}
+
+fn earliest_due(items: &[ScheduledItem]) -> Option<DateTime<Utc>> {
+    items.iter().map(|item| item.scheduled_for).min()
+}
+
+fn sort_ready(items: &mut [ScheduledItem]) {
+    items.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.scheduled_for.cmp(&b.scheduled_for))
+    });
+}
+
+// Best-effort ambient work is not a user reminder. Let it catch up after
+// downtime, but never reintroduce week-old context to a later cycle.
+const AMBIENT_EXPIRY: TimeDelta = TimeDelta::days(7);
+
+#[derive(PartialEq, Eq, Hash)]
+struct AmbientWork<'a> {
+    context: &'a str,
+    priority: &'a Priority,
+    working_dir: Option<&'a str>,
+    task_description: Option<&'a str>,
+    relevant_files: &'a [String],
+    git_branch: Option<&'a str>,
+    additional_context: Option<&'a str>,
+}
+
+fn stale_ambient_items(items: &[ScheduledItem], now: DateTime<Utc>) -> HashSet<usize> {
+    let mut discard = HashSet::new();
+    let mut newest = HashMap::<AmbientWork<'_>, usize>::new();
+    for (idx, item) in items.iter().enumerate() {
+        if item.target.is_direct_delivery() || item.scheduled_for > now {
+            continue;
+        }
+        if now - item.scheduled_for >= AMBIENT_EXPIRY {
+            discard.insert(idx);
+            continue;
+        }
+        // Different cycles have different creator IDs even when they schedule
+        // the same work. Compare only the payload handed to the agent.
+        let key = AmbientWork {
+            context: &item.context,
+            priority: &item.priority,
+            working_dir: item.working_dir.as_deref(),
+            task_description: item.task_description.as_deref(),
+            relevant_files: &item.relevant_files,
+            git_branch: item.git_branch.as_deref(),
+            additional_context: item.additional_context.as_deref(),
+        };
+        let newest_idx = newest.entry(key).or_insert(idx);
+        let previous = &items[*newest_idx];
+        if (previous.scheduled_for, previous.created_at) < (item.scheduled_for, item.created_at) {
+            discard.insert(*newest_idx);
+            *newest_idx = idx;
+        } else if *newest_idx != idx {
+            discard.insert(idx);
+        }
+    }
+    discard
 }
 
 // ---------------------------------------------------------------------------

@@ -100,7 +100,7 @@ fn test_ambient_scheduled_queue() {
 
     // Future item still in queue
     assert_eq!(queue.len(), 1);
-    assert_eq!(queue.items()[0].id, "future_1");
+    assert_eq!(queue.snapshot()[0].id, "future_1");
 }
 
 /// Test adaptive scheduler: interval calculation
@@ -159,13 +159,10 @@ fn test_adaptive_scheduler_pause() {
         ..Default::default()
     };
 
-    let mut scheduler = AdaptiveScheduler::new(config);
+    let scheduler = AdaptiveScheduler::new(config);
 
-    assert!(!scheduler.should_pause());
-    scheduler.set_user_active(true);
-    assert!(scheduler.should_pause());
-    scheduler.set_user_active(false);
-    assert!(!scheduler.should_pause());
+    assert!(!scheduler.should_pause(false));
+    assert!(scheduler.should_pause(true));
 }
 
 /// Test ambient tools: end_ambient_cycle via mock agent
@@ -212,7 +209,7 @@ async fn test_ambient_end_cycle_tool() -> Result<()> {
     assert_eq!(response, "Cycle complete.");
 
     // The tool should have stored a cycle result
-    let result = jcode::tool::ambient::take_cycle_result();
+    let result = jcode::ambient_tools::take_cycle_result();
     assert!(result.is_some());
     let result = result.unwrap();
     assert_eq!(
@@ -596,7 +593,7 @@ async fn test_full_ambient_cycle_simulation() -> Result<()> {
     assert!(response.contains("Ambient cycle completed"));
 
     // Verify end_ambient_cycle stored the result
-    let result = jcode::tool::ambient::take_cycle_result();
+    let result = jcode::ambient_tools::take_cycle_result();
     assert!(result.is_some());
     let result = result.unwrap();
     assert_eq!(result.memories_modified, 6);

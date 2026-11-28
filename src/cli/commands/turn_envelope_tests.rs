@@ -3,6 +3,7 @@ use crate::protocol::{ServerEvent, TurnIdentity};
 
 fn envelope(event: ServerEvent) -> ServerEvent {
     ServerEvent::TurnEvent {
+        text_frames: None,
         identity: TurnIdentity {
             runtime_generation: "runtime-test".into(),
             turn_id: 7,

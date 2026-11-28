@@ -1,270 +1,7 @@
 use super::*;
-
-#[derive(Clone, Copy)]
-struct RegisteredCommand {
-    name: &'static str,
-    help: &'static str,
-    hidden: bool,
-}
-
-impl RegisteredCommand {
-    const fn public(name: &'static str, help: &'static str) -> Self {
-        Self {
-            name,
-            help,
-            hidden: false,
-        }
-    }
-
-    const fn remote(name: &'static str, help: &'static str) -> Self {
-        Self {
-            name,
-            help,
-            hidden: false,
-        }
-    }
-
-    const fn hidden(name: &'static str, help: &'static str) -> Self {
-        Self {
-            name,
-            help,
-            hidden: true,
-        }
-    }
-}
-
-const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
-    RegisteredCommand::public("/help", "Show help and keyboard shortcuts"),
-    RegisteredCommand::public("/?", "Show help and keyboard shortcuts"),
-    RegisteredCommand::public("/commands", "Alias for /help"),
-    RegisteredCommand::public("/model", "List or switch models"),
-    RegisteredCommand::public("/models", "Alias for /model"),
-    RegisteredCommand::public(
-        "/provider-test-coverage",
-        "Show live-test evidence for the current provider/model",
-    ),
-    RegisteredCommand::hidden("/model-status", "Alias for /provider-test-coverage"),
-    RegisteredCommand::public("/refresh-model-list", "Refresh provider model catalogs"),
-    RegisteredCommand::public("/agents", "Configure models for agent roles"),
-    RegisteredCommand::public(
-        "/swarm-prompt",
-        "Open the active swarm routing prompt in your editor",
-    ),
-    RegisteredCommand::public("/subagent", "Launch a subagent manually"),
-    RegisteredCommand::public("/observe", "Show the latest tool context in the side panel"),
-    RegisteredCommand::public("/todos", "Show the session todo list as a card in the chat"),
-    RegisteredCommand::hidden("/todo", "Alias for /todos"),
-    RegisteredCommand::public("/splitview", "Mirror the current chat in the side panel"),
-    RegisteredCommand::public("/split-view", "Alias for /splitview"),
-    RegisteredCommand::public("/btw", "Ask a side question in the side panel"),
-    RegisteredCommand::public("/ssh", "Connect to a remote machine using system SSH"),
-    RegisteredCommand::public("/git", "Show git status for the session working directory"),
-    RegisteredCommand::public("/colors", "List, configure, and score every TUI color"),
-    RegisteredCommand::hidden("/color", "Alias for /colors"),
-    RegisteredCommand::public("/hotkeys", "List hotkeys with your personal usage"),
-    RegisteredCommand::public("/terminal-setup", "Fix Shift+Enter newlines"),
-    RegisteredCommand::public("/commit", "Make logical commits from current changes"),
-    RegisteredCommand::public(
-        "/merge",
-        "Merge current branch into main/master and switch to it (no push)",
-    ),
-    RegisteredCommand::public(
-        "/commit-push",
-        "Make logical commits from current changes, then push",
-    ),
-    RegisteredCommand::hidden("/commit-and-push", "Alias for /commit-push"),
-    RegisteredCommand::public(
-        "/fast-release",
-        "Publish Linux immediately from the warm selfdev cache; CI adds other platforms",
-    ),
-    RegisteredCommand::public(
-        "/fast-macos-release",
-        "Publish a prepared macOS arm64 build immediately; CI adds other platforms",
-    ),
-    RegisteredCommand::public("/remote", "Reach this session from another machine"),
-    RegisteredCommand::public(
-        "/merge-remote-release",
-        "Merge into main/master, validate, push, and release remotely",
-    ),
-    RegisteredCommand::public(
-        "/remote-release",
-        "Push the release tag immediately; CI builds and publishes every platform",
-    ),
-    RegisteredCommand::hidden("/cut-release", "Alias for /fast-release"),
-    RegisteredCommand::hidden("/commit-push-release", "Alias for /cut-release"),
-    RegisteredCommand::public(
-        "/triage",
-        "Triage new GitHub issues and autonomously fix the safe ones",
-    ),
-    RegisteredCommand::public("/transcript", "Open the current session transcript file"),
-    RegisteredCommand::public("/subagent-model", "Show/change subagent model policy"),
-    RegisteredCommand::public("/autoreview", "Show/toggle automatic end-of-turn review"),
-    RegisteredCommand::public("/autojudge", "Show/toggle automatic end-of-turn judging"),
-    RegisteredCommand::public("/review", "Launch a one-shot headed review session"),
-    RegisteredCommand::public("/judge", "Launch a one-shot headed judge session"),
-    RegisteredCommand::public("/effort", crate::tui::keybind::EFFORT_HELP),
-    RegisteredCommand::public("/fast", "Toggle fast mode"),
-    RegisteredCommand::public("/transport", "Show/change connection transport"),
-    RegisteredCommand::public("/alignment", "Show/change default text alignment"),
-    RegisteredCommand::public(
-        "/compact-notifications",
-        "Show/toggle single-line swarm/file-activity notifications",
-    ),
-    RegisteredCommand::public(
-        "/show-agentgrep-output",
-        "Show/toggle full agentgrep search output inline in chat",
-    ),
-    RegisteredCommand::public(
-        "/tool-call-details",
-        "Show/toggle dimmed technical details on tool rows with an intent",
-    ),
-    RegisteredCommand::public(
-        "/latex",
-        "Toggle LaTeX images (on/off/status/none/unicode/image)",
-    ),
-    RegisteredCommand::public(
-        "/thinking-display",
-        "Show/hide the model's thinking text (off/full/current)",
-    ),
-    RegisteredCommand::hidden("/thinking", "Alias for /thinking-display"),
-    RegisteredCommand::hidden("/reasoning", "Alias for /thinking-display"),
-    RegisteredCommand::public("/cancel", "Cancel the current prompt or operation"),
-    RegisteredCommand::public("/clear", "Clear conversation history"),
-    RegisteredCommand::public("/cls", "Clear the view only, keeping context"),
-    RegisteredCommand::hidden("/clear-view", "Alias for /cls"),
-    RegisteredCommand::public("/rewind", "Rewind conversation to previous message"),
-    RegisteredCommand::public("/poke", "Poke model to resume with incomplete todos"),
-    RegisteredCommand::public("/plan", "Create a plan-only response as a plan card"),
-    RegisteredCommand::public("/improve", "Autonomously improve the repository"),
-    RegisteredCommand::public("/refactor", "Run a safe refactor loop"),
-    RegisteredCommand::public("/compact", "Compact context"),
-    RegisteredCommand::public("/fix", "Recover when the model cannot continue"),
-    RegisteredCommand::public("/voice", "Voice input: speak, then send (Ctrl+Space)"),
-    RegisteredCommand::public("/dictate", "Run configured external dictation command"),
-    RegisteredCommand::public("/dictation", "Alias for /dictate"),
-    RegisteredCommand::public("/memory", "Toggle memory feature"),
-    RegisteredCommand::public("/test", "Verify a claim/current changes with layered tests"),
-    RegisteredCommand::public(
-        "/initiatives",
-        "Open initiatives overview / resume tracked initiatives",
-    ),
-    RegisteredCommand::public("/goals", "Legacy alias for /initiatives"),
-    RegisteredCommand::public("/swarm", "Toggle swarm feature"),
-    RegisteredCommand::public("/overnight", "Run a supervised overnight coordinator"),
-    RegisteredCommand::public("/context", "Show the full session context snapshot"),
-    RegisteredCommand::public(
-        "/skills",
-        "Show loaded skills and jcode-endorsed recommendations",
-    ),
-    RegisteredCommand::public("/version", "Show current version"),
-    RegisteredCommand::public("/changelog", "Show recent changes in this build"),
-    RegisteredCommand::public("/info", "Show session info and tokens"),
-    RegisteredCommand::public(
-        "/reset",
-        "Review and confirm an OpenAI or Claude usage limit reset",
-    ),
-    RegisteredCommand::public("/usage", "Show connected provider usage limits"),
-    RegisteredCommand::public(
-        "/productivity",
-        "Generate a shareable usage report + dashboard image",
-    ),
-    RegisteredCommand::public("/wrapped", "Alias for /productivity"),
-    RegisteredCommand::public("/feedback", "Send feedback about jcode"),
-    RegisteredCommand::public("/telemetry", "Show or change what jcode sends"),
-    RegisteredCommand::public("/support", "Email support with diagnostics prefilled"),
-    RegisteredCommand::public("/subscription", "Show jcode subscription status"),
-    RegisteredCommand::public("/subscribe", "Why and how to subscribe to jcode"),
-    RegisteredCommand::public("/config", "Show or edit configuration"),
-    RegisteredCommand::public("/log", "Mark the current location in the jcode logs"),
-    RegisteredCommand::public(
-        "/keys",
-        "Show keybinding conflicts with your terminal and OS (/keys refresh to rescan)",
-    ),
-    RegisteredCommand::hidden("/keybindings", "Alias for /keys"),
-    RegisteredCommand::public(
-        "/diff",
-        "Cycle or set diff display mode (off/inline/full/file)",
-    ),
-    RegisteredCommand::public(
-        "/onboarding-preview",
-        "Preview the first-run onboarding screen",
-    ),
-    RegisteredCommand::public(
-        "/onboarding-sim",
-        "Rehearse real first-run onboarding as a new user (Alt+5 restart, Cmd+5 toggle)",
-    ),
-    RegisteredCommand::public("/reload", "Reload into newest available binary"),
-    RegisteredCommand::public("/restart", "Restart with current binary"),
-    RegisteredCommand::public("/rebuild", "Background rebuild and auto reload"),
-    RegisteredCommand::public("/selfdev", "Open a new self-dev jcode session"),
-    RegisteredCommand::public("/update", "Background update and auto reload"),
-    RegisteredCommand::public("/update-sim", "Preview update UI safely (Alt+_)"),
-    RegisteredCommand::hidden(
-        "/update-rehearsal",
-        "Self-dev: run the real updater against a fake local release in a sandbox (Alt+Shift+U)",
-    ),
-    RegisteredCommand::public("/resume", "Open session picker"),
-    RegisteredCommand::public("/sessions", "Alias for /resume"),
-    RegisteredCommand::public("/session", "Alias for /resume"),
-    RegisteredCommand::public("/active", "Manage live sessions (working vs ready)"),
-    RegisteredCommand::public("/catchup", "Open Catch Up picker"),
-    RegisteredCommand::public("/back", "Return to the previous Catch Up session"),
-    RegisteredCommand::public("/save", "Bookmark session for easy access"),
-    RegisteredCommand::public("/unsave", "Remove bookmark from session"),
-    RegisteredCommand::public("/rename", "Rename current session"),
-    RegisteredCommand::public("/fork", "Fork session into a new window (optional prompt)"),
-    RegisteredCommand::hidden("/split", "Alias for /fork"),
-    RegisteredCommand::public("/desktop", "Open this session in Jcode Desktop"),
-    RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
-    RegisteredCommand::public(
-        "/cloud",
-        "Move this session and swarm to cloud, or /cloud replace to copy local code",
-    ),
-    RegisteredCommand::public("/local", "Bring a cloud session back to this machine"),
-    RegisteredCommand::public(
-        "/mobile",
-        "Move to Jcode Cloud and send a push to resume on mobile",
-    ),
-    RegisteredCommand::public("/workspace", "Niri-style session workspace"),
-    RegisteredCommand::public("/quit", "Exit jcode"),
-    RegisteredCommand::public("/auth", "Show authentication status"),
-    RegisteredCommand::public("/login", "Login to a provider"),
-    RegisteredCommand::public("/logout", "Log out of a provider"),
-    RegisteredCommand::public("/account", "Open the combined account picker"),
-    RegisteredCommand::public("/accounts", "Alias for /account"),
-    RegisteredCommand::public("/cache", "Show cache stats; extend/5m saves Anthropic TTL"),
-    RegisteredCommand::public("/debug-visual", "Toggle visual debug overlay"),
-    RegisteredCommand::public("/screenshot-mode", "Toggle screenshot capture mode"),
-    RegisteredCommand::public("/screenshot", "Capture a screenshot debug state"),
-    RegisteredCommand::public("/record", "Record a demo capture"),
-    RegisteredCommand::remote("/client-reload", "Force reload client binary"),
-    RegisteredCommand::remote("/server-reload", "Force reload server binary"),
-    RegisteredCommand::remote(
-        "/continue",
-        "Continue every interrupted live session that would auto-resume",
-    ),
-    RegisteredCommand::remote("/resumeall", "Alias for /continue"),
-    RegisteredCommand::hidden("/resume-all", "Alias for /continue"),
-    RegisteredCommand::hidden("/z", "Secret premium-mode command"),
-    RegisteredCommand::hidden("/zz", "Secret premium-mode command"),
-    RegisteredCommand::hidden("/zzz", "Secret premium-mode command"),
-    RegisteredCommand::hidden("/zstatus", "Secret premium-mode status command"),
-];
-
-/// Every non-hidden slash command with its one-line description, in
-/// registration order. The `/help` overlay uses this to list commands its
-/// hand-written sections have not covered, so a newly registered command can
-/// never be invisible to users.
-pub(crate) fn registered_command_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
-    REGISTERED_COMMANDS
-        .iter()
-        .filter(|command| !command.hidden)
-        .map(|command| (command.name, command.help))
-}
-
-pub(crate) fn registered_command_names() -> impl Iterator<Item = &'static str> {
-    REGISTERED_COMMANDS.iter().map(|command| command.name)
-}
+use crate::tui::command_registry::REGISTERED_COMMANDS;
+#[path = "state_ui_input_helpers_onboarding.rs"]
+mod onboarding;
 
 impl App {
     pub fn input(&self) -> &str {
@@ -506,6 +243,10 @@ impl App {
         let prefix = input.to_lowercase();
         let prefix_trimmed = prefix.trim_end();
 
+        if prefix.starts_with("/mode ") {
+            return self.mode_picker_suggestions(input);
+        }
+
         if prefix.starts_with("/cloud ") {
             let mut candidates = vec![
                 (
@@ -663,6 +404,13 @@ impl App {
             );
         }
 
+        if input.starts_with("/acct ") {
+            return super::routing_acct::complete_acct(
+                input,
+                &super::routing_acct::configured_account_ids(),
+            );
+        }
+
         if prefix_trimmed == "/autoreview" {
             return vec![
                 (
@@ -804,15 +552,8 @@ impl App {
             return self.rank_suggestions(input, suggestions);
         }
 
-        if prefix.starts_with("/git ") {
-            return self.rank_suggestions(
-                input,
-                vec![("/git status".into(), "Show branch and working tree status")],
-            );
-        }
-
-        if prefix_trimmed == "/git" {
-            return vec![("/git status".into(), "Show branch and working tree status")];
+        if prefix_trimmed == "/git" || prefix.starts_with("/git ") {
+            return self.rank_suggestions(input, super::commands::git_suggestions());
         }
 
         if prefix.starts_with("/transcript ") {
@@ -840,7 +581,7 @@ impl App {
                 input,
                 efforts
                     .iter()
-                    .map(|e| (format!("/effort {}", e), effort_display_label(e)))
+                    .map(|e| (format!("/effort {}", e), effort_menu_label(e)))
                     .collect(),
             );
         }
@@ -903,6 +644,7 @@ impl App {
             let suggestions = vec![
                 ("/cache stats".into(), "Show KV cache stats"),
                 ("/cache status".into(), "Alias for /cache stats"),
+                ("/cache resume".into(), "Clear the cache protection pause without sending"),
                 ("/cache extend".into(), "Save 1 hour Anthropic cache TTL"),
                 ("/cache 1h".into(), "Save 1 hour Anthropic cache TTL"),
                 ("/cache 5m".into(), "Save 5 minute Anthropic cache TTL"),
@@ -1181,10 +923,7 @@ impl App {
 
         if prefix.starts_with("/goals show ") {
             let relevant_goals = crate::goal::list_relevant_goals(
-                self.session
-                    .working_dir
-                    .as_deref()
-                    .map(std::path::Path::new),
+                self.session.working_dir().map(std::path::Path::new),
             )
             .unwrap_or_default();
             let suggestions = relevant_goals
@@ -1445,84 +1184,15 @@ impl App {
         !self.suggestion_prompts().is_empty()
     }
 
-    /// What the onboarding welcome screen should render in its body, driven by
-    /// the active guided flow phase. Defaults to the starter suggestion cards.
-    pub fn onboarding_welcome_kind(&self) -> crate::tui::OnboardingWelcomeKind {
-        use crate::tui::OnboardingWelcomeKind;
-        use crate::tui::app::onboarding_flow::{OnboardingPhase, SummaryPill};
-        match self.onboarding_phase() {
-            Some(OnboardingPhase::Login { import }) => {
-                let prompt = import.as_ref().map(|review| {
-                    let rows = review
-                        .candidates
-                        .iter()
-                        .enumerate()
-                        .map(|(i, candidate)| crate::tui::LoginImportRow {
-                            provider_summary: candidate.provider_summary().to_string(),
-                            source_name: candidate.source_name().to_string(),
-                            checked: review.checked.get(i).copied().unwrap_or(false),
-                        })
-                        .collect();
-                    crate::tui::LoginImportPrompt {
-                        rows,
-                        cursor: review.cursor,
-                        continue_focused: review.continue_focused,
-                        choosing: review.choosing,
-                        summary_pill: match review.summary_pill {
-                            SummaryPill::Continue => crate::tui::ImportSummaryPill::Continue,
-                            SummaryPill::ImportLess => crate::tui::ImportSummaryPill::ImportLess,
-                            SummaryPill::Telemetry => crate::tui::ImportSummaryPill::Telemetry,
-                        },
-                        telemetry: review.telemetry.map(|t| crate::tui::TelemetryPage {
-                            cursor: t.cursor,
-                            checked: t.checked,
-                        }),
-                        telemetry_env_forced_off: crate::telemetry::opt_out_forced_by_env(),
-                        checked_count: review.checked_count(),
-                        seconds_left: review.seconds_remaining(),
-                    }
-                });
-                OnboardingWelcomeKind::Login {
-                    import: prompt,
-                    importing: self.onboarding_import_in_progress.is_some(),
-                    error: self.onboarding_import_error.clone(),
-                    // Only offer the agent-repair option on the failure screen,
-                    // and only when we can name an agent the user recently used.
-                    repair_agent_label: self.onboarding_import_error.as_ref().and_then(|_| {
-                        crate::tui::app::onboarding_repair::detect_preferred_repair_agent()
-                            .map(|a| a.label().to_string())
-                    }),
-                }
-            }
-            Some(OnboardingPhase::LoginOpenAi { yes_highlighted }) => {
-                OnboardingWelcomeKind::LoginOpenAi {
-                    yes_highlighted: *yes_highlighted,
-                }
-            }
-            Some(OnboardingPhase::ModelSelect) => OnboardingWelcomeKind::Suggestions,
-            Some(OnboardingPhase::ContinuePrompt {
-                cli,
-                yes_highlighted,
-                shown_at,
-            }) => {
-                let total = crate::tui::app::onboarding_flow::DECISION_TIMEOUT.as_secs();
-                let seconds_left = total.saturating_sub(shown_at.elapsed().as_secs());
-                OnboardingWelcomeKind::ContinuePrompt {
-                    cli_label: cli.label().to_string(),
-                    yes_highlighted: *yes_highlighted,
-                    seconds_left,
-                }
-            }
-            _ => OnboardingWelcomeKind::Suggestions,
-        }
-    }
-
     /// Whether the guided onboarding flow is in a phase that should take over
     /// the welcome screen body (login, OpenAI-login prompt, or continue prompt).
     /// The transcript-pick phase uses the session-picker overlay instead, and
     /// the suggestions phase is the default welcome body.
     fn onboarding_flow_drives_welcome(&self) -> bool {
         use crate::tui::app::onboarding_flow::OnboardingPhase;
+        if self.pending_login.is_some() || self.pending_account_input.is_some() {
+            return false;
+        }
         matches!(
             self.onboarding_phase(),
             Some(OnboardingPhase::Login { .. })
@@ -1539,9 +1209,9 @@ impl App {
         }
         let preview_mode = self.onboarding_preview_mode;
         let is_canary = if self.is_remote {
-            self.remote_is_canary.unwrap_or(self.session.is_canary)
+            self.remote_is_canary.unwrap_or(self.session.is_canary())
         } else {
-            self.session.is_canary
+            self.session.is_canary()
         };
         if is_canary && !preview_mode {
             return Vec::new();
@@ -1744,6 +1414,7 @@ impl App {
                 | "/transport"
                 | "/login"
                 | "/auth"
+                | "/acct"
                 | "/account"
                 | "/account claude"
                 | "/account switch"
@@ -1786,7 +1457,3 @@ impl App {
         )
     }
 }
-
-#[cfg(test)]
-#[path = "command_registry_tests.rs"]
-mod command_registry_tests;

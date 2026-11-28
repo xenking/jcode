@@ -1,0 +1,1497 @@
+#!/usr/bin/env python3
+"""Drive the real Jcode CLI/TUI with a loopback-only deterministic provider."""
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+import uuid
+
+REPO = Path(__file__).resolve().parents[4]
+ACK = "[verify-jcode] ack. saw_cloud_notice=False"
+TOOL_CONTENT = "verification tool side effect\n"
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def dump(path, value):
+    temporary = path.with_name(path.name + ".next")
+    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+    temporary.replace(path)
+
+
+def digest(path):
+    checksum = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            checksum.update(chunk)
+    return checksum.hexdigest()
+
+
+def run(argv, **kwargs):
+    return subprocess.run([str(x) for x in argv], check=True, capture_output=True,
+                          text=True, timeout=kwargs.pop("timeout", 30), **kwargs)
+
+
+def identity(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart=", "-o", "pgid="],
+                            capture_output=True, text=True, timeout=5)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def alive(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                            capture_output=True, text=True, timeout=5)
+    return result.returncode == 0 and not result.stdout.strip().startswith("Z")
+
+
+def launch_agent_path(label):
+    if sys.platform != "darwin":
+        return None
+    result = subprocess.run(["/bin/launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                            capture_output=True, text=True, timeout=5)
+    if result.returncode:
+        if "Could not find service" in result.stderr:
+            return None
+        raise RuntimeError(f"Cannot inspect launch agent {label}: {result.stderr.strip()}")
+    match = re.search(r"(?m)^\s*path = (.+)$", result.stdout)
+    require(match, f"Cannot determine launch agent path: {label}")
+    return match.group(1).strip()
+
+
+def hotkey_path():
+    return launch_agent_path("com.jcode.hotkey")
+
+
+def runtime_helpers(root):
+    listing = run(["ps", "-axo", "pid=,command="]).stdout
+    expected = (root / "jcode").resolve()
+    processes = []
+    for line in listing.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        args = parts[2].split()
+        if args[:1] != ["companion"] and args[:2] != ["setup-hotkey", "--listen-macos-hotkey"]:
+            continue
+        if Path(parts[1]).resolve() != expected:
+            continue
+        pid = int(parts[0])
+        start = identity(pid)
+        if start:
+            processes.append({"pid": pid, "identity": start})
+    return processes
+
+
+def stop_runtime_helpers(root):
+    for process in runtime_helpers(root):
+        pid = process["pid"]
+        if not alive(pid):
+            continue
+        require(identity(pid) == process["identity"], "Helper PID identity changed")
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if alive(pid):
+            require(identity(pid) == process["identity"], "Helper PID reused during cleanup")
+            os.kill(pid, signal.SIGKILL)
+            wait_for(lambda: not alive(pid), "runtime helper shutdown", 5)
+    require(not runtime_helpers(root), "Runtime helper remains after cleanup")
+
+
+def cleanup_runtime_launch_agents(root, original_hotkey):
+    if sys.platform != "darwin":
+        return
+    directory = root / "home/Library/LaunchAgents"
+    for plist in directory.glob("*.plist"):
+        with plist.open("rb") as source:
+            label = plistlib.load(source).get("Label")
+        require(isinstance(label, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", label),
+                f"Invalid runtime launch agent label in {plist}")
+        current = launch_agent_path(label)
+        if not current or Path(current).resolve() != plist.resolve():
+            continue
+        if label == "com.jcode.hotkey" and current == original_hotkey:
+            continue
+        run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{label}"])
+
+
+def wait_for(predicate, description, timeout=45):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.1)
+    raise RuntimeError(f"Timeout: {description}")
+
+
+def completed_turn(messages, token, reply=ACK):
+    users = [i for i, message in enumerate(messages)
+             if message.get("role") == "user" and token in json.dumps(message.get("content"))]
+    return bool(users) and any(message.get("role") == "assistant" and reply in json.dumps(message.get("content"))
+                               for message in messages[users[-1] + 1:])
+
+
+def load_persisted(path):
+    """Read the snapshot plus append journal, matching session/persistence.rs."""
+    snapshot = path.read_bytes()
+    journal_path = path.with_suffix(".journal.jsonl")
+    journal = journal_path.read_bytes() if journal_path.exists() else b""
+    data = json.loads(snapshot)
+    messages = data.get("messages", [])
+    for line in journal.splitlines(keepends=True):
+        if not line.endswith(b"\n"):
+            continue  # A writer may still be appending the final line.
+        entry = json.loads(line)
+        messages.extend(entry.get("append_messages", []))
+    # A checkpoint can leave a stale journal briefly. Production also dedupes IDs.
+    seen = set()
+    data["messages"] = []
+    for message in messages:
+        message_id = message.get("id")
+        if message_id and message_id in seen:
+            continue
+        seen.add(message_id)
+        data["messages"].append(message)
+    return data if path.read_bytes() == snapshot else None
+
+
+class TerminalJourney:
+    def __init__(self, harness, label, token, start):
+        self.h = harness
+        self.label = label
+        self.first = token + "_first"
+        self.cancelled = token + "_cancelled"
+        self.next = token + "_next"
+        self.start = start
+
+    def run(self):
+        h = self.h
+        sid = h.observe("state")["remote_session_id"]
+        control = h.root / "control"
+        try:
+            for token in (self.first, self.cancelled):
+                prompt = f"[e2e:stream:{token}]"
+                h.send(prompt)
+                request = h.request_after(prompt, self.start)
+                require(request["messages"][-1].get("role") == "user" and
+                        prompt in json.dumps(request["messages"][-1]), "Wrong provider turn")
+                wait_for((control / (token + ".held")).exists, "first SSE chunk and provider barrier")
+                wait_for(lambda: "STAGEA_" + token in h.pane(), "streamed first chunk visible")
+                require(h.observe("state")["processing"], "Stream stopped before release")
+                require("STAGEB_" + token not in h.frame(self.label + "-" + token + "-held"),
+                        "Second chunk appeared before release")
+                if token == self.first:
+                    h.event(action="terminal-resize", cols=100, rows=32)
+                    h.tmux("resize-window", "-t", "verify", "-x", "100", "-y", "32")
+                    wait_for(lambda: h.debug("client:frame").get("terminal_size") == [100, 32],
+                             "renderer acknowledged 100x32 terminal resize")
+                    require("STAGEA_" + token in h.frame(self.label + "-resized"), "Stream vanished on resize")
+                else:
+                    h.event(action="terminal-keys", keys=["Escape"], purpose="cancel streamed turn")
+                    h.tmux("send-keys", "-t", "verify", "Escape")
+                    h.idle()
+                    h.frame(self.label + "-cancelled")
+                (control / (token + ".release")).write_text("release\n")
+                wait_for((control / (token + ".finished")).exists, "provider attempted remaining SSE")
+                if token == self.first:
+                    wait_for(lambda: "STAGEB_" + token in h.pane(), "streamed final chunk visible")
+                    h.idle()
+                    check_journey_capture(h.frame(self.label + "-first-complete"), token, True)
+            h.send(f"[e2e:stream-next:{self.next}]")
+            request = h.request_after(self.next, self.start)
+            require(request["messages"][-1].get("role") == "user" and
+                    self.next in json.dumps(request["messages"][-1]), "Wrong subsequent provider turn")
+            require("STAGEB_" + self.first in json.dumps(request["messages"]),
+                    "Completed streamed turn missing from subsequent provider context")
+            h.idle()
+            reply = "STAGEC_" + self.next
+            saved = h.persisted(sid, self.next, reply)
+            require(h.observe("state")["remote_session_id"] == sid, "Journey changed session")
+            text = h.frame(self.label + "-after")
+            check_journey_capture(text, self.first, True)
+            check_journey_capture(text, self.cancelled, False)
+            require(text.count(reply) == 1, "Subsequent response missing or duplicated")
+            for token in (self.first, self.cancelled, self.next):
+                matching = [r for r in h.records()[self.start:] if r.get("messages") and
+                            token in json.dumps(r["messages"][-1])]
+                require(len(matching) == 1, f"Expected one provider request for {token}, got {len(matching)}")
+            require("STAGEB_" + self.first in json.dumps(saved["messages"]), "Completed stream not persisted")
+            require("STAGEB_" + self.cancelled not in json.dumps(saved["messages"]), "Cancelled output was persisted late")
+            dump(h.evidence / (self.label + "-session.json"), saved)
+            return {"session_id": sid, "tokens": [self.first, self.cancelled, self.next]}
+        finally:
+            for token in (self.first, self.cancelled):
+                (control / (token + ".release")).write_text("release\n")
+
+
+def check_journey_capture(text, token, completed):
+    count = text.count("STAGEA_" + token)
+    require(count == 1 if completed else count <= 1, "First chunk missing or duplicated")
+    require(text.count("STAGEB_" + token) == int(completed), "Final chunk missing, duplicated or late")
+
+
+class Harness:
+    def __init__(self, evidence):
+        self.evidence = Path(evidence).resolve()
+        self.state = json.loads((self.evidence / "run.json").read_text())
+        require(self.state["schema"] == 1, "Unsupported run manifest")
+        require(self.state["evidence"] == str(self.evidence), "Moved manifest, refusing to drive")
+        self.root = Path(self.state["runtime"])
+        require(self.evidence != self.root.resolve() and self.root.resolve() not in self.evidence.parents,
+                "Evidence must be outside disposable runtime")
+        if not self.state.get("cleaned"):
+            require((self.root / "owner").read_text() == self.state["owner"], "Runtime ownership mismatch")
+        self.env = self.state["env"]
+        self.binary = self.root / "jcode"
+
+    def save(self):
+        dump(self.evidence / "run.json", self.state)
+
+    def event(self, **data):
+        with (self.evidence / "actions.jsonl").open("a") as out:
+            out.write(json.dumps({"at": time.time(), **data}) + "\n")
+
+    def spawn(self, name, argv, env=None):
+        with (self.evidence / f"{name}.log").open("a") as out:
+            child = subprocess.Popen([str(x) for x in argv], env=env or self.env,
+                                     cwd=self.root / "workspace", stdin=subprocess.DEVNULL,
+                                     stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+        self.state["processes"][name] = {"pid": child.pid, "identity": identity(child.pid)}
+        self.save()
+        self.event(action="spawn", name=name, argv=[str(x) for x in argv], pid=child.pid)
+        return child
+
+    def tmux(self, *args):
+        return run([self.state["tmux"], "-S", self.root / "tmux.sock", *args], env=self.env).stdout
+
+    def pane(self):
+        return self.tmux("capture-pane", "-p", "-S", "-1000", "-t", "verify")
+
+    def send(self, text):
+        self.event(action="terminal-input", text=text, keys=["Enter"])
+        self.tmux("send-keys", "-t", "verify", "-l", text)
+        self.tmux("send-keys", "-t", "verify", "Enter")
+
+    def observe(self, command):
+        require(command in {"state", "history", "side-panel:stats"}, "Not an observation")
+        return self.debug("client:" + command)
+
+    def debug(self, command, private_exec=False):
+        require(command in {"server:info", "clients:map", "swarm:members", "client:state", "client:history",
+                            "client:frame", "client:side-panel:stats"}
+                or private_exec and command == "reload:verify-exec",
+                "Not a read-only server command")
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(10)
+            connection.connect(str(self.root / "app-debug.sock"))
+            connection.sendall((json.dumps({"type": "debug_command", "id": 1,
+                                           "command": command}) + "\n").encode())
+            with connection.makefile("r") as reader:
+                response = json.loads(reader.readline())
+        require(response.get("ok"), f"Debug request failed: {response}")
+        return json.loads(response["output"])
+
+    def records(self):
+        path = self.evidence / "provider.jsonl"
+        if not path.exists():
+            return []
+        lines = path.read_text().splitlines()
+        return [json.loads(line) for line in lines if line.endswith("}")]
+
+    def request_after(self, text, start):
+        return wait_for(lambda: next((r for r in self.records()[start:]
+                                     if text in json.dumps(r["messages"])), None),
+                        f"fresh HTTP provider request containing {text}")
+
+    def persisted(self, session_id, text, reply=ACK):
+        path = self.root / "data/sessions" / f"{session_id}.json"
+
+        def saved():
+            try:
+                data = load_persisted(path)
+                return data if data and completed_turn(data.get("messages", []), text, reply) else None
+            except (FileNotFoundError, json.JSONDecodeError):
+                return None
+        return wait_for(saved, f"persisted transcript {session_id}: {text}")
+
+    def idle(self, timeout=45):
+        return wait_for(lambda: not (s := self.observe("state"))["processing"]
+                        and not s["queued_messages"], "idle TUI", timeout)
+
+    def stop_daemon(self):
+        old_id = self.debug("server:info")["id"]
+        process = self.state["processes"]["server"]
+        require(alive(process["pid"]) and identity(process["pid"]) == process["identity"],
+                "Daemon process ownership changed")
+        self.event(action="daemon-stop", pid=process["pid"], signal="SIGTERM")
+        os.killpg(process["pid"], signal.SIGTERM)
+        wait_for(lambda: not alive(process["pid"]), "old daemon shutdown", 15)
+        return old_id
+
+    def start_replacement(self, old_id):
+        self.spawn("server", [self.binary, "--no-update", "--no-selfdev", "--provider",
+                              "openai-compatible", "--model", "fake-model", "--debug-socket",
+                              "--socket", self.root / "app.sock", "serve"])
+
+        def replacement():
+            try:
+                server_id = self.debug("server:info")["id"]
+                return server_id if server_id != old_id else None
+            except (OSError, RuntimeError):
+                return None
+        return wait_for(replacement, "new isolated daemon identity")
+
+    def premium_spawn(self, label, token, start):
+        model = self.state.get("fake_premium_model")
+        require(model, "Launch this isolated fixture with --premium-spawn")
+        sid = self.observe("state")["remote_session_id"]
+
+        def workers():
+            return {m["session_id"] for m in self.debug("swarm:members") if m["is_headless"]}
+
+        def premium_requests():
+            return [r for r in self.records()[start:] if r.get("model") == model]
+
+        initial_workers = workers()
+        for choice, keys in [("deny", ["Enter"]), ("allow", ["Down", "Enter"])]:
+            case = token + "_" + choice
+            prompt = f"[e2e:premium-spawn:{case}]"
+            self.send(prompt)
+            wait_for(lambda: "Allow this worker" in self.pane(), "fresh owner approval modal", 12)
+            text = self.frame(f"{label}-{choice}-modal")
+            require(model in text and "effort high" in text, "Modal did not show the capped model and effort")
+            require(workers() == initial_workers and not premium_requests(), "Worker started before approval")
+            self.event(action="terminal-keys", keys=keys, purpose=choice + " premium worker")
+            self.tmux("send-keys", "-t", "verify", *keys)
+            self.idle()
+            self.persisted(sid, prompt)
+            if choice == "deny":
+                require(workers() == initial_workers and not premium_requests(), "Deny allocated a premium worker")
+        wait_for(premium_requests, "approved request at the fake provider")
+        approved = workers() - initial_workers
+        require(len(approved) == 1, "Approval did not allocate exactly one worker")
+        worker = approved.pop()
+        child_prompt = "premium-child-" + case
+        self.persisted(worker, child_prompt)
+        requests = premium_requests()
+        startup = [r for r in requests if not any(m["role"] == "assistant" for m in r["messages"])]
+        require(len(startup) == 1 and child_prompt in json.dumps(startup[0]["messages"]),
+                "Unexpected or duplicated premium startup request")
+        require(all(r.get("reasoning_effort") == "high" for r in requests),
+                "A worker request used an effort other than the approved cap")
+        return {"session_id": sid, "worker_id": worker, "model": model, "effort": "high",
+                "startup_count": len(startup), "request_count": len(requests)}
+
+    def worker_reload(self, label, token, start):
+        history_token = token + "_original Acknowledge."
+        sid = self.observe("state")["remote_session_id"]
+
+        def workers():
+            return {m["session_id"]: m for m in self.debug("swarm:members") if m["is_headless"]}
+
+        def conversation(record):
+            return [m for m in record["messages"] if m["role"] != "system"]
+
+        def worker_requests(after, text):
+            return [r for r in self.records()[after:] if r["agent"] and all(any(
+                m["role"] == "user" and marker in json.dumps(m["content"])
+                for m in conversation(r)) for marker in [history_token, text])]
+
+        def restart():
+            # Keep the coordinator attached while SIGTERM captures ownership.
+            old_id = self.stop_daemon()
+            if alive(self.state["processes"]["tmux"]["pid"]):
+                self.tmux("kill-session", "-t", "verify")
+            wait_for(lambda: not alive(self.state["processes"]["tmux"]["pid"]), "old terminal shutdown", 10)
+            new_id = self.start_replacement(old_id)
+            return old_id, new_id
+
+        def send_to_worker(text):
+            self.send(f"{text}_coordinator [e2e:worker-dm:{worker_id}:{text}]")
+
+        prior = workers()
+        self.send(f"{token}_spawn [e2e:worker-spawn:{token}_original]")
+        created = wait_for(lambda: workers().keys() - prior.keys(), "spawned headless worker")
+        require(len(created) == 1, f"Expected exactly one new worker, got {created}")
+        worker_id = created.pop()
+        self.persisted(worker_id, history_token)
+        wait_for(lambda: workers()[worker_id]["status"] == "ready", "original ready worker")
+        self.idle()
+        original = wait_for(lambda: worker_requests(start, history_token),
+                            "initial worker inference")[0]
+        before_idle_restart = len(self.records())
+        first_restart = restart()
+        ready = workers()[worker_id]
+        dump(self.evidence / f"{label}-ready-after-restart.json", ready)
+        require(ready["status"] == "ready" and not ready["provider"],
+                f"Idle worker was not restored lazily: {ready}")
+        self.start_tui(resume=sid)
+        self.doctor()
+        require(not worker_requests(before_idle_restart, history_token), "Idle worker ran without a message")
+        post = len(self.records())
+        send_to_worker(token + "_idle_dm")
+        dm = wait_for(lambda: [r for r in worker_requests(post, token + "_idle_dm")
+                              if conversation(r)[:len(conversation(original))] == conversation(original)],
+                      "DM on the restored worker's original provider history")[0]
+        idle_saved = self.persisted(worker_id, token + "_idle_dm")
+        wait_for(lambda: workers()[worker_id]["status"] == "ready", "worker ready after DM")
+        self.idle()
+        require("stopped by the server restart and not restored" not in self.pane(),
+                "Coordinator got a false unrestored-worker notice")
+
+        before_running = len(self.records())
+        held = self.root / "control" / (token + ".held")
+        release = held.with_suffix(".release")
+        step = self.root / "workspace/worker-reload-step.txt"
+        step.write_text("worker-step-anchor\n")
+        expected_step = ["worker-step-anchor", token]
+        worker_terminal = re.compile(r"\bnew_status=(ready|completed|failed|stopped|crashed)\b")
+
+        def terminal_statuses():
+            return [line for path in sorted((self.root / "data/logs").glob("jcode-*.log"))
+                    for line in path.read_text().splitlines()
+                    if f" session_id={worker_id} " in line
+                    and "phase=member_status_updated" in line and worker_terminal.search(line)]
+
+        try:
+            send_to_worker(token + "_running")
+            wait_for(held.exists, "worker provider held after successful tool result")
+            require(step.read_text().splitlines() == expected_step, "Worker tool did not execute exactly once before restart")
+            require(workers()[worker_id]["status"] == "running", "Provider hold did not keep worker running")
+            self.idle()
+            before = next(r for r in worker_requests(before_running, token + "_running")
+                          if any(m.get("tool_call_id") == "call_worker_reload_step" for m in r["messages"]))
+            post = len(self.records())
+            previous = self.debug("server:info")["id"]
+            before_terminal = terminal_statuses()
+            require(len(before_terminal) >= 2, "Missing status events for the worker's completed turns")
+            reload_id = self.debug("reload:verify-exec", private_exec=True)["request_id"]
+
+            def successor():
+                try:
+                    current = self.debug("server:info")["id"]
+                    return current if current != previous else None
+                except (OSError, RuntimeError, ValueError):
+                    return None
+
+            second_restart = (previous, wait_for(successor, "replacement process image"))
+            trace = self.root / "data/reload-traces" / (reload_id + ".jsonl")
+            shutil.copy2(trace, self.evidence / f"{label}-exec.jsonl")
+            reload_events = [json.loads(line) for line in trace.read_text().splitlines()]
+            require(any(event.get("phase") == "exec_start"
+                        and event.get("pid") == self.state["processes"]["server"]["pid"]
+                        for event in reload_events),
+                    "No exec trace for the original daemon PID")
+            require(any(event.get("phase") == "intent_persisted" and event.get("session_id") == worker_id
+                        and event.get("is_headless") for event in reload_events),
+                    "No durable headless recovery intent for the interrupted worker")
+            busy = workers()[worker_id]
+            dump(self.evidence / f"{label}-running-after-restart.json", busy)
+            require(busy["status"] == "running", f"Interrupted worker falsely appeared finished: {busy}")
+            resumed = wait_for(lambda: worker_requests(post, token + "_running"),
+                               "automatic worker continuation on replacement daemon")[0]
+            require(conversation(resumed) == conversation(before),
+                    "Continuation changed the provider history after a completed tool result")
+            unexpected = terminal_statuses()[len(before_terminal):]
+            dump(self.evidence / f"{label}-terminal-before-continuation.json", unexpected)
+            require(not unexpected, f"Worker published terminal status before resuming: {unexpected}")
+        finally:
+            release.write_text("release isolated worker fixture\n")
+            self.event(action="fixture-release", token=token)
+        saved = self.persisted(worker_id, token + "_running")
+        wait_for(lambda: workers()[worker_id]["status"] == "ready", "worker finished recovered turn")
+        require(len(worker_requests(post, token + "_running")) == 1,
+                "Expected exactly one continuation inference for the interrupted turn")
+        require(step.read_text().splitlines() == expected_step, "Reload repeated an already completed tool")
+        wait_for(lambda: any(c["session_id"] == sid for c in self.debug("clients:map")["clients"]),
+                 "TUI reattached to the original coordinator")
+        for key, value in [("initial-request", original), ("dm-request", dm), ("dm-session", idle_saved),
+                           ("held-request", before), ("resumed-request", resumed), ("worker-session", saved)]:
+            dump(self.evidence / f"{label}-{key}.json", value)
+        shutil.copy2(step, self.evidence / f"{label}-worker-reload-step.txt")
+        return {"session_id": sid, "worker_id": worker_id, "restarts": [first_restart, second_restart],
+                "reload_id": reload_id}
+
+    def frame(self, label):
+        require(re.fullmatch(r"[a-zA-Z0-9_-]+", label), "Frame label must be a basename")
+        dump(self.evidence / f"{label}.frame.json", self.debug("client:frame"))
+        text = self.pane()
+        (self.evidence / f"{label}.txt").write_text(text)
+        dump(self.evidence / f"{label}.state.json", self.observe("state"))
+        return text
+
+    def cli(self, label, prompt, mode="json", resume=None):
+        argv = [str(self.binary), "--no-update", "--no-selfdev", "--provider", "openai-compatible",
+                "--model", "fake-model", "--socket", str(self.root / "app.sock")]
+        if resume:
+            argv += ["--resume", resume]
+        argv += ["run", *([] if mode == "plain" else ["--" + mode]), "--", prompt]
+        self.event(action="cli", label=label, argv=argv)
+        try:
+            result = subprocess.run(argv, cwd=self.root / "workspace", env=self.env,
+                                    text=True, capture_output=True, timeout=60)
+            (self.evidence / f"{label}.stdout").write_text(result.stdout)
+            (self.evidence / f"{label}.stderr").write_text(result.stderr)
+            dump(self.evidence / f"{label}.command.json", {"argv": argv, "exit_code": result.returncode})
+            require(result.returncode == 0, f"CLI exit {result.returncode}, see {label}.stderr")
+            if mode == "json":
+                output = json.loads(result.stdout)
+                require(output.get("text") == ACK and output.get("session_id"), "Invalid JSON completion")
+                return output
+            if mode == "ndjson":
+                events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+                require(events and events[0].get("type") == "start", "Missing NDJSON start")
+                require(events[-1].get("type") == "done" and events[-1].get("text") == ACK,
+                        "Missing NDJSON completion")
+                require(events[0].get("session_id") == events[-1].get("session_id"),
+                        "NDJSON completion changed session")
+            else:
+                expected = ACK + "\n[Tokens] upload: 1 download: 1"
+                require(result.stdout.strip() == expected, f"CLI reply mismatch, see {label}.stdout")
+            return result.stdout
+        except subprocess.TimeoutExpired as error:
+            dump(self.evidence / f"{label}.command.json", {"argv": argv, "timeout": True})
+            (self.evidence / f"{label}.stdout").write_bytes(error.stdout or b"")
+            (self.evidence / f"{label}.stderr").write_bytes(error.stderr or b"")
+            raise
+
+    def start_tui(self, resume=None):
+        argv = [str(self.binary), "--fresh-spawn", "--no-update", "--no-selfdev", "--provider", "openai-compatible",
+                "--model", "fake-model", "--debug-socket", "--socket", str(self.root / "app.sock")]
+        if resume:
+            argv += ["--resume", resume]
+        self.event(action="tui-launch", argv=argv)
+        # Linux binds file-controlled clients to their parent. Only the pane
+        # should inherit these paths, not the daemon that outlives `launch`.
+        env = dict(self.env, JCODE_DEBUG_CMD_PATH=str(self.root / "debug.cmd"),
+                   JCODE_DEBUG_RESPONSE_PATH=str(self.root / "debug.response"))
+        command = shlex.join(["/usr/bin/env", "-i", *[f"{k}={v}" for k, v in env.items()], *argv])
+        self.tmux("-f", "/dev/null", "new-session", "-d", "-s", "verify",
+                  "-x", str(self.state["cols"]), "-y", str(self.state["rows"]),
+                  "-c", str(self.root / "workspace"), command)
+        pid = int(self.tmux("display-message", "-p", "#{pid}").strip())
+        self.state["processes"]["tmux"] = {"pid": pid, "identity": identity(pid)}
+        client_pid = int(self.tmux("display-message", "-p", "-t", "verify", "#{pane_pid}").strip())
+        self.state["processes"]["client"] = {"pid": client_pid, "identity": identity(client_pid)}
+        self.save()
+
+        def ready():
+            text = self.pane()
+            if "Welcome to jcode" in text:
+                self.event(action="onboarding", keys=["Right", "Enter"], purpose="skip optional setup")
+                self.tmux("send-keys", "-t", "verify", "Right", "Enter")
+            return "Ready to use" in text or (resume and ACK in text)
+        def attached():
+            try:
+                return bool(self.observe("state").get("remote_session_id"))
+            except RuntimeError as error:
+                if "No TUI client connected" not in str(error):
+                    raise
+                return False
+        wait_for(ready, "usable TUI prompt")
+        wait_for(attached, "TUI daemon attachment")
+        self.frame("launch" if not resume else "launch-resume-" + uuid.uuid4().hex[:8])
+
+    def doctor(self):
+        require(not self.state.get("cleaned"), "Instance has been cleaned. Launch a new run.")
+        require(digest(self.binary) == self.state["binary_sha256"], "Running binary digest changed")
+        require(digest(Path(__file__)) == self.state["helper_sha256"], "Helper changed; relaunch before driving")
+        require(digest(REPO / "scripts/fake_openai_server.py") == self.state["provider_sha256"],
+                "Fake-provider fixture changed; relaunch before driving")
+        for name, process in self.state["processes"].items():
+            require(alive(process["pid"]) and identity(process["pid"]) == process["identity"],
+                    f"Process no longer owned/alive: {name}")
+        # No inherited proxies and no authentication to external endpoints.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(self.env["JCODE_OPENAI_COMPAT_API_BASE"] + "/models", timeout=5) as response:
+            require(json.load(response)["data"][0]["id"] == "fake-model", "Wrong provider catalog")
+        server = self.debug("server:info")
+        require(server["git_hash"] and server["git_hash"] in self.state["binary_version"],
+                "Daemon build does not match launched binary")
+        state = self.observe("state")
+        require(state.get("remote_session_id"), "TUI not attached")
+        clients = self.debug("clients:map")["clients"]
+        require(len(clients) == 1 and clients[0]["session_id"] == state["remote_session_id"],
+                "Expected exactly our TUI client on the isolated daemon")
+        report = {"status": "ready", "binary_sha256": self.state["binary_sha256"],
+                  "binary_version": self.state["binary_version"], "server": server,
+                  "session_id": state["remote_session_id"], "model": state["model"],
+                  "runtime": str(self.root), "provider": self.env["JCODE_OPENAI_COMPAT_API_BASE"]}
+        dump(self.evidence / "doctor.json", report)
+        return report
+
+    def reload_background(self, token, start, label, finish_before_attach=False, wait_in_turn=False):
+        routed = bool(self.env.get("JCODE_EXEC_WORKER"))
+        gate = self.root / "control" / token.replace("-", "_")
+        sid = self.observe("state")["remote_session_id"]
+        status_dir = self.root / "jcode-bg-tasks"
+        before = {p.name for p in status_dir.glob("*.status.json")}
+        flags = " verify-no-bg-wake" if wait_in_turn else ""
+        self.send(f"{token} [e2e:reload-bg:{gate.name}]{flags}")
+        self.request_after(token, start)
+        self.idle()
+
+        def load_status(path):
+            try:
+                return json.loads(path.read_text())
+            except (OSError, ValueError):
+                return {}
+
+        def new_task():
+            for path in status_dir.glob("*.status.json"):
+                task = load_status(path)
+                if path.name not in before and task.get("session_id") == sid and task.get("tool_name") == "bash":
+                    return path
+
+        path = wait_for(new_task, "original background task registration")
+        task = load_status(path)
+        os_pid = wait_for(lambda: int(gate.with_suffix(".child").read_text())
+                          if gate.with_suffix(".child").exists() else None, "original command PID")
+        require(task.get("status") == "running" and task.get("notify") and task.get("wake") == (not wait_in_turn),
+                f"Expected running task with the requested delivery flags: {task}")
+        require(alive(os_pid) and alive(task["pid"]), "Original shell or supervisor is not alive")
+        daemon_pid = self.state["processes"]["server"]["pid"]
+        old_server = self.debug("server:info")["id"]
+        if wait_in_turn:
+            wait_prompt = f"{token}_wait [e2e:reload-wait-latest]"
+            self.send(wait_prompt)
+            self.request_after(wait_prompt, start)
+            wait_for(lambda: "Verify original wait survives daemon exec" in self.pane()
+                     and self.observe("state")["processing"], "the original bg wait is in flight")
+            # Add a newer terminal task after the wait resolved its selector.
+            # This status represents another tool submitting work before exec.
+            time.sleep(0.25)
+            distractor = ("z" if task["task_id"][0] != "z" else "y") + task["task_id"][1:]
+            dump(status_dir / f"{distractor}.status.json", dict(task, task_id=distractor,
+                 started_at="2099-01-01T00:00:00+00:00", status="completed", exit_code=0,
+                 pid=None, detached=False, notify=False))
+        self.event(action="private-exec", daemon_pid=daemon_pid, shell_pid=os_pid)
+        tui_closed = False
+        try:
+            if finish_before_attach:
+                self.frame(label + "-running")
+                self.tmux("kill-session", "-t", "verify")
+                tui_closed = True
+            reload_id = self.debug("reload:verify-exec", private_exec=True)["request_id"]
+
+            def new_server():
+                try:
+                    server = self.debug("server:info")
+                    return server if server["id"] != old_server else None
+                except (OSError, RuntimeError, ValueError):
+                    return None
+
+            successor = wait_for(new_server, "replacement process image", 25)
+            trace = self.root / "data/reload-traces" / (reload_id + ".jsonl")
+            shutil.copy2(trace, self.evidence / f"{label}-exec.jsonl")
+            require(any(event.get("phase") == "exec_start" and event.get("pid") == daemon_pid
+                        and Path(event.get("binary", "")).resolve() == self.binary.resolve()
+                        for event in map(json.loads, trace.read_text().splitlines())),
+                    "No exec trace for the original daemon PID and staged binary")
+            require(alive(daemon_pid), "Exec did not preserve daemon PID")
+            if not finish_before_attach:
+                wait_for(lambda: any(client["session_id"] == sid for client in self.debug("clients:map")["clients"]),
+                         "TUI reattached to its original session", 25)
+            require(alive(os_pid) and alive(task["pid"]) and load_status(path).get("pid") == task["pid"]
+                    and load_status(path).get("status") == "running", "Exec lost the original running task")
+            gate.with_suffix(".progress").touch()
+            if not routed:
+                wait_for(lambda: (load_status(path).get("progress") or {}).get("message") == "post-exec progress",
+                         "progress recorded by replacement daemon")
+            if finish_before_attach:
+                gate.with_suffix(".release").touch()
+                wait_for(lambda: load_status(path).get("exit_code") == 23, "completion while owner is offline")
+                require(not any(client["session_id"] == sid for client in self.debug("clients:map")["clients"]),
+                        "Owner had already reattached before completion")
+            else:
+                self.frame(label + "-running")
+        finally:
+            gate.with_suffix(".progress").touch()
+            gate.with_suffix(".release").touch()
+        if tui_closed:
+            self.start_tui(resume=sid)
+        wait_for(lambda: load_status(path).get("exit_code") == 23, "original code 23 recorded")
+        finished = load_status(path)
+        output = status_dir / (task["task_id"] + ".output")
+        require(finished.get("status") == "failed" and "completed by original shell" in output.read_text(),
+                f"Missing original output or exit status: {finished}")
+        if not wait_in_turn:
+            wait_for(lambda: "exit 23" in self.pane(), "visible TUI background completion")
+            # The fixture text in the assistant's command is not a wake.
+            wait_for(lambda: any(m.get("role") == "user"
+                                 and f"**Background task** `{task['task_id']}`" in json.dumps(m.get("content"))
+                                 and "completed by original shell" in json.dumps(m.get("content"))
+                                 for entry in self.records()[start:] if entry.get("agent")
+                                 for m in entry["messages"][-2:]), "provider request from task wake")
+        wait_for(lambda: load_status(path).get("completion_delivered") is True,
+                 "durable completion acknowledgement")
+        self.idle()
+        if wait_in_turn:
+            def wait_continuation():
+                requests = [entry for entry in self.records()[start:] if entry.get("agent")
+                            and any(wait_prompt in json.dumps(m.get("content")) for m in entry["messages"])]
+                return requests[1]["messages"] if len(requests) >= 2 else None
+
+            first_continuation = wait_for(wait_continuation, "provider continuation for the original wait")
+            require(any(m.get("role") == "tool" and m.get("tool_call_id") == "call_reload_wait"
+                        and "Exit code: 23" in json.dumps(m.get("content"))
+                        and "completed by original shell" in json.dumps(m.get("content"))
+                        for m in first_continuation), "The first continued provider request lacks the original wait result")
+            self.idle()
+        dump(self.evidence / f"{label}-task.json", load_status(path))
+        return {"task_id": task["task_id"], "daemon_pid": daemon_pid, "shell_pid": os_pid,
+                "previous_server_id": old_server, "server_id": successor["id"],
+                "session_id": sid, "exit_code": finished["exit_code"], "reload_id": reload_id}
+
+    def reload_selfdev(self, token, label):
+        workspace = self.root / "workspace"
+        (workspace / ".git").mkdir(exist_ok=True)
+        (workspace / "Cargo.toml").write_text('[package]\nname = "jcode"\n')
+        locks = self.root / "data/selfdev-build-locks"
+        locks.mkdir(exist_ok=True)
+        status_dir = self.root / "jcode-bg-tasks"
+        sid = self.observe("state")["remote_session_id"]
+        before = {path.name for path in status_dir.glob("*.status.json")}
+
+        def read_status(path):
+            try:
+                return json.loads(path.read_text())
+            except (OSError, ValueError):
+                return {}
+
+        def registered_job(action):
+            for path in status_dir.glob("*.status.json"):
+                status = read_status(path)
+                if (path.name not in before and status.get("session_id") == sid
+                        and status.get("tool_name") == f"selfdev-{action}"):
+                    return path, status
+
+        with (locks / "test-worktree-scope.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            jobs = []
+            for action in ("build", "test"):
+                start = len(self.records())
+                self.send(f"{token}_{action} [e2e:reload-selfdev:{action}]")
+                self.request_after(f"{token}_{action}", start)
+                self.idle()
+                path, task = wait_for(lambda: registered_job(action), f"selfdev {action} registration")
+                require(task.get("detached") and task.get("status") == "running" and alive(task["pid"]),
+                        f"Expected detached selfdev {action} worker blocked on private lock: {task}")
+                jobs.append((action, path, task))
+
+            old_server = self.debug("server:info")["id"]
+            daemon_pid = self.state["processes"]["server"]["pid"]
+            reload_id = self.debug("reload:verify-exec", private_exec=True)["request_id"]
+
+            def new_server():
+                try:
+                    server = self.debug("server:info")
+                    return server if server["id"] != old_server else None
+                except (OSError, RuntimeError, ValueError):
+                    return None
+
+            successor = wait_for(new_server, "replacement process image", 25)
+            require(alive(daemon_pid), "Exec did not preserve daemon PID")
+            wait_for(lambda: any(c["session_id"] == sid for c in self.debug("clients:map")["clients"]),
+                     "TUI reattached to its original session", 25)
+            for action, path, task in jobs:
+                successor_task = read_status(path)
+                require(successor_task.get("status") == "running" and successor_task.get("pid") == task["pid"]
+                        and alive(task["pid"]), f"Reload lost original selfdev {action} PID {task['pid']}")
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+        results = {}
+        for action, path, task in jobs:
+            wait_for(lambda: read_status(path).get("status") == "completed", f"selfdev {action} completion")
+            status = read_status(path)
+            output = (status_dir / (task["task_id"] + ".output")).read_text()
+            require(status.get("exit_code") == 0 and f"Simulated selfdev {action}" in output,
+                    f"Missing real queue-fixture result for {action}: {status}")
+            dump(self.evidence / f"{label}-{action}.json", status)
+            results[action] = {"task_id": task["task_id"], "pid": task["pid"], "exit_code": 0}
+        return {"jobs": results, "daemon_pid": daemon_pid, "reload_id": reload_id,
+                "previous_server_id": old_server, "server_id": successor["id"], "session_id": sid}
+
+    def drive(self, feature, mode, text=None, keys=None, expect=None):
+        self.doctor()
+        self.state["drive_sequence"] = self.state.get("drive_sequence", 0) + 1
+        number = self.state["drive_sequence"]
+        self.save()
+        label = f"drive-{number:03d}-{feature}"
+        start = len(self.records())
+        token = f"verify_{feature.replace('-', '_')}_{uuid.uuid4().hex[:10]}"
+        self.frame(label + "-before")
+        result = {"feature": feature, "entry_point": feature, "token": token, "status": "failed"}
+        try:
+            if feature in {"input", "keys"}:
+                require(expect, "Exploratory drives require --expect visible-text")
+                if feature == "input":
+                    require(text, "input requires --text")
+                    self.send(text)
+                else:
+                    require(keys, "keys requires --keys with tmux key names")
+                    self.event(action="terminal-keys", keys=keys)
+                    self.tmux("send-keys", "-t", "verify", *keys)
+                wait_for(lambda: expect in self.pane(), f"visible text {expect!r}")
+                self.frame(label + "-after")
+                result.update(status="observed", expected_text=expect)
+                return result
+            if feature == "draft-models":
+                socket_path = self.root / "api.sock"
+                env = dict(self.env, JCODE_SOCKET=str(self.root / "app.sock"),
+                           JCODE_API_SOCKET=str(socket_path))
+                self.spawn("api-bridge", [self.binary, "--no-update", "--no-selfdev", "api-bridge"], env)
+                wait_for(socket_path.is_socket, "private API bridge socket")
+                session_dir = self.root / "data/sessions"
+                before_files = sorted(path.name for path in session_dir.iterdir())
+                with socket.socket(socket.AF_UNIX) as connection:
+                    connection.settimeout(8)
+                    connection.connect(str(socket_path))
+                    with connection.makefile("rwb") as wire:
+                        def call(request_id, request, **fields):
+                            frame = {"v": 1, "id": request_id, "req": request, **fields}
+                            self.event(action="api-request", frame=frame)
+                            wire.write((json.dumps(frame) + "\n").encode())
+                            wire.flush()
+                            for line in wire:
+                                reply = json.loads(line)
+                                if reply.get("reply_to") == request_id:
+                                    return reply
+                            raise RuntimeError("Private bridge closed before replying")
+
+                        hello = call(1, "hello", min_version=1, max_version=1, client="verify-jcode/draft-models")
+                        require("draft_model_catalog" in hello.get("capabilities", []), "Missing draft catalog capability")
+                        before = call(2, "list_sessions")
+                        models = call(3, "list_draft_models")
+                        after = call(4, "list_sessions")
+                require(models.get("ev") == "draft_models" and models.get("current") == "fake-model",
+                        f"Unexpected draft catalog: {models}")
+                require(any(route["model"] == "fake-model" and route["available"] for route in models["routes"]),
+                        "Fake provider's ready model is absent from the draft catalog")
+                require(before.get("ev") == after.get("ev") == "sessions",
+                        f"ListSessions did not return a catalog: {before}, {after}")
+                before_ids = sorted(session["session_id"] for session in before["sessions"])
+                after_ids = sorted(session["session_id"] for session in after["sessions"])
+                require(before_ids == after_ids,
+                        f"Reading the catalog changed the set of sessions: {before_ids} -> {after_ids}")
+                require(sorted(path.name for path in session_dir.iterdir()) == before_files,
+                        "Reading the catalog created persistent state")
+                require(len(self.records()) == start, "The draft catalog triggered inference")
+                result.update(status="passed", models=models, session_count=len(after["sessions"]))
+                return result
+            if feature == "terminal-journey":
+                result.update(TerminalJourney(self, label, token, start).run())
+                result["status"] = "passed"
+                return result
+            if feature == "cli":
+                output = self.cli(label, token, mode)
+                result["mode"] = mode
+                self.request_after(token, start)
+                sessions = list((self.root / "data/sessions").glob("session_*.json"))
+                matches = [p for p in sessions if token in p.read_text()]
+                require(matches, "CLI transcript was not persisted")
+                for path in matches:
+                    require(completed_turn(json.loads(path.read_text())["messages"], token),
+                            "CLI saved no completed reply for the fresh prompt")
+                    shutil.copy2(path, self.evidence / f"{label}-{path.name}")
+                result["output"] = output
+            elif feature == "cancel":
+                sid = self.observe("state")["remote_session_id"]
+                gate = self.root / "control" / token
+                try:
+                    self.send(token + f" [e2e:hold:{token}]")
+                    self.request_after(token, start)
+                    wait_for(lambda: gate.with_suffix(".held").exists(), "held provider request")
+                    require(self.observe("state")["processing"], "Held turn is not processing")
+                    self.frame(label + "-held")
+                    self.event(action="terminal-keys", keys=["Escape"], purpose="cancel held turn")
+                    self.tmux("send-keys", "-t", "verify", "Escape")
+                    self.idle()
+                    saved = load_persisted(self.root / "data/sessions" / f"{sid}.json")
+                    require(saved and any(token in json.dumps(m.get("content"))
+                                          for m in saved["messages"]), "Cancelled prompt was lost")
+                    require(not completed_turn(saved["messages"], token), "Cancelled turn completed")
+                    dump(self.evidence / f"{label}-cancelled-session.json", saved)
+                    self.frame(label + "-cancelled")
+                finally:
+                    gate.with_suffix(".release").write_text("release cancelled fixture request\n")
+                    self.event(action="fixture-release", token=token)
+                self.send(token + "_continued")
+                self.request_after(token + "_continued", start)
+                self.idle()
+                require(self.observe("state")["remote_session_id"] == sid, "Cancel changed session ID")
+                result["session_id"] = sid
+                dump(self.evidence / f"{label}-session.json", self.persisted(sid, token + "_continued"))
+            elif feature == "worker-reload":
+                result.update(self.worker_reload(label, token, start))
+            elif feature == "premium-spawn":
+                result.update(self.premium_spawn(label, token, start))
+            elif feature in {"reload-bg", "reload-bg-before-attach", "reload-bg-wait"}:
+                result.update(self.reload_background(token, start, label,
+                    finish_before_attach=feature == "reload-bg-before-attach", wait_in_turn=feature == "reload-bg-wait"))
+            elif feature == "reload-selfdev":
+                result.update(self.reload_selfdev(token, label))
+            elif feature in {"resume", "restart", "mode-set"}:
+                if feature == "mode-set":
+                    sid = self.observe("state")["remote_session_id"]
+                    session_path = self.root / "data/sessions" / f"{sid}.json"
+
+                    def pinned_modes():
+                        try:
+                            saved = load_persisted(session_path)
+                        except (FileNotFoundError, json.JSONDecodeError):
+                            return []
+                        return (saved or {}).get("pinned_skills") or []
+
+                    # The slash journey can leave verify-probe pinned in this session.
+                    if pinned_modes():
+                        self.send("/mode off")
+                        wait_for(lambda: not pinned_modes(), "previous session modes cleared")
+                    self.send("/mode toggle verify-probe")
+                    wait_for(lambda: pinned_modes() == ["verify-probe"], "first session mode enabled")
+                    self.send("/mode toggle verify-review")
+                    self.send("/mode")
+                    wait_for(lambda: "Session mode: verify-probe, verify-review" in self.pane(),
+                             "both session modes enabled")
+                self.send(token)
+                self.request_after(token, start)
+                self.idle()
+                sid = self.observe("state")["remote_session_id"]
+                original = self.persisted(sid, token)
+                self.frame(label + "-original")
+                self.tmux("kill-session", "-t", "verify")
+                wait_for(lambda: not alive(self.state["processes"]["tmux"]["pid"]), "old terminal shutdown", 10)
+                if feature in {"restart", "mode-set"}:
+                    old_server_id = self.stop_daemon()
+                    result["previous_server_id"] = old_server_id
+                    result["server_id"] = self.start_replacement(old_server_id)
+                self.start_tui(resume=sid)
+                self.doctor()
+                require(self.observe("state")["remote_session_id"] == sid, "Resume changed session ID")
+                require(token in self.pane(), "Resumed TUI did not restore original prompt")
+                self.send(token + "_continued")
+                self.request_after(token + "_continued", start)
+                self.idle()
+                result["session_id"] = sid
+                saved = self.persisted(sid, token + "_continued")
+                original_ids = [m["id"] for m in original["messages"]]
+                require([m["id"] for m in saved["messages"][:len(original_ids)]] == original_ids,
+                        "Resume changed the original transcript prefix")
+                dump(self.evidence / f"{label}-session.json", saved)
+                if feature == "mode-set":
+                    expected_modes = ["verify-probe", "verify-review"]
+                    require(original.get("pinned_skills") == saved.get("pinned_skills") == expected_modes,
+                            "Mode set did not survive daemon restart and an ordinary prompt")
+                    continued = [r for r in self.records()[start:] if r.get("agent")
+                                 and token + "_continued" in json.dumps(r["messages"])]
+                    require(continued, "No post-restart provider request")
+                    messages = json.dumps(continued[0]["messages"])
+                    require("VERIFY_PROBE_SKILL_BODY" in messages and "VERIFY_REVIEW_SKILL_BODY" in messages,
+                            "The post-restart provider request did not include both modes")
+                    self.send("/mode toggle verify-probe")
+                    self.send("/mode")
+                    wait_for(lambda: "Session mode: verify-review" in self.pane(), "removed only the first mode")
+                    result["retained_modes"] = expected_modes
+                    result["after_toggle"] = ["verify-review"]
+            elif feature == "mode":
+                # Session mode must reach the provider for every later turn,
+                # survive a real compaction, and reach a spawned worker.
+                def probe_in(record):
+                    return "VERIFY_PROBE_SKILL_BODY" in json.dumps(record["messages"])
+                self.send("/mode verify-probe")
+                wait_for(lambda: "Session mode: verify-probe" in self.pane(), "pinned mode notice")
+                for n in range(5):
+                    self.send(f"{token}_pad{n} [e2e:pad]")
+                    self.request_after(f"{token}_pad{n}", start)
+                    self.idle(180)
+                self.frame(label + "-padded")
+                self.send("/compact")
+                wait_for(lambda: "compacted" in self.pane(), "completed compaction", 120)
+                self.idle(180)
+                self.frame(label + "-compacted")
+                post = len(self.records())
+                self.send(token + "_after")
+                self.request_after(token + "_after", post)
+                self.idle()
+                after = [r for r in self.records()[post:] if r.get("agent")
+                         and token + "_after" in json.dumps(r["messages"])]
+                require(after, "No provider request for the post-compaction turn")
+                require("Previous Conversation Summary" in json.dumps(after[0]["messages"]),
+                        "Post-compaction request carries no compaction summary")
+                require(probe_in(after[0]), "Pinned skill missing from the post-compaction request")
+                spawn = len(self.records())
+                self.send(token + "_spawn [e2e:spawn]")
+
+                def child_request():
+                    return [r for r in self.records()[spawn:] if r.get("agent")
+                            and "[e2e:child]" in json.dumps(r["messages"][-1:])]
+                wait_for(child_request, "spawned worker provider request", 90)
+                child = child_request()[0]
+                require(probe_in(child), "Spawned worker did not inherit the pinned skill")
+                dump(self.evidence / f"{label}-post-compaction-request.json", after[0])
+                dump(self.evidence / f"{label}-child-request.json", child)
+                self.idle()
+                self.send("/mode off")
+                wait_for(lambda: "Session mode: off" in self.pane(), "mode off notice")
+                result["session_id"] = self.observe("state")["remote_session_id"]
+                self.frame(label + "-after")
+                result["status"] = "passed"
+                return result
+            else:
+                prompt = token
+                if feature == "tui":
+                    # Reset only this harness-owned fixture, so a previous write
+                    # cannot make a failed current tool execution look successful.
+                    (self.root / "workspace/verify-tool.txt").unlink(missing_ok=True)
+                    self.event(action="fixture-reset", path="verify-tool.txt")
+                    prompt += " [e2e:verify-write]"
+                elif feature == "read-overlap":
+                    for name in ("left", "right"):
+                        (self.root / f"workspace/{name}.txt").write_bytes(b"prefix row\n" * 220000 + name.encode() + b"\n")
+                    prompt += " [e2e:read-overlap]"
+                elif feature == "line-anchors":
+                    (self.root / "workspace/verify-anchor.txt").write_bytes(b"repeat\r\nrepeat\r\n")
+                    prompt += " [e2e:line-anchors]"
+                elif feature == "file-tools":
+                    (self.root / "workspace/verify-window.txt").write_text("initial\n")
+                    prompt += " [e2e:file-tools]"
+                elif feature == "slash":
+                    self.send("/help")
+                    wait_for(lambda: "Esc to close" in self.pane(), "help modal")
+                    self.frame(label + "-help")
+                    self.event(action="terminal-keys", keys=["Escape"], purpose="close help modal")
+                    self.tmux("send-keys", "-t", "verify", "Escape")
+                    wait_for(lambda: "Esc to close" not in self.pane(), "composer after help")
+                    prompt = "/verify-probe " + token
+                self.send(prompt)
+                self.request_after(token, start)
+                self.idle()
+                sid = self.observe("state")["remote_session_id"]
+                saved = self.persisted(sid, token)
+                dump(self.evidence / f"{label}-session.json", saved)
+                if feature == "tui":
+                    path = self.root / "workspace/verify-tool.txt"
+                    require(path.read_text() == TOOL_CONTENT, "Real write tool side effect missing")
+                    shutil.copy2(path, self.evidence / f"{label}-verify-tool.txt")
+                    require(any(m.get("role") == "tool" for r in self.records()[start:]
+                                for m in r["messages"]), "Tool result never reached provider")
+                elif feature == "slash":
+                    require("Activated skill: verify-probe" in self.pane(), "Skill activation not rendered")
+                    require(any("VERIFY_PROBE_SKILL_BODY" in json.dumps(r["messages"])
+                                for r in self.records()[start:]), "Skill body not delivered to provider")
+                elif feature == "read-overlap":
+                    requests = [r for r in self.records()[start:] if r.get("agent") and token in json.dumps(r["messages"])]
+                    replies = [m for m in requests[-1]["messages"] if m.get("role") == "tool"][-2:]
+                    require([m.get("tool_call_id") for m in replies] == ["call_left", "call_right"], "Wrong result order")
+                    for name, row in zip(("left", "right"), replies):
+                        body = str(row["content"])
+                        require(name in body and "220001" in body, "Missing requested file line")
+                    sid = self.observe("state")["remote_session_id"]
+                    events = []
+                    for log in sorted((self.root / "data/logs").glob("jcode-*.log")):
+                        for entry in log.read_text(errors="replace").splitlines():
+                            if "event=tool_lifecycle" not in entry.lower() or f"session_id={sid}" not in entry:
+                                continue
+                            phase = re.search(r"\bphase=(start|done)\b", entry)
+                            call = re.search(r"\btool_call_id=call_(left|right)\b", entry)
+                            if phase and call:
+                                events.append((phase[1], call[1]))
+                    current = events[-4:]
+                    dump(self.evidence / f"{label}-tool-lifecycle.json", current)
+                    require(len(current) == 4 and {k for k, _ in current[:2]} == {"start"} and
+                            {v for _, v in current[:2]} == {"left", "right"} and
+                            {k for k, _ in current[2:]} == {"done"} and {v for _, v in current[2:]} == {"left", "right"},
+                            f"Reads did not overlap in registry lifecycle events: {current}")
+                    dump(self.evidence / f"{label}-tool-results.json", replies)
+                elif feature == "line-anchors":
+                    requests = [r for r in self.records()[start:] if r.get("agent") and token in json.dumps(r["messages"])]
+                    replies = {m.get("tool_call_id"): str(m.get("content", "")) for m in requests[-1]["messages"] if m.get("role") == "tool"}
+                    require("[edit anchor L2-" in replies.get("call_find", ""), "Search did not expose second matching row")
+                    require("stale" in replies.get("call_stale", "").lower(), "Old search anchor was not rejected")
+                    require("[edit anchor L2-" in replies.get("call_reread", ""), "Direct read did not issue fresh anchors")
+                    require((self.root / "workspace/verify-anchor.txt").read_bytes() == b"repeat\r\nselected\r\n", "Wrong duplicate edited or CRLF changed")
+                    dump(self.evidence / f"{label}-tool-results.json", replies)
+                elif feature == "file-tools":
+                    requests = [r for r in self.records()[start:] if r.get("agent") and token in json.dumps(r["messages"])]
+                    replies = [m for m in requests[-1]["messages"] if m.get("role") == "tool"][-4:]
+                    require([m.get("tool_call_id") for m in replies] ==
+                            ["call_before", "call_past_eof", "call_change", "call_after"], "Missing or reordered results")
+                    bodies = [str(m.get("content", "")) for m in replies]
+                    require("initial" in bodies[0] and "updated" in bodies[3], "Read crossed its write barrier")
+                    require("empty file" not in bodies[1].lower() and ("end of file" in bodies[1].lower() or
+                            "eof" in bodies[1].lower()), "Past-EOF range was not distinguished from empty file")
+                    require((self.root / "workspace/verify-window.txt").read_text() == "updated\n", "Wrong on-disk contents")
+                    dump(self.evidence / f"{label}-tool-results.json", replies)
+                elif feature == "side-panel":
+                    self.send("/splitview on")
+                    def panel_ready():
+                        self.debug("client:frame")
+                        panel = self.debug("client:side-panel:stats").get("live") or {}
+                        return (panel.get("page_id") == "split_view"
+                                and panel.get("pane_width_cells", 0) > 0
+                                and panel.get("total_lines", 0) > 0)
+                    wait_for(panel_ready, "visible populated split-view panel")
+                    dump(self.evidence / f"{label}-panel.json", self.debug("client:side-panel:stats"))
+                result["session_id"] = sid
+            text = self.frame(label + "-after")
+            if feature != "cli":
+                require(ACK in text and token in text, "Fresh prompt and assistant reply not visible in terminal")
+            if feature == "tui":
+                require("write · Prove a real tool side effect" in text, "Real tool row not rendered")
+            result["status"] = "passed"
+        except BaseException as error:
+            result["error"] = str(error)
+            try:
+                self.frame(label + "-failed")
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                pass
+            raise
+        finally:
+            dump(self.evidence / f"{label}.json", result)
+        return result
+
+    def cleanup(self):
+        if self.state.get("cleaned"):
+            return {"status": "already-cleaned", "evidence": str(self.evidence)}
+        errors = []
+        initial_hotkey = self.state.get("hotkey_path")
+        if "hotkey_path" not in self.state:
+            errors.append("Missing initial hotkey path; cannot verify host state")
+        try:
+            current_hotkey = hotkey_path()
+            if current_hotkey != initial_hotkey:
+                errors.append(f"Global hotkey path changed: {initial_hotkey!r} -> {current_hotkey!r}")
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            errors.append(str(error))
+        for name in ("client", "tmux", "server", "provider"):
+            process = self.state["processes"].get(name)
+            if not process or not alive(process["pid"]):
+                continue
+            if identity(process["pid"]) != process["identity"]:
+                errors.append(f"PID identity mismatch: {name}. Refusing to kill.")
+                continue
+            try:
+                if name == "tmux":
+                    self.tmux("kill-server")
+                elif name == "client":
+                    os.kill(process["pid"], signal.SIGTERM)
+                else:
+                    os.killpg(process["pid"], signal.SIGTERM)
+                deadline = time.monotonic() + 5
+                while alive(process["pid"]) and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                if alive(process["pid"]):
+                    require(identity(process["pid"]) == process["identity"], "PID reused during cleanup")
+                    if name == "client":
+                        os.kill(process["pid"], signal.SIGKILL)
+                    else:
+                        os.killpg(process["pid"], signal.SIGKILL)
+                wait_for(lambda: not alive(process["pid"]), f"{name} shutdown", 5)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                errors.append(str(error))
+        for action in (lambda: cleanup_runtime_launch_agents(self.root, initial_hotkey),
+                       lambda: stop_runtime_helpers(self.root)):
+            try:
+                action()
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                errors.append(str(error))
+        try:
+            final_hotkey = hotkey_path()
+            if final_hotkey != initial_hotkey:
+                errors.append(f"Global hotkey path changed: {initial_hotkey!r} -> {final_hotkey!r}")
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            errors.append(str(error))
+        require(not errors, "; ".join(errors))
+        # All writers are stopped before the final independent disk snapshot.
+        if (self.root / "data/sessions").exists():
+            shutil.copytree(self.root / "data/sessions", self.evidence / "sessions", dirs_exist_ok=True)
+        require((self.root / "owner").read_text() == self.state["owner"], "Ownership changed")
+        shutil.rmtree(self.root)
+        self.state["cleaned"] = True
+        self.save()
+        report = {"status": "cleaned", "runtime_removed": not self.root.exists(),
+                  "hotkey_path_before": initial_hotkey, "hotkey_path_after": final_hotkey,
+                  "evidence": str(self.evidence), "artifacts": len(list(self.evidence.iterdir()))}
+        dump(self.evidence / "cleanup.json", report)
+        return report
+
+
+def launch(args, *, prepare_workspace=None):
+    binary = Path(args.binary).resolve(strict=True)
+    require(args.cols >= 40 and args.rows >= 15, "Terminal must be at least 40x15")
+    require(binary.is_file() and os.access(binary, os.X_OK), "Binary must be executable")
+    tmux = shutil.which("tmux")
+    require(tmux, "Install tmux before launch")
+    binary_sha256 = digest(binary)
+    initial_hotkey = hotkey_path()
+    repo_head = run(["git", "-C", REPO, "rev-parse", "HEAD"]).stdout.strip()
+    evidence = Path(args.evidence).resolve()
+    evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
+    os.chmod(evidence, 0o700)
+    root = Path(tempfile.mkdtemp(prefix="jv-", dir="/tmp")).resolve()
+    owner = uuid.uuid4().hex
+    (root / "owner").write_text(owner)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(root / "home"),
+           "LANG": "en_US.UTF-8", "TERM": "xterm-256color", "TMPDIR": str(root),
+           "JCODE_HOME": str(root / "data"), "JCODE_RUNTIME_DIR": str(root),
+           "XDG_CONFIG_HOME": str(root / "home/.config"), "XDG_CACHE_HOME": str(root / "home/.cache"),
+           "JCODE_TEST_SESSION": "1", "JCODE_DEBUG_CONTROL": "1", "JCODE_NO_MENUBAR": "1",
+           "JCODE_VERIFY_EXEC_RELOAD": "1",
+           "JCODE_NO_TELEMETRY": "1", "JCODE_TELEMETRY": "off",
+           "JCODE_NO_AUTO_UPDATE": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+           "GIT_TERMINAL_PROMPT": "0", "OPENAI_COMPAT_API_KEY": "synthetic-verification-key",
+           "JCODE_OPENAI_COMPAT_DEFAULT_MODEL": "fake-model"}
+    state = {"schema": 1, "owner": owner, "evidence": str(evidence), "runtime": str(root),
+             "cols": args.cols, "rows": args.rows,
+             "source_binary": str(binary), "binary_sha256": binary_sha256, "tmux": tmux,
+             "helper_sha256": digest(Path(__file__)),
+             "provider_sha256": digest(REPO / "scripts/fake_openai_server.py"),
+             "processes": {}, "env": env, "repo_head": repo_head, "hotkey_path": initial_hotkey}
+    dump(evidence / "run.json", state)
+    harness = Harness(evidence)
+    try:
+        for name in ("home", "data", "workspace", "control"):
+            (root / name).mkdir()
+        shutil.copy2(binary, root / "jcode")
+        if args.loopback_exec_worker:
+            env["JCODE_EXEC_WORKER"] = shlex.join([str(root / "jcode"), "server", "exec-worker"])
+        skill = root / "workspace/.jcode/skills/verify-probe"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            '---\nname: verify-probe\ndescription: Isolated verification fixture\n---\n'
+            'VERIFY_PROBE_SKILL_BODY\nAcknowledge the user prompt.\n')
+        review = root / "workspace/.jcode/skills/verify-review"
+        review.mkdir(parents=True)
+        (review / "SKILL.md").write_text(
+            '---\nname: verify-review\ndescription: A second isolated verification skill\n---\n'
+            'VERIFY_REVIEW_SKILL_BODY\nAcknowledge the user prompt.\n')
+        if prepare_workspace is not None:
+            prepare_workspace(root)
+        if getattr(args, "premium_spawn", False):
+            model = "gpt-5.9-astra"
+            harness.state["fake_premium_model"] = model
+            (root / "data/config.toml").write_text(
+                f'[agents]\nswarm_model = "openai-compatible:{model}"\n'
+                f'spawn_allowed_models = ["openai-compatible:{model}"]\n'
+                f'swarm_effort = "xhigh"\nswarm_effort_caps = {{ "{model}" = "high" }}\n')
+        if getattr(args, "line_anchors", False):
+            with (root / "data/config.toml").open("a") as config:
+                config.write("\n[tools]\nline_anchors = true\n")
+        if extra := getattr(args, "extra_config", None):
+            with (root / "data/config.toml").open("a") as config:
+                config.write("\n" + Path(extra).read_text() + "\n")
+        harness.state["binary_version"] = run([root / "jcode", "--no-update", "--version"], env=env).stdout.strip()
+        harness.save()
+        (evidence / "source.diff").write_text(run(["git", "-C", REPO, "diff", "HEAD"]).stdout)
+        provider_env = dict(env, FAKE_LOG=str(evidence / "provider.jsonl"), FAKE_LABEL="verify-jcode",
+                            FAKE_PORT_FILE=str(root / "provider.port"), FAKE_CONTROL_DIR=str(root / "control"))
+        if model := harness.state.get("fake_premium_model"):
+            provider_env["FAKE_PREMIUM_MODEL"] = model
+        harness.spawn("provider", [sys.executable, REPO / "scripts/fake_openai_server.py", "0"], provider_env)
+        port = wait_for(lambda: (root / "provider.port").read_text().strip()
+                        if (root / "provider.port").exists() else None, "fake provider port")
+        harness.env["JCODE_OPENAI_COMPAT_API_BASE"] = f"http://127.0.0.1:{int(port)}/v1"
+        harness.save()
+        harness.spawn("server", [root / "jcode", "--no-update", "--no-selfdev", "--provider", "openai-compatible",
+                                  "--model", "fake-model", "--debug-socket", "--socket", root / "app.sock", "serve"])
+        wait_for(lambda: (root / "app-debug.sock").exists(), "isolated daemon debug socket")
+        # Usable means a completed real inference, not merely a listening socket.
+        harness.cli("launch-warm", "verify launch readiness")
+        harness.start_tui()
+        return harness.doctor()
+    except BaseException as error:
+        dump(evidence / "launch-failure.json", {"error": str(error)})
+        try:
+            (evidence / "launch-failure.txt").write_text(harness.pane())
+        except (OSError, subprocess.SubprocessError):
+            pass
+        harness.cleanup()
+        raise
+
+
+def cloud_group_round_trip(args):
+    require(sys.platform.startswith("linux"), "Group migration fixture requires Linux and bubblewrap")
+    binary = Path(args.binary).resolve(strict=True)
+    evidence = Path(args.evidence).resolve()
+    script = REPO / "scripts/test_cloud_group_e2e.sh"
+    evidence.mkdir(mode=0o700)
+    state = {"repo_head": run(["git", "rev-parse", "HEAD"], cwd=REPO).stdout.strip(),
+             "binary": str(binary), "binary_sha256": digest(binary),
+             "fixture_sha256": digest(script), "cleaned": False}
+    dump(evidence / "run.json", state)
+    output = evidence / "cloud-group-round-trip.log"
+    result = {"feature": "cloud-group-return", "entry_point": "jcode cloud return --session group-worker",
+              "status": "failed"}
+    scratch = tempfile.TemporaryDirectory(prefix="verify-cloud-group-")
+    try:
+        with scratch as directory:
+            env = {"PATH": os.defpath, "HOME": directory, "TMPDIR": directory,
+                   "JCODE_SCRATCH_DIR": directory, "JCODE_BIN": str(binary)}
+            with output.open("w") as log:
+                process = subprocess.Popen(["bash", str(script)], cwd=REPO, env=env,
+                                           stdout=log, stderr=subprocess.STDOUT)
+                try:
+                    result["exit_code"] = process.wait(timeout=360)
+                except BaseException:
+                    process.terminate()
+                    process.wait(timeout=20)
+                    raise
+            result["checks"] = [line for line in output.read_text().splitlines()
+                                if line.startswith("PASS:")]
+            require(result["exit_code"] == 0 and result["checks"],
+                    f"Group return failed. See {output}")
+            (fixture,) = Path(directory).glob("cloud-group-test.*")
+            shutil.copy2(fixture / "return.json", evidence / "group-return.json")
+        result["status"] = "passed"
+        return result
+    finally:
+        state["cleaned"] = not Path(scratch.name).exists()
+        dump(evidence / "drive-001-cloud-group-return.json", result)
+        dump(evidence / "cleanup.json", {"fixture_removed": state["cleaned"]})
+        dump(evidence / "run.json", state)
+
+
+def native_compaction(args):
+    baseline = Path(args.baseline).resolve(strict=True)
+    binary = Path(args.binary).resolve(strict=True)
+    require(baseline != binary, "Pass separate baseline and fixed binaries")
+    evidence = Path(args.evidence).resolve()
+    fixture = Path(__file__).with_name("native_compaction.py")
+    evidence.mkdir(mode=0o700)
+    state = {"repo_head": run(["git", "rev-parse", "HEAD"], cwd=REPO).stdout.strip(),
+             "binary": str(binary), "binary_sha256": digest(binary),
+             "baseline": str(baseline), "baseline_sha256": digest(baseline),
+             "fixture_sha256": digest(fixture), "cleaned": False}
+    result = {"feature": "native-compaction", "entry_point": "jcode run --provider openai-api",
+              "status": "failed"}
+    dump(evidence / "run.json", state)
+    scratch = tempfile.TemporaryDirectory(prefix="jv-native-", dir="/tmp")
+    try:
+        with scratch as directory, (evidence / "native-compaction.log").open("w+") as log:
+            env = {"PATH": os.defpath, "HOME": directory, "TMPDIR": directory}
+            argv = [sys.executable, str(fixture), str(baseline), str(binary), str(evidence / "native")]
+            process = subprocess.Popen(argv, env=env, cwd=REPO, stdout=log, stderr=subprocess.STDOUT)
+            try:
+                result["exit_code"] = process.wait(timeout=170)
+            except BaseException:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=20)
+                raise
+            log.seek(0)
+            result["checks"] = [line.strip() for line in log if line.startswith("PASS:")]
+            require(result["exit_code"] == 0 and result["checks"],
+                    f"Native compaction verification failed. See {log.name}")
+        result["status"] = "passed"
+        return result
+    finally:
+        state["cleaned"] = not Path(scratch.name).exists()
+        dump(evidence / "drive-001-native-compaction.json", result)
+        dump(evidence / "cleanup.json", {"fixture_removed": state["cleaned"]})
+        dump(evidence / "run.json", state)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    start = sub.add_parser("launch", help="Launch an isolated daemon/provider/TUI from a built binary")
+    start.add_argument("--binary", required=True)
+    start.add_argument("--evidence", required=True, help="New evidence directory, survives cleanup")
+    start.add_argument("--cols", type=int, default=160)
+    start.add_argument("--rows", type=int, default=48)
+    start.add_argument("--line-anchors", action="store_true", help="Enable experimental version-checked file anchors")
+    start.add_argument("--premium-spawn", action="store_true", help="Expose a synthetic Astra model at loopback")
+    start.add_argument("--extra-config", help="TOML file appended to the isolated config.toml")
+    start.add_argument("--loopback-exec-worker", action="store_true",
+                       help="Route Bash through the staged executable's execution worker, with no SSH")
+    group = sub.add_parser("cloud-group-return", help="Run the isolated Linux group migration round trip")
+    group.add_argument("--binary", required=True)
+    group.add_argument("--evidence", required=True, help="New evidence directory, survives cleanup")
+    native = sub.add_parser("native-compaction", help="Verify native Responses thresholds and restore on loopback")
+    native.add_argument("--baseline", required=True, help="Executable from before the threshold fix")
+    native.add_argument("--binary", required=True)
+    native.add_argument("--evidence", required=True, help="New evidence directory, survives cleanup")
+    for name in ("doctor", "drive", "frame", "cleanup"):
+        command = sub.add_parser(name)
+        command.add_argument("--evidence", required=True)
+        if name == "drive":
+            command.add_argument("feature", choices=["cli", "tui", "terminal-journey", "slash", "resume", "restart", "reload-bg", "reload-bg-before-attach", "reload-bg-wait", "reload-selfdev", "cancel",
+                                                     "side-panel", "file-tools", "line-anchors", "read-overlap", "mode", "mode-set", "draft-models", "worker-reload", "premium-spawn", "input", "keys"])
+            command.add_argument("--mode", choices=["plain", "json", "ndjson"], default="json")
+            command.add_argument("--text", help="Text for exploratory input drive")
+            command.add_argument("--keys", nargs="+", help="tmux keys, e.g. Escape or C-u")
+            command.add_argument("--expect", help="Required visible text for exploratory drives")
+        if name == "frame":
+            command.add_argument("--label", default="manual")
+    args = parser.parse_args()
+    os.umask(0o077)
+    if args.command == "launch":
+        print(json.dumps(launch(args), indent=2))
+        return
+    if args.command == "cloud-group-return":
+        print(json.dumps(cloud_group_round_trip(args), indent=2))
+        return
+    if args.command == "native-compaction":
+        print(json.dumps(native_compaction(args), indent=2))
+        return
+    evidence = Path(args.evidence).resolve()
+    # Fail closed instead of racing file-debug requests from two agents.
+    lock = evidence / ".lock"
+    lock.mkdir()
+    try:
+        harness = Harness(evidence)
+        try:
+            if args.command == "doctor":
+                result = harness.doctor()
+            elif args.command == "drive":
+                result = harness.drive(args.feature, args.mode, args.text, args.keys, args.expect)
+            elif args.command == "frame":
+                harness.doctor()
+                harness.frame(args.label)
+                result = {"frame": str(evidence / f"{args.label}.frame.json")}
+            else:
+                result = harness.cleanup()
+        except BaseException:
+            if args.command != "cleanup":
+                try:
+                    harness.cleanup()
+                except Exception as error:
+                    print(f"verify-jcode: cleanup failed: {error}", file=sys.stderr)
+            raise
+        print(json.dumps(result, indent=2))
+    finally:
+        lock.rmdir()
+
+
+if __name__ == "__main__":
+    def terminate(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, terminate)
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("verify-jcode: interrupted", file=sys.stderr)
+        sys.exit(130)
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"verify-jcode: {error}", file=sys.stderr)
+        sys.exit(1)

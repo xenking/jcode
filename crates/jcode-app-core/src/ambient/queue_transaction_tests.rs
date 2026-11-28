@@ -31,6 +31,63 @@ fn request(name: &str, due: bool) -> ScheduleRequest {
 }
 
 #[test]
+fn idle_direct_claim_does_not_open_the_queue_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path.clone());
+    assert!(queue.take_ready_direct_items().is_empty());
+    assert!(!path.with_extension("json.lock").exists());
+}
+
+#[test]
+fn ambient_queue_expires_old_work_and_coalesces_only_overdue_equivalents() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path.clone());
+    let now = Utc::now();
+    let item = |days: i64, direct: bool| {
+        let mut req = request("work", false);
+        req.target = if direct {
+            req.target
+        } else {
+            ScheduleTarget::Ambient
+        };
+        req.wake_at = Some(now + chrono::Duration::days(days));
+        AmbientManager::scheduled_item(req)
+    };
+    let expired = item(-10, false);
+    let outdated = item(-2, false);
+    let mut newest = item(-1, false);
+    newest.created_by_session = "another-ambient-cycle".into();
+    let future = item(1, false);
+    let reminder = item(1, true);
+    let old_reminder = item(-10, true);
+    let mut distinct = item(-2, false);
+    distinct.task_description = Some("Different work despite the same preview".into());
+    for queued in [
+        &expired,
+        &outdated,
+        &newest,
+        &future,
+        &reminder,
+        &old_reminder,
+        &distinct,
+    ] {
+        queue.try_push(queued.clone()).unwrap();
+    }
+
+    assert_eq!(queue.take_ready_direct_items(), [old_reminder]);
+    assert_eq!(
+        ScheduledQueue::load(path)
+            .items()
+            .iter()
+            .map(|item| &item.id)
+            .collect::<Vec<_>>(),
+        [&newest.id, &future.id, &reminder.id, &distinct.id],
+    );
+}
+
+#[test]
 fn scheduled_queue_stale_managers_preserve_add_remove_and_claim() {
     let _guard = crate::storage::lock_test_env();
     let dir = tempfile::tempdir().unwrap();
@@ -40,16 +97,16 @@ fn scheduled_queue_stale_managers_preserve_add_remove_and_claim() {
     let mut second = AmbientManager::new().unwrap();
     let a = first.schedule(request("a", true)).unwrap();
     let b = second.schedule(request("b", true)).unwrap();
-    assert_eq!(AmbientManager::new().unwrap().queue().len(), 2);
+    assert_eq!(AmbientManager::new().unwrap().queued_count(), 2);
     first.cancel_schedule(&a).unwrap();
-    assert_eq!(AmbientManager::new().unwrap().queue().items()[0].id, b);
+    assert_eq!(AmbientManager::new().unwrap().scheduled_items()[0].id, b);
     assert!(second.cancel_schedule(&a).unwrap().is_none());
     let claimed = first.take_ready_direct_items();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].id, b);
     assert!(second.take_ready_items().is_empty());
     second.schedule(request("later", false)).unwrap();
-    assert_eq!(AmbientManager::new().unwrap().queue().len(), 1);
+    assert_eq!(AmbientManager::new().unwrap().queued_count(), 1);
     assert!(first.take_ready_direct_items().is_empty());
 }
 

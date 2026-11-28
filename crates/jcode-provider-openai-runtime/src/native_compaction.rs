@@ -13,6 +13,11 @@ fn compaction_usage(body: &Value) -> Option<jcode_provider_core::SimpleCompletio
         return None;
     };
     Some(jcode_provider_core::SimpleCompletionUsage {
+        requested_model: None,
+        resolved_model: jcode_provider_core::nonempty_response_model(
+            body.get("model").and_then(Value::as_str),
+        )
+        .map(str::to_owned),
         input_tokens,
         output_tokens,
         cache_read_input_tokens,
@@ -27,16 +32,21 @@ impl OpenAIProvider {
         existing_summary_text: Option<&str>,
         existing_openai_encrypted_content: Option<&str>,
     ) -> Result<jcode_provider_core::NativeCompactionResult> {
-        if self.native_compaction_mode != OpenAINativeCompactionMode::Explicit {
+        if !self.supports_explicit_native_compaction() {
             anyhow::bail!(
                 "OpenAI native explicit compaction is disabled (mode={})",
                 self.native_compaction_mode.as_str()
             );
         }
 
-        let access_token =
-            openai_access_token(self.refresh_account_label(), &self.credentials).await?;
+        let account_label = self.refresh_account_label();
+        let access_token = openai_access_token(account_label.clone(), &self.credentials).await?;
         let creds = self.credentials.read().await;
+        let egress = jcode_base::egress::transport(
+            "openai",
+            Self::egress_label(&creds, account_label.as_deref()),
+        )
+        .await?;
         let is_chatgpt_mode = Self::is_chatgpt_mode(&creds);
         let account_id = creds.account_id.clone();
         let url = Self::responses_compact_url(&creds);
@@ -72,8 +82,8 @@ impl OpenAIProvider {
         // goes as its text summary.
         native_web_search::downgrade_web_search_calls(&mut input);
 
-        let mut builder = self
-            .client
+        let mut builder = egress
+            .client_or(&self.client)
             .post(&url)
             .header("Authorization", format!("Bearer {}", access_token))
             .header("Content-Type", "application/json");
@@ -85,6 +95,8 @@ impl OpenAIProvider {
             }
         }
 
+        // Preserve the caller's configured alias before model_id can select a fallback.
+        let requested_model = self.model.read().await.clone();
         let response = builder
             .json(&serde_json::json!({
                 "model": self.model_id().await,
@@ -105,7 +117,11 @@ impl OpenAIProvider {
             .json()
             .await
             .context("Failed to parse OpenAI compact response")?;
-        parse_compaction_response(&body)
+        let mut result = parse_compaction_response(&body)?;
+        if let Some(usage) = result.usage.as_mut() {
+            usage.requested_model = Some(requested_model);
+        }
+        Ok(result)
     }
 }
 
@@ -172,6 +188,30 @@ mod tests {
                 result.openai_encrypted_content.as_deref().unwrap()
             )
         );
+    }
+
+    #[test]
+    fn native_compaction_uses_only_explicit_response_model() {
+        for (model, expected) in [
+            (serde_json::json!(" snapshot "), Some("snapshot")),
+            (serde_json::json!(""), None),
+            (serde_json::json!("  "), None),
+            (Value::Null, None),
+            (serde_json::json!(17), None),
+        ] {
+            let usage = compaction_usage(&serde_json::json!({
+                "model": model,
+                "usage": {"input_tokens": 12}
+            }))
+            .unwrap();
+            assert_eq!(usage.requested_model, None);
+            assert_eq!(usage.resolved_model.as_deref(), expected);
+        }
+        let usage = compaction_usage(&serde_json::json!({
+            "usage": {"input_tokens": 12}
+        }))
+        .unwrap();
+        assert_eq!(usage.resolved_model, None);
     }
 
     #[test]

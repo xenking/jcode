@@ -77,7 +77,7 @@ async fn provider_matrix_account_switch_rebinds_real_runtime_without_changing_mo
         );
         let saved = jcode::session::Session::load(agent.session_id())?;
         assert_eq!(
-            saved.route_api_method.as_deref(),
+            saved.route_api_method(),
             Some(format!("openai-oauth@{label}").as_str())
         );
         assert_eq!(

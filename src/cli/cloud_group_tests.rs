@@ -20,8 +20,14 @@ fn fixture() -> (tempfile::TempDir, Group) {
         let member_dir = stage.path().join("members").join(id);
         std::fs::create_dir_all(&member_dir).unwrap();
         let mut session = session::Session::create_with_id(id.into(), None, None);
-        session.migration_epoch = 4;
-        session.working_dir = Some(repo.root.clone());
+        session.apply_lineage(crate::session::Lineage {
+            migration_epoch: 4,
+            ..session.lineage()
+        });
+        session.apply_workspace(crate::session::Workspace {
+            working_dir: Some(repo.root.clone()),
+            ..session.workspace()
+        });
         storage::write_json(&member_dir.join("session.json"), &session).unwrap();
         std::fs::write(
             member_dir.join("todos.json"),
@@ -93,6 +99,34 @@ fn receiver_rejects_partial_duplicate_and_forged_membership() {
     let mut epoch = group.clone();
     epoch.members[1].manifest.epoch += 1;
     assert!(validate(&epoch, stage.path()).is_err());
+}
+
+#[test]
+fn return_requires_the_exact_departed_members_and_their_next_epochs() {
+    let (_, mut group) = fixture();
+    group.members[1].manifest.epoch = 9;
+    let mut bundle = GroupTransferBundle {
+        version: GROUP_VERSION,
+        transfer_id: "return-transfer".into(),
+        destination_host: RETURN_PENDING.into(),
+        sessions: group
+            .members
+            .iter()
+            .map(|member| crate::server::GroupTransferSession {
+                session_id: member.manifest.session_id.clone(),
+                epoch: member.manifest.epoch + 1,
+                previous_lease: Some(member_lease(member, None)),
+            })
+            .collect(),
+        swarms: Vec::new(),
+    };
+    validate_return_bundle(&group, &bundle).unwrap();
+    bundle.sessions[1].epoch = bundle.sessions[0].epoch;
+    assert!(validate_return_bundle(&group, &bundle).is_err());
+    bundle.sessions[1] = bundle.sessions[0].clone();
+    assert!(validate_return_bundle(&group, &bundle).is_err());
+    bundle.sessions.pop();
+    assert!(validate_return_bundle(&group, &bundle).is_err());
 }
 
 #[test]
@@ -175,8 +209,8 @@ fn group_guidance_defers_worker_resume_until_shared_setup() {
     let coordinator = group_arrival_notice(&group.members[0].manifest, &group.coordinator, &ids);
     assert!(coordinator.contains("group machine handoff"));
     assert!(coordinator.contains("Then explicitly resume"));
-    assert!(coordinator.contains("Group return is not implemented"));
-    assert!(!coordinator.contains("jcode cloud return"));
+    assert!(coordinator.contains("jcode cloud return --session coordinator"));
+    assert!(coordinator.contains("return the whole group"));
     let worker = group_arrival_notice(&group.members[1].manifest, &group.coordinator, &ids);
     assert!(worker.contains("do not independently repeat workspace setup"));
     assert!(worker.contains("Remain paused"));

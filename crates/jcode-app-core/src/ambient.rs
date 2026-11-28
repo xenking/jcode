@@ -3,15 +3,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-mod directives;
 mod manager;
-mod paths;
 mod persistence;
 mod prompt;
-pub mod runner;
 pub mod scheduler;
 
-pub use directives::{
+pub use crate::ambient_directives::{
     UserDirective, add_directive, has_pending_directives, load_directives, take_pending_directives,
 };
 pub use manager::AmbientManager;
@@ -83,7 +80,7 @@ pub enum AmbientStatus {
 }
 
 /// Priority for scheduled items
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Priority {
     Low,
     Normal,

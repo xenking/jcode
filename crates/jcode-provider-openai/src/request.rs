@@ -1,3 +1,4 @@
+use jcode_message_types::provider_native::PROVIDER_NATIVE_OPENAI;
 use jcode_message_types::{
     ContentBlock, Message as ChatMessage, Role, TOOL_OUTPUT_MISSING_TEXT, ToolDefinition,
     sanitize_tool_id,
@@ -75,6 +76,53 @@ pub fn build_tool(t: &ToolDefinition) -> Value {
     })
 }
 
+const DEFERRED_TOOLS_SNAPSHOT: &str = "jcode_deferred_tools";
+
+/// Store the exact Responses definitions to replay with this tool result.
+/// An empty snapshot also matters: an unresolved reference must not start
+/// adding items to old requests when its MCP server connects later.
+pub fn freeze_deferred_tools(blocks: &mut Vec<ContentBlock>, tools: &[ToolDefinition]) {
+    let names: Vec<_> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolReference { tool_name, .. } => Some(tool_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    if names.is_empty() || deferred_tools_snapshot(blocks).is_some() {
+        return;
+    }
+    let definitions: Vec<_> = names
+        .into_iter()
+        .filter_map(|name| {
+            tools
+                .iter()
+                .find(|def| def.defer_loading && def.name == name)
+                .map(build_tool)
+        })
+        .collect();
+    blocks.push(ContentBlock::ProviderNative {
+        provider: PROVIDER_NATIVE_OPENAI.into(),
+        item: serde_json::json!({"type": DEFERRED_TOOLS_SNAPSHOT, "tools": definitions}),
+    });
+}
+
+fn deferred_tools_snapshot(blocks: &[ContentBlock]) -> Option<&[Value]> {
+    blocks.iter().find_map(|block| match block {
+        ContentBlock::ProviderNative { provider, item }
+            if provider == PROVIDER_NATIVE_OPENAI && item["type"] == DEFERRED_TOOLS_SNAPSHOT =>
+        {
+            Some(
+                item["tools"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            )
+        }
+        _ => None,
+    })
+}
+
 /// Insert Responses `additional_tools` items for `ContentBlock::ToolReference`
 /// blocks.
 ///
@@ -82,8 +130,8 @@ pub fn build_tool(t: &ToolDefinition) -> Value {
 /// is part of the cached prefix). Each referenced deferred tool is instead
 /// loaded at the point in the conversation where it was referenced, right
 /// after the matching `function_call_output`, so earlier input items and the
-/// cached prefix are unchanged. References to tools not in `tools` (for
-/// example a server that has since disconnected) are dropped.
+/// cached prefix are unchanged. Old transcripts without snapshots still
+/// resolve references against the live registry.
 pub fn insert_additional_tools(
     input: &mut Vec<Value>,
     messages: &[ChatMessage],
@@ -94,12 +142,10 @@ pub fn insert_additional_tools(
         .filter(|t| t.defer_loading)
         .map(|t| (t.name.as_str(), t))
         .collect();
-    if deferred.is_empty() {
-        return;
-    }
-    let mut by_call: Vec<(String, Vec<&ToolDefinition>)> = Vec::new();
+    let mut by_call: Vec<(String, Vec<Value>)> = Vec::new();
     let mut seen: HashSet<&str> = HashSet::new();
     for msg in messages {
+        let snapshot = deferred_tools_snapshot(&msg.content);
         for block in &msg.content {
             let ContentBlock::ToolReference {
                 tool_use_id,
@@ -108,12 +154,20 @@ pub fn insert_additional_tools(
             else {
                 continue;
             };
-            let Some(def) = deferred.get(tool_name.as_str()) else {
-                continue;
-            };
-            if !seen.insert(def.name.as_str()) {
+            if seen.contains(tool_name.as_str()) {
                 continue;
             }
+            let def = match snapshot {
+                Some(definitions) => definitions
+                    .iter()
+                    .find(|def| def["name"] == *tool_name)
+                    .cloned(),
+                None => deferred.get(tool_name.as_str()).map(|def| build_tool(def)),
+            };
+            let Some(def) = def else {
+                continue;
+            };
+            seen.insert(tool_name.as_str());
             let call_id = sanitize_tool_id(tool_use_id);
             match by_call.iter_mut().find(|(id, _)| *id == call_id) {
                 Some((_, defs)) => defs.push(def),
@@ -133,7 +187,7 @@ pub fn insert_additional_tools(
             serde_json::json!({
                 "type": "additional_tools",
                 "role": "developer",
-                "tools": defs.into_iter().map(build_tool).collect::<Vec<_>>(),
+                "tools": defs,
             }),
         );
     }
@@ -398,7 +452,7 @@ pub fn build_responses_input_with_logger(
                                     items.push(serde_json::json!({
                                         "type": "function_call_output",
                                         "call_id": sanitize_tool_id(id),
-                                        "output": missing_output.clone()
+                                        "output": missing_output
                                     }));
                                     used_outputs.insert(id.clone());
                                 }
@@ -426,7 +480,7 @@ pub fn build_responses_input_with_logger(
             items.push(serde_json::json!({
                 "type": "function_call_output",
                 "call_id": sanitize_tool_id(&call_id),
-                "output": missing_output.clone()
+                "output": missing_output
             }));
         }
     }
@@ -526,7 +580,7 @@ pub fn build_responses_input_with_logger(
             normalized.push(serde_json::json!({
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": missing_output.clone()
+                "output": missing_output
             }));
         }
     }
@@ -541,8 +595,16 @@ pub fn build_responses_input_with_logger(
         );
     }
 
-    let mut output_map: HashMap<String, Value> = HashMap::new();
-    for item in &normalized {
+    reorder_outputs(normalized, &missing_output, logger)
+}
+
+fn reorder_outputs<F: FnMut(OpenAiRequestLogLevel, &str)>(
+    normalized: Vec<Value>,
+    missing_output: &str,
+    mut logger: F,
+) -> Vec<Value> {
+    let mut output_map: HashMap<String, usize> = HashMap::new();
+    for (index, item) in normalized.iter().enumerate() {
         if item.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
             && let Some(call_id) = item.get("call_id").and_then(|v| v.as_str())
         {
@@ -553,23 +615,23 @@ pub fn build_responses_input_with_logger(
                 .unwrap_or(false);
             match output_map.get(call_id) {
                 Some(existing) => {
-                    let existing_missing = existing
+                    let existing_missing = normalized[*existing]
                         .get("output")
                         .and_then(|v| v.as_str())
                         .map(|v| v == missing_output)
                         .unwrap_or(false);
                     if existing_missing && !is_missing {
-                        output_map.insert(call_id.to_string(), item.clone());
+                        output_map.insert(call_id.to_string(), index);
                     }
                 }
                 None => {
-                    output_map.insert(call_id.to_string(), item.clone());
+                    output_map.insert(call_id.to_string(), index);
                 }
             }
         }
     }
 
-    let mut ordered: Vec<Value> = Vec::with_capacity(normalized.len());
+    let mut ordered: Vec<Result<usize, Value>> = Vec::with_capacity(normalized.len());
     let mut used_outputs: HashSet<String> = HashSet::new();
     let mut relocated_outputs: HashSet<String> = HashSet::new();
     let mut injected_ordered = 0usize;
@@ -577,7 +639,7 @@ pub fn build_responses_input_with_logger(
     let mut rewritten_orphans = 0usize;
     let mut skipped_empty_orphans = 0usize;
 
-    for item in normalized {
+    for (index, item) in normalized.iter().enumerate() {
         let kind = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let is_call = matches!(kind, "function_call" | "custom_tool_call");
         if is_call {
@@ -585,20 +647,20 @@ pub fn build_responses_input_with_logger(
                 .get("call_id")
                 .and_then(|v| v.as_str())
                 .map(|v| v.to_string());
-            ordered.push(item);
+            ordered.push(Ok(index));
             if let Some(call_id) = call_id {
                 if let Some(output_item) = output_map.get(&call_id) {
-                    ordered.push(output_item.clone());
+                    ordered.push(Ok(*output_item));
                     if used_outputs.insert(call_id.clone()) {
                         relocated_outputs.insert(call_id);
                     }
                 } else {
                     injected_ordered += 1;
-                    ordered.push(serde_json::json!({
+                    ordered.push(Err(serde_json::json!({
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": missing_output.clone()
-                    }));
+                        "output": missing_output
+                    })));
                     used_outputs.insert(call_id);
                 }
             }
@@ -616,8 +678,8 @@ pub fn build_responses_input_with_logger(
                 }
                 continue;
             }
-            if let Some(message_item) = orphan_tool_output_to_user_message(&item, &missing_output) {
-                ordered.push(message_item);
+            if let Some(message_item) = orphan_tool_output_to_user_message(item, missing_output) {
+                ordered.push(Err(message_item));
                 rewritten_orphans += 1;
             } else {
                 skipped_empty_orphans += 1;
@@ -625,7 +687,7 @@ pub fn build_responses_input_with_logger(
             continue;
         }
 
-        ordered.push(item);
+        ordered.push(Ok(index));
     }
 
     if injected_ordered > 0 {
@@ -668,7 +730,27 @@ pub fn build_responses_input_with_logger(
         );
     }
 
+    // Count actual wire emissions first. Only repeated calls sharing a selected
+    // output require a clone. The final emission moves its entire Value subtree.
+    let mut remaining = vec![0usize; normalized.len()];
+    for index in ordered.iter().flatten() {
+        remaining[*index] += 1;
+    }
+    let mut normalized = normalized;
     ordered
+        .into_iter()
+        .map(|entry| match entry {
+            Err(item) => item,
+            Ok(index) => {
+                remaining[index] -= 1;
+                if remaining[index] == 0 {
+                    normalized[index].take()
+                } else {
+                    normalized[index].clone()
+                }
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -685,9 +767,66 @@ mod tests {
                 name: "read".into(),
                 input: json!({}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
+        }
+    }
+
+    fn assert_responses_rounds_keep_dynamic_prefix(mut history: Vec<ChatMessage>) {
+        use jcode_message_types::messages_with_dynamic_system_context;
+
+        let input = |history: &[ChatMessage]| {
+            build_responses_input(&messages_with_dynamic_system_context(
+                history,
+                "stable screen context",
+            ))
+        };
+        let boundary = history.len();
+        let mut previous = input(&history);
+        assert!(
+            previous[boundary]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("stable screen context"))
+        );
+        for call_id in ["first", "second", "third"] {
+            history.push(tool_call(call_id));
+            history.push(ChatMessage::tool_result(call_id, "ok", false));
+            let next = input(&history);
+            assert_eq!(next.len(), previous.len() + 2);
+            assert_eq!(
+                serde_json::to_vec(&next[..previous.len()]).unwrap(),
+                serde_json::to_vec(&previous).unwrap(),
+            );
+            previous = next;
+        }
+    }
+
+    fn compacted_history() -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::OpenAICompaction {
+                encrypted_content: "opaque".into(),
+            }]
+            .into(),
+            timestamp: None,
+            tool_duration_ms: None,
+        }]
+    }
+
+    #[test]
+    fn responses_dynamic_context_after_native_compaction() {
+        assert_responses_rounds_keep_dynamic_prefix(compacted_history());
+    }
+
+    #[test]
+    fn responses_dynamic_context_after_background_wake() {
+        for mut history in [compacted_history(), Vec::new()] {
+            history.push(ChatMessage::user(
+                "<system-reminder>Background task finished.</system-reminder>",
+            ));
+            assert_responses_rounds_keep_dynamic_prefix(history);
         }
     }
 
@@ -755,6 +894,34 @@ mod tests {
     }
 
     #[test]
+    fn repeated_tool_result_is_filtered_before_reordering_without_changing_input() {
+        let mut messages = vec![
+            ChatMessage::user("Run the tool"),
+            tool_call("call_1"),
+            ChatMessage::tool_result("call_1", "original", false),
+        ];
+        let first = build_responses_input(&messages);
+        messages.push(ChatMessage::tool_result("call_1", "duplicate", false));
+        let mut logs = Vec::new();
+        let second = build_responses_input_with_logger(&messages, |_, message| {
+            logs.push(message.to_string());
+        });
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&second).unwrap(),
+        );
+        assert!(
+            logs.iter()
+                .any(|message| message.contains("Filtered 1 orphaned tool result"))
+        );
+        assert!(
+            !logs
+                .iter()
+                .any(|message| message.contains("duplicate tool output"))
+        );
+    }
+
+    #[test]
     fn build_tools_flattens_allof_schema_for_openai() {
         let defs = vec![ToolDefinition {
             name: "read".to_string(),
@@ -801,7 +968,8 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::OpenAICompaction {
                 encrypted_content: oversized,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];
@@ -830,7 +998,8 @@ mod tests {
                 summary: vec!["Checked constraints.".to_string()],
                 encrypted_content: Some("enc_reasoning".to_string()),
                 status: Some("completed".to_string()),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];
@@ -867,7 +1036,7 @@ mod tests {
                         {"type": "web_search_result", "url": "https://a.example", "title": "A", "encrypted_content": "ENC"}
                     ]}),
                 },
-            ],
+            ].into(),
             timestamp: None,
             tool_duration_ms: None,
         }];
@@ -945,7 +1114,7 @@ mod tests {
     fn msg(role: Role, content: Vec<ContentBlock>) -> ChatMessage {
         ChatMessage {
             role,
-            content,
+            content: content.into(),
             timestamp: None,
             tool_duration_ms: None,
         }
@@ -1024,6 +1193,43 @@ mod tests {
     }
 
     #[test]
+    fn responses_input_replays_persisted_deferred_schema() {
+        let name = "mcp__weather__forecast";
+        let original = deferred_def(name);
+        let mut updated = original.clone();
+        updated.description = "A different schema on reconnection".into();
+        updated.input_schema = json!({"type":"object","properties":{"new_arg":{"type":"string"}}});
+        let mut result = ChatMessage::tool_result("call_1", "found", false);
+        result.content.push(ContentBlock::ToolReference {
+            tool_use_id: "call_1".into(),
+            tool_name: name.into(),
+        });
+        let mut blocks = result.content.to_vec();
+        freeze_deferred_tools(&mut blocks, std::slice::from_ref(&original));
+        result.content = blocks.into();
+        let responses = |messages: &[ChatMessage], tools: &[ToolDefinition]| {
+            let mut items = build_responses_input(messages);
+            insert_additional_tools(&mut items, messages, tools);
+            items
+        };
+        let history = vec![tool_call("call_1"), result];
+        let first = responses(&history, &[original]);
+        assert_eq!(first[2]["type"], "additional_tools");
+        let mut restored: Vec<ChatMessage> =
+            serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap();
+        restored.push(tool_call("call_2"));
+        restored.push(ChatMessage::tool_result("call_2", "ok", false));
+        for live in [vec![], vec![updated]] {
+            let replay = responses(&restored, &live);
+            assert_eq!(replay.len(), first.len() + 2);
+            assert_eq!(
+                serde_json::to_vec(&replay[..first.len()]).unwrap(),
+                serde_json::to_vec(&first).unwrap(),
+            );
+        }
+    }
+
+    #[test]
     fn tool_reference_without_deferred_definition_is_ignored() {
         let messages = vec![msg(
             Role::User,
@@ -1038,3 +1244,7 @@ mod tests {
         assert_eq!(input, before);
     }
 }
+
+#[cfg(test)]
+#[path = "request_normalization_tests.rs"]
+mod normalization_tests;

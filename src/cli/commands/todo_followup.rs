@@ -51,13 +51,15 @@ pub(super) fn run_actionable_todos(
     todos: &[crate::todo::TodoItem],
     tasks: &[crate::background::TaskStatusFile],
     session_id: &str,
-) -> Vec<crate::todo::TodoItem> {
-    let goals = run_goals(session_id);
-    todos
+) -> anyhow::Result<Vec<crate::todo::TodoItem>> {
+    let goals = run_goals(session_id)?;
+    Ok(todos
         .iter()
         .filter(|todo| {
             !crate::todo::is_incomplete_todo(todo)
-                || (!crate::todo::todo_requires_user_auth(todo)
+                // Handed to a swarm worker: the owner works it and reports back.
+                || (!crate::todo::todo_assigned_elsewhere(todo, session_id)
+                    && !crate::todo::todo_requires_user_auth(todo)
                     && !crate::todo::todo_goal_cannot_complete(todo, &goals)
                     && !crate::todo::todo_waits_on_running_task(todo, |id| {
                         crate::todo::await_dependency::running(
@@ -70,7 +72,7 @@ pub(super) fn run_actionable_todos(
                     }))
         })
         .cloned()
-        .collect()
+        .collect())
 }
 
 pub(super) fn run_actionable_poke_message(
@@ -100,8 +102,8 @@ pub(super) fn run_actionable_poke_message(
     message
 }
 
-pub(super) fn run_goals(session_id: &str) -> Vec<crate::todo::TodoGoal> {
-    crate::todo::load_goals(session_id).unwrap_or_default()
+pub(super) fn run_goals(session_id: &str) -> anyhow::Result<Vec<crate::todo::TodoGoal>> {
+    crate::todo::load_goals(session_id)
 }
 
 pub(super) fn run_user_auth_notice(todos: &[crate::todo::TodoItem]) -> Option<String> {
@@ -158,7 +160,7 @@ pub(super) async fn prepare_run_todo_follow_up(
     session_id: &str,
     todos: &[crate::todo::TodoItem],
     may_resume: bool,
-) -> (Vec<crate::todo::TodoItem>, Option<String>) {
+) -> anyhow::Result<(Vec<crate::todo::TodoItem>, Option<String>)> {
     use futures::{FutureExt, StreamExt};
 
     let mut completion_messages = Vec::new();
@@ -203,7 +205,7 @@ pub(super) async fn prepare_run_todo_follow_up(
                 tasks.push(task);
             }
         }
-        let actionable = run_actionable_todos(todos, &tasks, session_id);
+        let actionable = run_actionable_todos(todos, &tasks, session_id)?;
         let waiting: Vec<_> = tasks
             .iter()
             .filter(|task| run_task_is_waitable(task, session_id))
@@ -228,10 +230,10 @@ pub(super) async fn prepare_run_todo_follow_up(
         let all_waiting = (!waiting.is_empty() || !awaits.is_empty())
             && !actionable.iter().any(crate::todo::is_incomplete_todo);
         if !all_waiting || !may_resume {
-            return (
+            return Ok((
                 actionable,
                 (!completion_messages.is_empty()).then(|| completion_messages.join("\n\n")),
-            );
+            ));
         }
 
         let mut waits = futures::stream::FuturesUnordered::new();
@@ -271,7 +273,7 @@ pub(super) async fn prepare_run_todo_follow_up(
         // list. Other tasks can remain in flight while newly unblocked work runs.
         let Some(resolved) = waits.next().await else {
             crate::logging::warn("Headless dependency wait set unexpectedly empty");
-            return (actionable, None);
+            return Ok((actionable, None));
         };
         let status = manager.status(&resolved).await;
         let mut message = format!(
@@ -464,4 +466,78 @@ pub(super) fn build_run_todo_validation_message(
             true,
         ))
     }
+}
+
+/// Whether the turn that appended `messages[before..]` called any tool. A
+/// shrunken transcript (compaction) counts as progress, never as a stall.
+pub(super) fn run_turn_had_tool_calls<'a>(
+    new: Option<impl IntoIterator<Item = &'a crate::session::StoredMessage>>,
+) -> bool {
+    let Some(new) = new else {
+        return true;
+    };
+    new.into_iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, crate::message::ContentBlock::ToolUse { .. }))
+    })
+}
+
+/// Outcome of waiting for swarm members this run spawned.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RunSwarmWait {
+    /// Nothing to wait for. Continue with the normal poke policy.
+    Clear,
+    /// Members finished. Resume with this message and a fresh budget.
+    Resume(String),
+    /// Members are still working and the turn limit forbids waiting.
+    Blocked(Vec<String>),
+}
+
+/// Members still working will report back, so poking meanwhile only burns
+/// turns ("nothing to do"). The headless run owns continuation, so it waits for
+/// them, then resumes the same agent. `fetch` lists working member ids.
+pub(super) async fn wait_for_run_swarm_members<F, Fut>(
+    todos: &[crate::todo::TodoItem],
+    may_resume: bool,
+    poll: std::time::Duration,
+    mut fetch: F,
+) -> RunSwarmWait
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Vec<String>>,
+{
+    if !todos.iter().any(crate::todo::is_incomplete_todo) {
+        return RunSwarmWait::Clear;
+    }
+    let mut working = fetch().await;
+    if working.is_empty() {
+        return RunSwarmWait::Clear;
+    }
+    if !may_resume {
+        return RunSwarmWait::Blocked(working);
+    }
+    let first = working.clone();
+    while !working.is_empty() {
+        tokio::time::sleep(poll).await;
+        working = fetch().await;
+    }
+    RunSwarmWait::Resume(format!(
+        "[auto] Swarm member(s) {} finished. Review their reports and continue any newly actionable work. Do not redo work a member completed.",
+        first.join(", ")
+    ))
+}
+
+/// Production wait: ask the daemon which members this session spawned are
+/// still working. Fails open when there is no daemon.
+pub(super) async fn wait_for_run_swarm_members_live(
+    session_id: &str,
+    todos: &[crate::todo::TodoItem],
+    may_resume: bool,
+) -> RunSwarmWait {
+    wait_for_run_swarm_members(todos, may_resume, std::time::Duration::from_secs(3), || {
+        crate::tool::working_members_spawned_by(session_id)
+    })
+    .await
 }

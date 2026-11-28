@@ -383,7 +383,7 @@ fn test_anthropic_max_alias_uses_strongest_real_effort() {
 }
 
 #[test]
-fn test_anthropic_opus_48_fast_mode_service_tier_serializes_priority() {
+fn test_anthropic_opus_48_capacity_service_tier_serializes_auto_without_speed() {
     let provider = AnthropicProvider::new();
     provider.set_model("claude-opus-4-8").unwrap();
 
@@ -404,16 +404,19 @@ fn test_anthropic_opus_48_fast_mode_service_tier_serializes_priority() {
         output_config: None,
         temperature: None,
         service_tier: provider.current_service_tier_for_model(&provider.model()),
+        speed: None,
         stream: true,
+        effort_record: None,
     };
     let value = serde_json::to_value(&request).unwrap();
 
     assert_eq!(value["model"], "claude-opus-4-8");
     assert_eq!(value["service_tier"], "auto");
+    assert!(value.get("speed").is_none());
 }
 
 #[test]
-fn test_anthropic_fast_mode_is_limited_to_opus_48() {
+fn test_anthropic_capacity_override_is_limited_to_opus_48() {
     let provider = AnthropicProvider::new();
     provider.set_model("claude-opus-4-6").unwrap();
 

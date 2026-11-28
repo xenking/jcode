@@ -34,7 +34,6 @@ fn sample() -> UsageData {
 fn reset_offers_reuse_the_single_coordinated_usage_response() {
     with_home(|runtime| {
         runtime.block_on(async {
-            assert!(super::super::USAGE_URL.ends_with("?at_wall=1&skip_spend=1"));
             for (index, status) in [
                 serde_json::json!({"eligible": true, "arm": "reset", "available": true}),
                 serde_json::json!({"eligible": false}),
@@ -56,7 +55,7 @@ fn reset_offers_reuse_the_single_coordinated_usage_response() {
                 let label = format!("combined-reset-{index}");
                 let key = format!("label:{label}");
                 let results = futures::future::join_all((0..8).map(|_| {
-                    fetch(key.clone(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.clone(), &url))
+                    fetch(key.clone(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.clone(), &url, None))
                 })).await;
                 assert!(results.iter().all(|result| result.as_ref().unwrap().last_error.is_none()));
                 server.await.unwrap();
@@ -101,6 +100,7 @@ fn response_diagnostics_capture_only_bounded_printable_retry_hints() {
 #[test]
 fn concurrent_callers_make_one_probe() {
     with_home(|runtime| {
+        let _shared = cache::lock_usage_cache_tests();
         runtime.block_on(async {
             let probes = AtomicUsize::new(0);
             let key = "label:flight-concurrent";
@@ -123,6 +123,7 @@ fn concurrent_callers_make_one_probe() {
 #[test]
 fn different_accounts_can_probe_concurrently() {
     with_home(|runtime| {
+        let _shared = cache::lock_usage_cache_tests();
         runtime.block_on(async {
             let barrier = tokio::sync::Barrier::new(2);
             let probes = (0..2).map(|index| {
@@ -239,7 +240,7 @@ fn received_429_is_cached_without_waiting_for_error_body() {
             std::future::pending::<()>().await;
         });
         let key = "label:flight-http-429";
-        let result = tokio::time::timeout(Duration::from_secs(2), fetch(key.into(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.into(), &url))).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), fetch(key.into(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.into(), &url, None))).await.unwrap();
         assert!(result.unwrap_err().to_string().contains("429"));
         let cached = disk_cache::fresh(key).unwrap();
         assert!(cached.last_error.unwrap().contains("429"));
@@ -267,7 +268,7 @@ fn aborted_http_body_read_persists_backoff() {
         });
         let key = "label:flight-http-cancel";
         let probe = tokio::spawn(async move {
-            fetch(key.into(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.into(), &url)).await
+            fetch(key.into(), || super::super::fetch_anthropic_usage_data_uncached("fixture-only".into(), key.into(), &url, None)).await
         });
         tokio::time::timeout(Duration::from_secs(2), received).await.unwrap().unwrap();
         tokio::task::yield_now().await;

@@ -2,7 +2,7 @@
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 
 /// Quality-first default for OpenAI-capable routes.
-pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6.1-sol";
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6.2-sol";
 
 /// Available Claude models used by model lists and provider routing.
 ///
@@ -67,8 +67,10 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     // GPT-6 Astra: newest OpenAI flagship (live on api.openai.com and
     // OpenRouter as of 2026-09). Listed explicitly because the frontier
     // auto-promoter only accepts bare numeric ids and would skip the suffix.
-    // GPT-6.1 Sol (2026-10-16): latest generation and the default.
+    // GPT-6.2 Sol: latest generation and the default (also the failover
+    // target when a Claude route drops). GPT-6.1 Sol stays selectable.
     DEFAULT_OPENAI_MODEL,
+    "gpt-6.1-sol",
     "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-pro",
@@ -122,8 +124,9 @@ mod gpt_5_6_catalog_tests {
         }
         assert!(is_openai_api_only_pro_model("gpt-5.6-pro"));
         assert!(!is_openai_api_only_pro_model("gpt-5.6-sol"));
-        assert_eq!(DEFAULT_OPENAI_MODEL, "gpt-6.1-sol");
-        assert_eq!(ALL_OPENAI_MODELS[0], "gpt-6.1-sol");
+        assert_eq!(DEFAULT_OPENAI_MODEL, "gpt-6.2-sol");
+        assert_eq!(ALL_OPENAI_MODELS[0], "gpt-6.2-sol");
+        assert!(ALL_OPENAI_MODELS.contains(&"gpt-6.1-sol"));
     }
 }
 
@@ -187,6 +190,7 @@ fn copilot_context_limit_for_model(model: &str) -> usize {
         m if m.starts_with("gemini-2.0-flash") => 1_000_000,
         m if m.starts_with("gemini-2.5") => 1_000_000,
         m if m.starts_with("gemini-3") => 1_000_000,
+        m if m.starts_with("gemini-4") => 1_000_000,
         _ => 128_000,
     }
 }
@@ -336,6 +340,7 @@ pub fn context_limit_for_model_with_provider_and_cache(
     if model.starts_with("gemini-2.0-flash")
         || model.starts_with("gemini-2.5")
         || model.starts_with("gemini-3")
+        || model.starts_with("gemini-4")
     {
         return Some(1_000_000);
     }

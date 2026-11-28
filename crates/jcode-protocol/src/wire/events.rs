@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Self-reported process image and exec generation, never a channel selection.
+pub type DaemonIdentity = jcode_selfdev_types::ServingIdentity;
+
 /// A provider-reported account limit beyond the two legacy quota slots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountUsageWindow {
@@ -27,6 +30,11 @@ pub struct AccountUsageSnapshot {
     /// Banked usage resets claimable now. `None` when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banked_resets: Option<u64>,
+    /// Currently usable saved resets, distinct from the total.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_usable: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_cached_source: Option<String>,
     /// RFC3339 expiry of the soonest-expiring banked reset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banked_expires_at: Option<String>,
@@ -36,60 +44,8 @@ pub struct AccountUsageSnapshot {
 }
 
 #[cfg(test)]
-mod account_usage_tests {
-    use super::*;
-
-    #[test]
-    fn account_usage_roundtrips_as_lightweight_control() {
-        let request = Request::AccountUsage { id: 71 };
-        assert!(request.is_lightweight_control_request());
-        assert_eq!(request.id(), 71);
-        let decoded: Request =
-            serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
-        assert!(matches!(decoded, Request::AccountUsage { id: 71 }));
-        let snapshot = AccountUsageSnapshot {
-            additional_windows: vec![AccountUsageWindow {
-                label: "Future model / month".into(),
-                usage_ratio: 0.61,
-                resets_at: Some("2099-01-01T00:00:00Z".into()),
-            }],
-            label: "remote-account".into(),
-            email: None,
-            exhausted: false,
-            primary_label: Some("5h".into()),
-            five_hour_ratio: Some(0.35),
-            secondary_label: None,
-            seven_day_ratio: None,
-            resets_at: None,
-            error: None,
-            banked_resets: None,
-            banked_expires_at: None,
-            banked_next_at: None,
-        };
-        let event = ServerEvent::AccountUsage {
-            id: 71,
-            anthropic: vec![snapshot.clone()],
-            openai: Vec::new(),
-        };
-        let decoded: ServerEvent =
-            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
-        let ServerEvent::AccountUsage {
-            id,
-            anthropic,
-            openai,
-        } = decoded
-        else {
-            panic!("wrong response")
-        };
-        assert_eq!(id, 71);
-        assert_eq!(anthropic, vec![snapshot.clone()]);
-        assert!(openai.is_empty());
-        let mut legacy = serde_json::to_value(&snapshot).unwrap();
-        legacy.as_object_mut().unwrap().remove("additional_windows");
-        let legacy: AccountUsageSnapshot = serde_json::from_value(legacy).unwrap();
-        assert!(legacy.additional_windows.is_empty());
-    }
-}
+#[path = "account_usage_tests.rs"]
+mod account_usage_tests;
 
 /// Identity of a turn within one runtime incarnation. Request IDs are not turn IDs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +78,8 @@ pub enum ServerEvent {
     TurnEvent {
         identity: TurnIdentity,
         event: Box<ServerEvent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text_frames: Option<Vec<jcode_session_types::assistant_text::AssistantTextFrame>>,
     },
     /// Serialized todo card snapshot containing todos, plan, and goals.
     #[serde(rename = "todos")]
@@ -147,6 +105,12 @@ pub enum ServerEvent {
         data: serde_json::Value,
         message: String,
     },
+    #[serde(rename = "background_tasks")]
+    BackgroundTasks {
+        id: u64,
+        #[serde(flatten)]
+        snapshot: jcode_background_types::BackgroundTasksSnapshot,
+    },
     #[serde(rename = "tools")]
     Tools {
         id: u64,
@@ -166,6 +130,17 @@ pub enum ServerEvent {
         session_id: String,
         reason: String,
         notification: String,
+    },
+
+    /// Another session asked the user-facing client attached to this session to
+    /// raise it (select the tab, bring the window forward). Best effort.
+    #[serde(rename = "focus_requested")]
+    FocusRequested {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_name: Option<String>,
     },
 
     /// Acknowledgment of request
@@ -245,6 +220,11 @@ pub enum ServerEvent {
         output: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+        codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+        /// The typed answer when this is a completed `ask`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<Box<jcode_session_types::AskRecord>>,
     },
 
     /// Rendered images produced during the live turn, including image-bearing
@@ -286,6 +266,45 @@ pub enum ServerEvent {
         effective_budget: Option<usize>,
     },
 
+    /// Final counters for one completed provider request, not a stream snapshot.
+    #[serde(rename = "request_usage")]
+    RequestUsage {
+        session_id: String,
+        request_id: String,
+        provider: String,
+        model: String,
+        input: Option<u64>,
+        output: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input: Option<u64>,
+    },
+
+    /// Prompt occupancy of the session's active context, replayed when a client
+    /// attaches so a resumed client can paint its context meter before the next
+    /// provider call reports usage.
+    ///
+    /// This is a persisted snapshot of a completed request, not a completed
+    /// call of the current turn: it must never contribute to turn stats, cost,
+    /// or the live activity projection.
+    ///
+    /// It names its session because it follows the attach history directly,
+    /// before a bridging client has learned which session the connection is
+    /// bound to from the correlated state reply.
+    #[serde(rename = "context_occupancy")]
+    ContextOccupancy {
+        session_id: String,
+        prompt_tokens: u64,
+    },
+
+    /// Cumulative keepalive-only usage, sent live and on attach.
+    #[serde(rename = "cache_keepalive")]
+    CacheKeepalive {
+        session_id: String,
+        usage: jcode_message_types::CacheKeepaliveUsage,
+    },
+
     /// Prompt-shape signature for the API request that will later report token
     /// usage. Remote clients use this to diagnose KV-cache misses.
     #[serde(rename = "kv_cache_request")]
@@ -319,7 +338,9 @@ pub enum ServerEvent {
         reason: String,
         /// True when the harness itself changed the cached prefix.
         harness_caused: bool,
+        /// Diagnostic shortfall, or current uncached input on a provider switch.
         missed_tokens: u64,
+        /// Prior reusable input, or current input on a provider switch.
         expected_tokens: u64,
         read_tokens: u64,
         /// Documented intentional invalidation that explains the miss.
@@ -337,6 +358,19 @@ pub enum ServerEvent {
     #[serde(rename = "connection_phase")]
     ConnectionPhase { phase: String },
 
+    /// A provider quota decision, with unknown fields explicitly reported as such.
+    #[serde(rename = "usage_limit")]
+    UsageLimit {
+        provider: String,
+        model: String,
+        account: Option<String>,
+        window: String,
+        reset: String,
+        action: String,
+        target: Option<String>,
+        message: String,
+    },
+
     /// Provider-supplied human-readable transport detail for the current stream.
     #[serde(rename = "status_detail")]
     StatusDetail { detail: String },
@@ -346,6 +380,11 @@ pub enum ServerEvent {
     ServiceTierReported {
         requested: Option<String>,
         tier: String,
+    },
+    #[serde(rename = "speed_reported")]
+    SpeedReported {
+        requested: Option<jcode_message_types::SpeedMode>,
+        actual: jcode_message_types::SpeedMode,
     },
 
     /// Provider has finished the visible assistant message, but the turn may still be
@@ -402,6 +441,33 @@ pub enum ServerEvent {
         items: Vec<PlanItem>,
         summary: String,
         proposal_key: String,
+    },
+
+    /// Rejection before a queued prompt is persisted.
+    #[serde(rename = "queued_prompt_rejected")]
+    QueuedPromptRejected {
+        id: u64,
+        reason: QueuedPromptRejection,
+        skill: String,
+    },
+
+    /// Snapshot of user-authored prompts still owned by the session queue.
+    #[serde(rename = "queued_prompts")]
+    QueuedPrompts { id: u64, prompts: Vec<QueuedPrompt> },
+
+    #[serde(rename = "queued_prompt_removed")]
+    QueuedPromptRemoved {
+        id: u64,
+        prompt_id: String,
+        outcome: QueuedPromptRemovalOutcome,
+    },
+
+    /// A queued prompt's content was replaced in place.
+    #[serde(rename = "queued_prompt_edited")]
+    QueuedPromptEdited {
+        id: u64,
+        prompt_id: String,
+        outcome: QueuedPromptEditOutcome,
     },
 
     /// Soft interrupt message was injected at a safe point
@@ -483,6 +549,14 @@ pub enum ServerEvent {
         message: String,
     },
 
+    /// The provider stopped a request, but jcode is retrying within the same turn.
+    #[serde(rename = "provider_guardrail_retry")]
+    ProviderGuardrailRetry {
+        turn_id: String,
+        attempt: u32,
+        max_attempts: u32,
+    },
+
     /// Relevant memory was injected into the conversation
     #[serde(rename = "memory_injected")]
     MemoryInjected {
@@ -511,6 +585,10 @@ pub enum ServerEvent {
     Compaction {
         /// What triggered it: "background", "hard_compact", "auto_recovery"
         trigger: String,
+        /// What replaced the folded history: `summary`, `snapcompact`, `native`,
+        /// or `drop` (emergency hard compaction). Absent from older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
         /// Token count before compaction
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pre_tokens: Option<u64>,
@@ -535,6 +613,27 @@ pub enum ServerEvent {
         /// Count of recent messages still kept verbatim after compaction
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_messages: Option<usize>,
+        /// Ready-to-render transcript divider body (`label`, blank line, detail).
+        ///
+        /// Formatted by the daemon so every client, including the harness bridge
+        /// that has no application foundation linked in, draws the exact same
+        /// row as the one stored in history. Absent from older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        divider: Option<String>,
+    },
+
+    /// Background compaction started summarizing.
+    ///
+    /// Carries no result: clients render a running divider from it and replace
+    /// it when the matching [`Self::Compaction`] arrives.
+    #[serde(rename = "compaction_started")]
+    CompactionStarted {
+        /// Compaction trigger label, e.g. `reactive` or `idle_precompact`
+        #[serde(default)]
+        trigger: String,
+        /// Estimated context tokens when the summary started
+        #[serde(default)]
+        pre_tokens: u64,
     },
 
     /// Message/turn completed
@@ -552,6 +651,17 @@ pub enum ServerEvent {
     /// prompt (or the auto-poke notice) instead of only the sender seeing it.
     #[serde(rename = "peer_user_message")]
     PeerUserMessage { content: String },
+
+    /// Replace provisional attachment markers once the message is durable.
+    #[serde(rename = "user_image_ids")]
+    UserImageIds {
+        original_content: String,
+        content: String,
+        image_ids: Vec<String>,
+        /// One-based session ordinals, in the same order as `image_ids`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        image_ordinals: Vec<usize>,
+    },
 
     /// Error occurred
     #[serde(rename = "error")]
@@ -575,6 +685,9 @@ pub enum ServerEvent {
         /// Authoritative connected non-headless users. None on older daemons.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user_connected_session_ids: Option<Vec<String>>,
+        /// Absent on older daemons and on streaming keepalives.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daemon_identity: Option<DaemonIdentity>,
     },
 
     /// Current state (debug)
@@ -587,6 +700,9 @@ pub enum ServerEvent {
         /// Soft interrupts queued and not yet injected. Omitted by older daemons.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pending_soft_interrupts: Option<usize>,
+        /// Structured inputs answerable on this attachment. Absent before attach or on older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_ask_ids: Option<Vec<String>>,
     },
 
     /// Response for debug command
@@ -653,6 +769,10 @@ pub enum ServerEvent {
         /// Authoritative service tiers from the live provider, including an empty unsupported list.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         available_service_tiers: Option<Vec<String>>,
+        #[serde(default)]
+        speed_mode: jcode_message_types::SpeedMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        speed_options: Vec<jcode_message_types::SpeedOption>,
         /// Connected MCP server names
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp_servers: Vec<String>,
@@ -724,6 +844,10 @@ pub enum ServerEvent {
         /// Session-scoped preferred model for subagents.
         #[serde(skip_serializing_if = "Option::is_none")]
         subagent_model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pinned_skill: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pinned_skills: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         agent_model_overrides: std::collections::BTreeMap<String, String>,
         /// Session-scoped automatic review toggle.
@@ -744,6 +868,56 @@ pub enum ServerEvent {
         /// Session-scoped agent applet instances.
         #[serde(default, skip_serializing_if = "applets_is_empty")]
         applets: jcode_applet_types::AgentApplets,
+    },
+
+    #[serde(rename = "history_page")]
+    HistoryPage {
+        id: u64,
+        session_id: String,
+        fragments: Vec<serde_json::Value>,
+        before: Option<String>,
+    },
+
+    #[serde(rename = "history_image_chunk")]
+    HistoryImageChunk {
+        id: u64,
+        session_id: String,
+        key: String,
+        offset: usize,
+        total: usize,
+        data: String,
+    },
+
+    #[serde(rename = "session_images")]
+    SessionImages {
+        id: u64,
+        session_id: String,
+        images: Vec<serde_json::Value>,
+    },
+
+    #[serde(rename = "session_image")]
+    SessionImage {
+        id: u64,
+        session_id: String,
+        image_id: String,
+        media_type: String,
+        offset: usize,
+        total: usize,
+        data: String,
+    },
+
+    #[serde(rename = "context_breakdown")]
+    ContextBreakdown {
+        id: u64,
+        #[serde(flatten)]
+        breakdown: jcode_session_types::ContextBreakdown,
+    },
+
+    #[serde(rename = "shake_tools")]
+    ShakeTools {
+        id: u64,
+        session_id: String,
+        result: jcode_session_types::ShakeToolsResult,
     },
 
     /// Expanded compacted-history window (response to GetCompactedHistory).
@@ -778,6 +952,9 @@ pub enum ServerEvent {
         /// New socket path to connect to (if different)
         #[serde(skip_serializing_if = "Option::is_none")]
         new_socket: Option<String>,
+        /// Correlates reconnect to the listener that completed this handoff.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reload_id: Option<String>,
     },
 
     /// Progress update during server reload
@@ -845,12 +1022,41 @@ pub enum ServerEvent {
         reasoning_effort: Option<String>,
     },
 
+    /// A model switch was accepted but cannot apply until the running turn
+    /// ends. The session keeps running its current model until a later
+    /// `model_changed` carrying the same `id` (or `model_change_cancelled`)
+    /// settles it.
+    #[serde(rename = "model_change_pending")]
+    ModelChangePending {
+        id: u64,
+        /// The model the switch will move to, or a short description when
+        /// the target is only known once it applies (cycling).
+        model: String,
+    },
+
+    /// A pending model switch will not apply: the user withdrew it, a newer
+    /// request replaced it, or the session ended. `id` is the id of the
+    /// request that settled it, `pending_id` the id of the switch itself.
+    #[serde(rename = "model_change_cancelled")]
+    ModelChangeCancelled {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_id: Option<u64>,
+        /// None when nothing was pending.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+
     /// Reasoning effort changed (response to set_reasoning_effort)
     #[serde(rename = "reasoning_effort_changed")]
     ReasoningEffortChanged {
         id: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
+        /// Updated model ID when changing effort switches to a sibling model
+        /// variant (for example Antigravity `gemini-4-neon-low` -> `gemini-4-neon-medium`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -865,6 +1071,15 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         service_tier: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
+    #[serde(rename = "speed_mode_changed")]
+    SpeedModeChanged {
+        id: u64,
+        speed_mode: jcode_message_types::SpeedMode,
+        speed_options: Vec<jcode_message_types::SpeedOption>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
 
@@ -960,6 +1175,9 @@ pub enum ServerEvent {
         id: u64,
         session_id: String,
         tool_calls: Vec<ToolCallSummary>,
+        /// Missing only on older daemons, which did not distinguish empty from unavailable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<CommToolCallSnapshot>,
     },
 
     /// Response to comm_status request
@@ -1015,6 +1233,16 @@ pub enum ServerEvent {
         id: u64,
         session_id: String,
         new_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_speed: Option<jcode_message_types::WorkerSpeedStatus>,
+    },
+
+    #[serde(rename = "comm_worker_control_response")]
+    CommWorkerControlResponse {
+        id: u64,
+        target_session: String,
+        scheduled: bool,
+        message: String,
     },
 
     /// Response to comm_list_models request
@@ -1059,6 +1287,25 @@ pub enum ServerEvent {
         new_session_name: String,
     },
 
+    #[serde(rename = "side_question_forked")]
+    SideQuestionForked {
+        id: u64,
+        topic: jcode_session_types::SideQuestionTopic,
+    },
+
+    #[serde(rename = "side_questions")]
+    SideQuestions {
+        id: u64,
+        topics: Vec<jcode_session_types::SideQuestionTopic>,
+    },
+
+    #[serde(rename = "side_question_history")]
+    SideQuestionHistory {
+        id: u64,
+        session_id: String,
+        messages: Vec<jcode_session_types::RenderedMessage>,
+    },
+
     /// Response to compact request — context compaction status
     #[serde(rename = "compact_result")]
     CompactResult {
@@ -1091,6 +1338,89 @@ pub enum ServerEvent {
         request_id: String,
         questions: Vec<AskQuestion>,
         tool_call_id: String,
+        /// Who may answer; older daemons omit it, which means a plain question.
+        #[serde(default, skip_serializing_if = "AskKind::is_question")]
+        kind: AskKind,
+    },
+
+    /// The routing policy chose the account for the turn just decided.
+    /// `pending` names an account a warm session would move to at its next
+    /// cache-cold seam, so the header chip can show the intended move.
+    #[serde(rename = "routing_decision")]
+    RoutingDecision {
+        account: String,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending: Option<String>,
+    },
+
+    /// The turn is held until the user answers. Reply with
+    /// `Request::RoutingGateAnswer` carrying the same `gate_id`.
+    #[serde(rename = "routing_gate")]
+    RoutingGate {
+        gate_id: String,
+        reason: String,
+        options: Vec<RoutingGateOption>,
+    },
+
+    /// A gate was answered or abandoned. Clients close the matching view.
+    #[serde(rename = "routing_gate_closed")]
+    RoutingGateClosed { gate_id: String },
+
+    /// Text answer to `Request::RoutingIntent`, ready to print.
+    #[serde(rename = "routing_status")]
+    RoutingStatus { id: u64, text: String },
+
+    /// Answer to `Request::RoutingView`.
+    #[serde(rename = "routing_view")]
+    RoutingView { id: u64, view: RoutingView },
+
+    /// Answer to `desktop_state_get` / `desktop_state_subscribe`.
+    #[serde(rename = "desktop_state")]
+    DesktopState {
+        id: u64,
+        space: String,
+        rev: u64,
+        entries: Vec<DesktopStateEntry>,
+    },
+
+    /// A `desktop_state_put` was applied. `entries` are what changed.
+    #[serde(rename = "desktop_state_applied")]
+    DesktopStateApplied {
+        id: u64,
+        space: String,
+        rev: u64,
+        entries: Vec<DesktopStateEntry>,
+    },
+
+    /// A `desktop_state_put` lost to another writer. `entries` is what changed
+    /// since the request's `expected_rev` (all live entries when `full`).
+    #[serde(rename = "desktop_state_conflict")]
+    DesktopStateConflict {
+        id: u64,
+        space: String,
+        rev: u64,
+        full: bool,
+        entries: Vec<DesktopStateEntry>,
+    },
+
+    /// A `desktop_state_put` was refused; nothing was stored.
+    #[serde(rename = "desktop_state_rejected")]
+    DesktopStateRejected {
+        id: u64,
+        reason: DesktopStateRejection,
+        message: String,
+    },
+
+    /// Pushed to subscribers when another connection changed the space.
+    #[serde(rename = "desktop_state_changed")]
+    DesktopStateChanged {
+        space: String,
+        rev: u64,
+        device: String,
+        entries: Vec<DesktopStateEntry>,
     },
 
     /// A running command is waiting for stdin input from the user

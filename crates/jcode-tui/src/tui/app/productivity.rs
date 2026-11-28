@@ -31,7 +31,7 @@ pub(super) fn handle_productivity_command(app: &mut App, trimmed: &str) -> bool 
     ));
     app.set_status_notice("Productivity → scanning");
 
-    let session_id = app.session.id.clone();
+    let session_id = app.session.id().to_owned();
     std::thread::spawn(move || {
         let result = jcode_productivity_core::generate()
             .map(|out| ProductivityReportPayload {
@@ -51,7 +51,7 @@ pub(super) fn handle_productivity_command(app: &mut App, trimmed: &str) -> bool 
 
 impl App {
     pub(super) fn handle_productivity_report_ready(&mut self, event: ProductivityReportReady) {
-        if event.session_id != self.session.id {
+        if event.session_id != self.session.id() {
             return;
         }
         self.productivity_refreshing = false;

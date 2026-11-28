@@ -141,6 +141,10 @@ pub fn validate_lane_dependencies(todos: &[TodoItem]) -> Result<(), String> {
                     "lane owner must be \"worker\" or \"self\", got {owner:?}"
                 ));
             }
+            let speed = todos[lane.items[0]].lane_speed;
+            if lane.items.iter().any(|&i| todos[i].lane_speed != speed) {
+                return Err("lane_speed must be consistent across every lane member".into());
+            }
             let expected = &todos[lane.items[0]].lane_after;
             if lane.items.iter().any(|&i| &todos[i].lane_after != expected) {
                 return Err("lane_after must be consistent across every lane member".into());
@@ -261,6 +265,7 @@ pub fn lane_todos_for_worker(coordinator_todos: &[TodoItem], lane: &str) -> Vec<
         .filter(|todo| lane_id(todo) == lane)
         .map(|todo| TodoItem {
             assigned_to: None,
+            lane_speed: None,
             blocked_by: Vec::new(),
             waiting_reason: None,
             waiting_on: Vec::new(),
@@ -292,6 +297,7 @@ pub fn canonicalize_worker_lane(
             // Inside a worker's own list the lane is the worker's: it must
             // never re-dispatch it, so ownership stays coordinator-side.
             lane_owner: None,
+            lane_speed: None,
             ..todo.clone()
         })
         .collect()
@@ -325,6 +331,7 @@ pub fn merge_worker_lane(
             item.group = template.group.clone();
             item.lane_after = template.lane_after.clone();
             item.lane_owner = template.lane_owner.clone();
+            item.lane_speed = template.lane_speed;
             item.assigned_to = Some(link.worker.clone());
             if other_ids.contains(item.id.as_str()) {
                 item.id = format!("{}:{}", link.worker, item.id);

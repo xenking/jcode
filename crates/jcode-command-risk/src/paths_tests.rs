@@ -11,6 +11,7 @@ fn ctx() -> RiskContext {
         scratch_dir: Some(PathBuf::from("/home/u/.jcode/scratch")),
         working_dir: Some(PathBuf::from("/home/u/proj")),
         home_dir: Some(PathBuf::from("/home/u")),
+        temp_dir: Some(PathBuf::from("/var/folders/xy/T")),
     }
 }
 
@@ -122,11 +123,27 @@ fn concrete_outside_working_directory_target_is_low_risk() {
 #[test]
 fn temp_paths_are_exempt() {
     let ctx = ctx();
-    let expanded = expand("/tmp/build-cache", &ctx);
-    assert_eq!(
-        classify_target(&expanded, "/tmp/build-cache", true, &ctx),
-        None
-    );
+    for raw in [
+        "/tmp/build-cache",
+        "/var/tmp/build-cache",
+        "/var/folders/xy/T/jcode-run",
+        "/home/u/.jcode/scratch/cm-check/out.ndjson",
+        "/home/u/.jcode/wt/gro/target",
+        "/home/u/.jcode/wt/gro/target/debug/deps",
+    ] {
+        let expanded = expand(raw, &ctx);
+        assert_eq!(classify_target(&expanded, raw, true, &ctx), None, "{raw}");
+    }
+}
+
+#[test]
+fn a_worktree_itself_is_not_disposable_scratch() {
+    // Only `<worktree>/target` is build output. The checkout may hold unpushed
+    // commits, so deleting it stays a visible (Low) operation.
+    let ctx = ctx();
+    let raw = "/home/u/.jcode/wt/gro";
+    let finding = classify_target(&expand(raw, &ctx), raw, true, &ctx).expect("finding");
+    assert_eq!(finding.level, RiskLevel::Low);
 }
 
 #[test]
@@ -166,6 +183,7 @@ fn missing_home_context_does_not_panic_or_misfire() {
         scratch_dir: Some(PathBuf::from("/home/u/.jcode/scratch")),
         working_dir: Some(PathBuf::from("/srv/app")),
         home_dir: None,
+        temp_dir: None,
     };
     assert!(is_catastrophic_target(Path::new("/"), &ctx));
     assert!(!is_catastrophic_target(Path::new("/srv/app/tmp"), &ctx));
@@ -215,7 +233,12 @@ fn ordinary_config_files_remain_editable() {
         );
     }
     // ...while the roots themselves stay protected.
-    for path in ["/home/u/.config", "/home/u/.jcode", "/home/u/Documents"] {
+    for path in [
+        "/home/u/.config",
+        "/home/u/.jcode",
+        "/home/u/.jcode/sessions",
+        "/home/u/Documents",
+    ] {
         assert!(is_catastrophic_target(Path::new(path), &ctx), "{path}");
     }
 }

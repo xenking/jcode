@@ -85,3 +85,32 @@ Existing manual session-reset UI still refers only to `juniper_tide`. For manual
 Fable redemption, use the intended account's Claude Settings > Usage > Limit
 resets > Reset for free. The Fable automatic setting does not alter manual UI or
 provide permission to spend early.
+
+## Saved resets from the Desktop accounts list
+
+A login whose `cedar_ember` block reports a usable saved reset shows a
+`Use saved reset (N)` chip. Clicking it only opens a review. The read-only
+check (`prepare_saved_claude_reset`) picks the grant the server selects
+(`next_grant_id`, `usable_now`, not paused, blocked, spent or lapsed) and pins
+the login, token and grant. Only the confirmation sends the claim
+(`consume_saved_claude_reset`). A saved reset may be spent before any limit is
+reached, which is why the review asks first.
+
+The claim shares the account lock and `.pending` marker with the automatic
+path, so a click and a background retry cannot both spend. A declined answer
+(`not_limited`, `ineligible`, `unavailable`, `cooldown`) spent nothing and clears
+the marker. An uncertain one keeps it, and the next review says so instead of
+offering another spend.
+
+`saved` counts grants with resets left (a grant with `resets_left: 0` is spent
+and not counted). `usable` counts only the server-selected grant. `grants` in
+`jcode usage --json` lists every grant, spent ones included, which is why a
+response can show two grants while the account has one reset.
+
+## Reporting a payload no fixture covers
+
+`jcode usage --dump-redacted <path>` writes the raw usage, saved-reset, profile
+and ChatGPT limit responses of every saved login. Emails, uuids, provider ids,
+tokens and keys are replaced; balances, limits and grants are kept. It makes
+read requests only, never refreshes a token and never writes a credential.
+Read the file before sharing it.

@@ -26,6 +26,16 @@ pub(crate) fn run_migrate(
     let journal_path = directory.join("journal.json");
     if journal_path.exists() {
         let old: Journal = read_json(&journal_path)?;
+        if old.phase == Phase::Complete
+            && GroupDeparture::from_group(&old.group)?
+                .commit()?
+                .path()?
+                .is_file()
+        {
+            bail!(
+                "this migration already returned; the group lives locally. Starting a new move for the same group is not supported yet"
+            );
+        }
         if root(&old.group)?.manifest.target_host != host {
             bail!(
                 "unfinished or completed migration targets another host; refusing to change ownership"
@@ -83,8 +93,7 @@ pub(crate) fn run_migrate(
     let mut repo_root: Option<PathBuf> = None;
     for sess in &sessions {
         let working_dir = sess
-            .working_dir
-            .as_deref()
+            .working_dir()
             .context("group member has no working directory")?;
         let root = PathBuf::from(git(
             Path::new(working_dir),
@@ -119,16 +128,19 @@ pub(crate) fn run_migrate(
             label: credentials.label().to_string(),
         });
         if let Some(account) = &auth_account {
-            sess.route_api_method = Some(account.route());
+            sess.apply_route(crate::session::Route {
+                route_api_method: Some(account.route()),
+                ..sess.route()
+            });
         }
         let epoch = selected.epoch;
-        if selected.session_id != sess.id {
+        if selected.session_id != sess.id() {
             bail!("selected session order mismatch");
         }
         group.members.push(Member {
             manifest: MoveManifest {
                 format_version: FORMAT_VERSION,
-                session_id: sess.id.clone(),
+                session_id: sess.id().to_owned(),
                 epoch,
                 source_host: local_host_label(),
                 target_host: host.clone(),
@@ -145,7 +157,7 @@ pub(crate) fn run_migrate(
                     })
                     .collect::<Result<_>>()?,
                 toolchain_hints: toolchain_hints(repo_root.as_deref()),
-                not_transferred: describe_local_only_state(&sess.id),
+                not_transferred: describe_local_only_state(sess.id()),
                 mcp_servers: configured_mcp_servers(),
                 auth_account,
                 auth_accounts: accounts.clone(),
@@ -188,31 +200,32 @@ pub(crate) fn run_migrate(
         let working_dir = repo_root.as_ref().context("group requires a repository")?;
         let repo = prepare_repo_snapshot(working_dir, &journal.group.coordinator, &stage)?
             .context("group requires a repository")?;
-        create_repo_bundle(
-            &repo,
-            &journal.group.coordinator,
-            &stage,
-            common_remote_commit(target, &host, &repo).as_deref(),
-        )?;
+        create_repo_bundle(&repo, &journal.group.coordinator, &stage, None)?;
         for (sess, member) in sessions.iter_mut().zip(&mut journal.group.members) {
             let mut member_repo = repo.clone();
             member_repo.working_dir = sess
-                .working_dir
-                .clone()
+                .working_dir()
+                .map(str::to_owned)
                 .context("missing member working directory")?;
             member.manifest.repo = Some(member_repo);
             if let Some(account) = &member.manifest.auth_account {
-                sess.route_api_method = Some(account.route());
+                sess.apply_route(crate::session::Route {
+                    route_api_method: Some(account.route()),
+                    ..sess.route()
+                });
             }
-            sess.migration_epoch = member.manifest.epoch;
+            sess.apply_lineage(crate::session::Lineage {
+                migration_epoch: member.manifest.epoch,
+                ..sess.lineage()
+            });
             let dangling = dangling_tool_use_ids(sess);
             let notice = group_arrival_notice(&member.manifest, &journal.group.coordinator, &ids);
             append_arrival(sess, &dangling, &host, &notice);
-            let member_dir = stage.join("members").join(&sess.id);
+            let member_dir = stage.join("members").join(sess.id());
             std::fs::create_dir_all(&member_dir)?;
             storage::write_json(&member_dir.join("session.json"), sess)?;
             member.session_sha256 = digest(&member_dir.join("session.json"))?;
-            copy_if_exists(&todo_file(&sess.id)?, &member_dir.join("todos.json"))?;
+            copy_if_exists(&todo_file(sess.id())?, &member_dir.join("todos.json"))?;
             member.todos_sha256 = member_dir
                 .join("todos.json")
                 .exists()
@@ -233,6 +246,7 @@ pub(crate) fn run_migrate(
             crate::usage::export_limits_snapshot(),
         )?;
         durable_json(&stage.join("group.json"), &journal.group)?;
+        std::fs::write(stage.join("portable-workspace-v1"), b"1")?;
         validate(&journal.group, &stage)?;
         tar_dir(
             &stage,
@@ -243,6 +257,7 @@ pub(crate) fn run_migrate(
                 "limits.json",
                 "repo.bundle",
                 "ignored.tar",
+                "portable-workspace-v1",
             ],
         )?;
         if !dry_run {
@@ -348,7 +363,12 @@ fn finish_activation(
     journal.phase = Phase::Complete;
     save_journal(directory, &journal)?;
     if let Some(repo) = &root(&journal.group)?.manifest.repo
-        && let Err(error) = environment::sync_saved(Path::new(&repo.root), target)
+        && let Err(error) = environment::sync_saved_handoff(
+            Path::new(&repo.root),
+            target,
+            &journal.group.coordinator,
+            root(&journal.group)?.manifest.epoch,
+        )
     {
         step(
             "environment",
@@ -381,6 +401,6 @@ fn report(group: &Group, dry_run: bool) -> Result<MoveReport> {
         snapshot: manifest.repo.as_ref().map(|r| r.snapshot.clone()),
         dry_run,
         attach_command: format!("jcode cloud attach --session {}", group.coordinator),
-        return_command: "Group return is not implemented; do not return individual members".into(),
+        return_command: format!("jcode cloud return --session {}", group.coordinator),
     })
 }

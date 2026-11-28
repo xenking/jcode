@@ -66,6 +66,39 @@ fn test_openai_switching_models_include_dynamic_catalog_entries() {
 }
 
 #[test]
+fn test_openai_scoped_future_model_is_available_for_switching_and_display() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let _model = EnvVarGuard::remove("JCODE_OPENAI_MODEL");
+    let future_model = "gpt-99.7-future";
+
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "scoped-future-model-route-test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+    // Populate only the held credential's catalog: a future release must not
+    // need an entry in the compiled fallback list to reach either picker API.
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec![future_model.to_string()],
+    );
+
+    let switching = provider.available_models_for_switching();
+    let display = provider.available_models_display();
+    assert!(
+        switching.iter().any(|model| model == future_model)
+            && display.iter().any(|model| model == future_model),
+        "scoped future model must reach switching and display: switching={switching:?}, display={display:?}"
+    );
+    provider.set_model(future_model).unwrap();
+    assert_eq!(provider.model(), future_model);
+}
+
+#[test]
 fn test_chatgpt_web_model_bypasses_live_api_catalog() {
     let _guard = jcode_base::storage::lock_test_env();
     let home = tempfile::TempDir::new().unwrap();
@@ -254,7 +287,7 @@ async fn persistent_ws_background_keepalive_round_trips_and_answers_server_ping(
     clippy::await_holding_lock,
     reason = "test intentionally serializes process-wide active OpenAI account model cache across async websocket state setup"
 )]
-async fn test_set_model_clears_persistent_ws_state() {
+async fn selecting_models_without_sending_preserves_persistent_ws_state() {
     let _guard = jcode_base::storage::lock_test_env();
     jcode_base::auth::codex::set_active_account_override(Some(
         "openai-set-model-clears-ws".to_string(),
@@ -268,16 +301,18 @@ async fn test_set_model_clears_persistent_ws_state() {
     });
     jcode_base::provider::populate_account_models_for_scope(
         &provider.catalog_scope(),
-        vec!["gpt-5.3-codex".to_string()],
+        vec!["gpt-5.3-codex".to_string(), "gpt-5.4".to_string()],
     );
+    provider.set_model("gpt-5.4").expect("set initial model");
     let (state, server) = test_persistent_ws_state().await;
     *provider.persistent_ws.lock().await = Some(state);
 
     provider.set_model("gpt-5.3-codex").expect("set model");
+    provider.set_model("gpt-5.4").expect("restore original model");
 
     assert!(
-        provider.persistent_ws.lock().await.is_none(),
-        "changing models should reset the persistent websocket chain"
+        provider.persistent_ws.lock().await.is_some(),
+        "unsent model choices should preserve the persistent websocket chain"
     );
     server.abort();
     jcode_base::auth::codex::set_active_account_override(None);
@@ -332,7 +367,7 @@ fn test_service_tier_can_be_changed_while_a_request_snapshot_is_held() {
     let (tx, rx) = std::sync::mpsc::channel();
     let provider_for_write = Arc::clone(&provider);
     let handle = std::thread::spawn(move || {
-        let result = provider_for_write.set_service_tier("priority");
+        let result = provider_for_write.set_service_tier("flex");
         tx.send(result).expect("send result from setter thread");
     });
 
@@ -349,7 +384,7 @@ fn test_service_tier_can_be_changed_while_a_request_snapshot_is_held() {
         .expect("service tier update should succeed once read lock is released");
     handle.join().expect("join setter thread");
 
-    assert_eq!(provider.service_tier(), Some("priority".to_string()));
+    assert_eq!(provider.service_tier(), Some("flex".to_string()));
 }
 
 /// The OpenAI catalog endpoint and the chat endpoint must be selected by the
@@ -360,6 +395,10 @@ fn test_service_tier_can_be_changed_while_a_request_snapshot_is_held() {
 /// endpoints. If these ever diverge, OpenAI returns 401.
 #[test]
 fn openai_catalog_and_chat_endpoints_agree_on_credential_shape() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let _b = EnvVarGuard::remove("JCODE_OPENAI_API_BASE");
+    let _c = EnvVarGuard::remove("OPENAI_BASE_URL");
+    let _d = EnvVarGuard::remove("OPENAI_API_BASE");
     // API-key-shaped credential: no refresh token, no id token.
     let api_key_creds = CodexCredentials {
         access_token: "sk-platform-key".to_string(),
@@ -494,167 +533,39 @@ fn resolve_api_base_precedence_and_validation() {
     assert_eq!(OpenAIProvider::resolve_api_base(), "https://b.example/v1");
 }
 
-#[test]
-fn test_ultrafast_service_tier_round_trips_into_request_payload() {
+#[tokio::test]
+async fn speed_uses_the_exact_catalog_and_does_not_follow_a_route_change() {
+    use jcode_provider_core::{SpeedAvailability, SpeedMode};
     let _guard = jcode_base::storage::lock_test_env();
-    for credentials in [api_key_creds("sk-ultrafast-test"), oauth_creds()] {
-        let provider = OpenAIProvider::new(credentials);
-        provider.model_service_tiers.write().unwrap().clear();
-        for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-5.6-sol"] {
-            // Avoid depending on the machine's cached account catalog.
-            *provider.model.try_write().unwrap() = model.to_string();
-            assert_eq!(
-                provider.available_service_tiers(),
-                vec!["priority", "ultrafast", "flex"]
-            );
-            for alias in ["ultrafast", "ultra", "Ultra-Fast"] {
-                provider.set_service_tier(alias).unwrap();
-                assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
-            }
-            for is_chatgpt_mode in [false, true] {
-                let request =
-                    provider.response_request_for_model(model, &[], &[], "sys", is_chatgpt_mode);
-                assert_eq!(request["service_tier"], serde_json::json!("ultrafast"));
-            }
-            let fork = provider.fork();
-            assert_eq!(fork.service_tier().as_deref(), Some("ultrafast"));
-            provider.set_service_tier("off").unwrap();
-            assert_eq!(provider.service_tier(), None);
-            assert_eq!(fork.service_tier().as_deref(), Some("ultrafast"));
-            let request = provider.response_request_for_model(model, &[], &[], "sys", true);
-            assert!(request.get("service_tier").is_none());
-        }
-        *provider.model.try_write().unwrap() = "gpt-5.5".to_string();
-        assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
-    }
-}
-
-#[test]
-fn test_ultrafast_rejects_unsupported_models_and_filters_saved_or_retained_tiers() {
-    let _guard = jcode_base::storage::lock_test_env();
-    for credentials in [api_key_creds("sk-ultrafast-test"), oauth_creds()] {
-        let provider = OpenAIProvider::new(credentials);
-        provider.model_service_tiers.write().unwrap().clear();
-        *provider.model.try_write().unwrap() = "gpt-5.5".to_string();
-        provider.set_service_tier("priority").unwrap();
-        for alias in ["ultrafast", "ultra", "ultra-fast"] {
-            assert!(provider.set_service_tier(alias).is_err());
-            assert_eq!(provider.service_tier().as_deref(), Some("priority"));
-        }
-
-        // Exercise exactly the normalized state a saved config override loads.
-        *provider.service_tier.write().unwrap() = OpenAIProvider::load_service_tier(Some("ultra"));
-        assert_eq!(provider.service_tier(), None);
-        for is_chatgpt_mode in [false, true] {
-            let request =
-                provider.response_request_for_model("gpt-5.5", &[], &[], "sys", is_chatgpt_mode);
-            assert!(request.get("service_tier").is_none());
-        }
-
-        *provider.model.try_write().unwrap() = "gpt-6.1-sol".to_string();
-        assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
-        provider.set_service_tier("ultrafast").unwrap();
-        // Gate against the actual request model, not only the selected model.
-        let request = provider.response_request_for_model("gpt-5.5", &[], &[], "sys", false);
-        assert!(request.get("service_tier").is_none());
-        *provider.model.try_write().unwrap() = "gpt-5.5".to_string();
-        assert_eq!(provider.service_tier(), None);
-        *provider.model.try_write().unwrap() = "gpt-6.1-sol".to_string();
-        let request = provider.response_request_for_model("gpt-6.1-sol", &[], &[], "sys", false);
-        assert_eq!(request["service_tier"], "ultrafast");
-        provider.set_service_tier("off").unwrap();
-        assert_eq!(provider.service_tier(), None);
-    }
-}
-
-#[test]
-fn advertised_service_tiers_filter_selection_badge_and_actual_request_model() {
-    let _guard = jcode_base::storage::lock_test_env();
-    for credentials in [api_key_creds("sk-tier-metadata"), oauth_creds()] {
-        let provider = OpenAIProvider::new(credentials);
-        *provider.model.try_write().unwrap() = "gpt-6-astra".into();
+    let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "https://api.openai.com/v1");
+    let oauth = OpenAIProvider::new(oauth_creds());
+    let api = OpenAIProvider::new(api_key_creds("sk-speed-fixture"));
+    let availability = |provider: &OpenAIProvider, model: &str, speed: SpeedMode| {
+        provider.speed_options(model).into_iter().find(|option| option.mode == speed).unwrap().availability
+    };
+    for provider in [&oauth, &api] {
+        *provider.model.try_write().unwrap() = "gpt-6.2-astra".into();
         *provider.model_service_tiers.write().unwrap() = HashMap::from([
-            ("gpt-6-astra".into(), vec!["priority".into()]),
+            ("gpt-6.2-astra".into(), vec!["priority".into()]),
             ("future-ultra".into(), vec!["ultrafast".into()]),
-            ("empty-model".into(), vec![]),
         ]);
-        *provider.service_tier.write().unwrap() = Some("ultrafast".into());
-        assert_eq!(provider.service_tier(), None);
-        assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
-        assert!(provider.set_service_tier("ultra").is_err());
-        for model in [
-            "gpt-6-astra[1m]",
-            "openai/gpt-6-astra",
-            " OPENAI/GPT-6-ASTRA[1m] ",
-        ] {
-            *provider.model.try_write().unwrap() = model.into();
-            assert_eq!(provider.service_tier(), None);
-            assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
-            assert!(provider.set_service_tier("ultra").is_err());
-            assert!(
-                provider
-                    .response_request_for_model(model, &[], &[], "sys", true)
-                    .get("service_tier")
-                    .is_none()
-            );
-        }
-        *provider.model.try_write().unwrap() = "gpt-6-astra".into();
-        for chatgpt in [false, true] {
-            let request =
-                provider.response_request_for_model("gpt-6-astra", &[], &[], "sys", chatgpt);
-            assert!(request.get("service_tier").is_none());
-            let routing = openai_websocket_prewarm::routing_header(
-                chatgpt,
-                request.get("model").and_then(Value::as_str),
-                request.get("service_tier").and_then(Value::as_str),
-            );
-            if chatgpt {
-                assert_eq!(routing.unwrap().1, "model=gpt-6-astra");
-            } else {
-                assert!(routing.is_none());
-            }
-            // Explicit support overrides the legacy model-name allowlist.
-            let request =
-                provider.response_request_for_model("future-ultra", &[], &[], "sys", chatgpt);
-            assert_eq!(request["service_tier"], "ultrafast");
-        }
-        *provider.model.try_write().unwrap() = "future-ultra".into();
-        provider.set_service_tier("ultra").unwrap();
-        assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
-        assert_eq!(
-            provider.available_service_tiers(),
-            vec!["ultrafast", "flex"]
-        );
-        assert!(provider.set_service_tier("priority").is_err());
-        let fork = provider.fork();
-        provider.model_service_tiers.write().unwrap().clear();
-        assert_eq!(fork.service_tier().as_deref(), Some("ultrafast"));
-        assert_eq!(provider.service_tier(), None);
-        // Restore explicit empty metadata and verify flex is always exempt.
-        provider
-            .model_service_tiers
-            .write()
-            .unwrap()
-            .insert("empty-model".into(), vec![]);
-        *provider.model.try_write().unwrap() = "empty-model".into();
-        assert_eq!(provider.available_service_tiers(), vec!["flex"]);
-        assert!(provider.set_service_tier("priority").is_err());
-        provider.set_service_tier("flex").unwrap();
-        assert_eq!(provider.service_tier().as_deref(), Some("flex"));
-        assert_eq!(
-            provider.response_request_for_model("empty-model", &[], &[], "sys", true)["service_tier"],
-            "flex"
-        );
-        // Missing/legacy metadata keeps priority and the old ultra allowlist.
-        *provider.model.try_write().unwrap() = "gpt-6.1-sol".into();
-        provider.set_service_tier("ultra").unwrap();
-        assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
-        assert_eq!(
-            provider.available_service_tiers(),
-            vec!["priority", "ultrafast", "flex"]
-        );
-        assert_eq!(fork.service_tier().as_deref(), Some("ultrafast"));
     }
+    assert_eq!(availability(&api, "gpt-6-astra", SpeedMode::Ultrafast), SpeedAvailability::Available);
+    assert_eq!(availability(&api, "gpt-6.2-astra", SpeedMode::Ultrafast), SpeedAvailability::Unknown);
+    assert_eq!(availability(&oauth, "gpt-6.2-astra", SpeedMode::Ultrafast), SpeedAvailability::Unavailable);
+    assert_eq!(availability(&oauth, "gpt-6.2-astra[1m]", SpeedMode::Fast), SpeedAvailability::Available);
+    assert_eq!(availability(&oauth, "future-ultra", SpeedMode::Ultrafast), SpeedAvailability::Available);
+    assert_eq!(availability(&oauth, "future-uncatalogued", SpeedMode::Ultrafast), SpeedAvailability::Unknown);
+    assert_eq!(availability(&api, "future-ultra", SpeedMode::Ultrafast), SpeedAvailability::Unavailable);
+    oauth.set_speed_mode(SpeedMode::Fast).unwrap();
+    assert!(oauth.set_speed_mode(SpeedMode::Ultrafast).is_err());
+    assert_eq!(oauth.speed_mode(), SpeedMode::Fast);
+    assert_eq!(oauth.fork().speed_mode(), SpeedMode::Standard);
+    oauth.credentials.write().await.account_id = Some("different-account".into());
+    let error = oauth.complete(&[], &[], "fixture", None).await.err().expect("route change must block before transport");
+    assert!(format!("{error:#}").contains("credential route changed"));
+    oauth.set_speed_mode(SpeedMode::Standard).unwrap();
+    assert_eq!(oauth.speed_mode(), SpeedMode::Standard);
 }
 
 #[test]
@@ -712,6 +623,103 @@ fn oauth_creds() -> CodexCredentials {
         account_id: Some("acct".to_string()),
         expires_at: None,
     }
+}
+
+#[test]
+fn oauth_astra_uses_the_configured_compaction_policy_in_responses() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[provider]\nopenai_native_compaction_mode = 'auto'\n\
+         openai_native_compaction_threshold_tokens = 200000\n\
+         [compaction]\nreactive_threshold_tokens = 400000\n",
+    )
+    .unwrap();
+    jcode_base::config::invalidate_config_cache();
+    let provider = OpenAIProvider::new(oauth_creds());
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-6.2-astra".into()],
+    );
+    provider.set_model("gpt-6.2-astra").unwrap();
+
+    let request =
+        provider.response_request_for_model("gpt-6.2-astra", &[][..], &[], "fixture only", true);
+    assert!(!provider.uses_jcode_compaction());
+    assert_eq!(
+        request["context_management"][0]["compact_threshold"],
+        400_000
+    );
+    assert_eq!(provider.native_compaction_threshold_tokens(), Some(400_000));
+}
+
+#[test]
+fn native_responses_uses_the_request_model_and_its_compaction_overrides() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[provider]\nopenai_native_compaction_mode = 'auto'\n\
+         [compaction]\nreactive_threshold_tokens = 400000\n\
+         [compaction.providers.openai]\nreactive_threshold_tokens = 325000\n\
+         [compaction.models.'gpt-6.2-astra']\nreactive_threshold_tokens = 0\n\
+         reactive_threshold = 0.5\nmax_context_tokens = 500000\n",
+    )
+    .unwrap();
+    jcode_base::config::invalidate_config_cache();
+    let mut provider = OpenAIProvider::new(oauth_creds());
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-6.1-sol".into(), "gpt-6.2-astra".into()],
+    );
+    provider.set_model("gpt-6.1-sol").unwrap();
+    assert_eq!(provider.native_compaction_threshold_tokens(), Some(325_000));
+    let request =
+        provider.response_request_for_model("gpt-6.2-astra", &[][..], &[], "fixture only", true);
+    assert_eq!(
+        request["context_management"][0]["compact_threshold"],
+        250_000
+    );
+    provider.set_model("gpt-6.2-astra").unwrap();
+    assert_eq!(provider.native_compaction_threshold_tokens(), Some(250_000));
+    provider.native_compaction_mode = OpenAINativeCompactionMode::Explicit;
+    let request =
+        provider.response_request_for_model("gpt-6.2-astra", &[][..], &[], "fixture only", true);
+    assert!(request.get("context_management").is_none());
+    assert_eq!(provider.native_compaction_threshold_tokens(), None);
+}
+
+#[test]
+fn oauth_astra_context_meter_threshold_matches_responses_request() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    jcode_base::config::invalidate_config_cache();
+    let mut provider = OpenAIProvider::new(oauth_creds());
+    jcode_base::provider::populate_account_models_for_scope(
+        &provider.catalog_scope(),
+        vec!["gpt-6.2-astra".into()],
+    );
+    provider.set_model("gpt-6.2-astra").unwrap();
+    provider.native_compaction_mode = OpenAINativeCompactionMode::Auto;
+    provider.native_compaction_threshold_tokens = 200_000;
+
+    let request =
+        provider.response_request_for_model("gpt-6.2-astra", &[][..], &[], "fixture only", true);
+    assert!(!provider.uses_jcode_compaction());
+    assert_eq!(provider.native_compaction_threshold_tokens(), Some(200_000));
+    assert_eq!(
+        request["context_management"][0]["compact_threshold"],
+        200_000
+    );
+    assert_eq!(provider.context_window(), 1_000_000);
+    assert_eq!(
+        provider.active_long_context_pricing(),
+        jcode_provider_core::context_pricing::LongContextPricing::Unknown,
+    );
 }
 
 /// Regression: the ChatGPT/Codex OAuth catalog and the platform API-key

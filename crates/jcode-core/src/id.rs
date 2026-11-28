@@ -206,6 +206,10 @@ pub fn session_icon(name: &str) -> &'static str {
         .unwrap_or("💫")
 }
 
+pub fn is_memorable_session_name(name: &str) -> bool {
+    SESSION_NAMES.iter().any(|(known, _)| *known == name)
+}
+
 /// Get an emoji icon for a server/location name word.
 pub fn server_icon(name: &str) -> &'static str {
     SERVER_MODIFIERS

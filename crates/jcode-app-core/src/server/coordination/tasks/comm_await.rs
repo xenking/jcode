@@ -1,0 +1,997 @@
+use super::await_members_state::{
+    PersistedAwaitMembersState, all_pending_await_members_including_expired, ensure_pending_state,
+    load_state, persist_final_response, request_key, save_state, stopped_member,
+};
+use super::{AwaitMembersRuntime, SwarmEvent, SwarmMember};
+use crate::bus::{Bus, BusEvent, SwarmAwaitCompleted, UiActivity};
+use crate::comm_format::format_comm_awaited_members_with_reports;
+use crate::protocol::{AwaitedMemberStatus, ServerEvent};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::{RwLock, broadcast, mpsc};
+
+async fn awaited_member_snapshot(
+    req_session_id: &str,
+    swarm_id: &str,
+    requested_ids: &[String],
+    target_status: &[String],
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+) -> Option<Vec<AwaitedMemberStatus>> {
+    let watch_ids: Vec<String> = if requested_ids.is_empty() {
+        let mut watch_ids: Vec<String> = {
+            let swarms = swarms_by_id.read().await;
+            swarms
+                .get(swarm_id)?
+                .iter()
+                .filter(|session_id| session_id.as_str() != req_session_id)
+                .cloned()
+                .collect()
+        };
+        watch_ids.sort();
+        watch_ids
+    } else {
+        requested_ids.to_vec()
+    };
+
+    let live = {
+        let members = swarm_members.read().await;
+        watch_ids
+            .iter()
+            .map(|session_id| {
+                let mut ambiguous = false;
+                let member = members.get(session_id).or_else(|| {
+                    let mut matches = members.values().filter(|member| {
+                        member.swarm_id.as_deref() == Some(swarm_id)
+                            && member.friendly_name.as_deref() == Some(session_id.as_str())
+                    });
+                    let first = matches.next()?;
+                    ambiguous = matches.next().is_some();
+                    (!ambiguous).then_some(first)
+                });
+                (
+                    member.map(|member| {
+                        (
+                            member.session_id.clone(),
+                            member.friendly_name.clone(),
+                            member.status.clone(),
+                            member.latest_completion_report.clone(),
+                        )
+                    }),
+                    ambiguous,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    Some(
+        watch_ids
+            .into_iter()
+            .zip(live)
+            .map(|(session_id, (member, ambiguous))| {
+                let (resolved_id, name, status, completion_report) = member
+                    .or_else(|| {
+                        (!ambiguous)
+                            .then(|| stopped_member(swarm_id, &session_id))
+                            .flatten()
+                            .map(|(id, name)| (id, name, "stopped".to_owned(), None))
+                    })
+                    .unwrap_or((session_id, None, "unknown".to_owned(), None));
+                let done = status != "unknown" && target_status.contains(&status);
+                AwaitedMemberStatus {
+                    session_id: resolved_id,
+                    friendly_name: name,
+                    status,
+                    done,
+                    completion_report,
+                }
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+pub(super) async fn awaited_member_statuses(
+    req_session_id: &str,
+    swarm_id: &str,
+    requested_ids: &[String],
+    target_status: &[String],
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+) -> Vec<AwaitedMemberStatus> {
+    awaited_member_snapshot(
+        req_session_id,
+        swarm_id,
+        requested_ids,
+        target_status,
+        swarm_members,
+        swarms_by_id,
+    )
+    .await
+    .unwrap_or_default()
+}
+
+fn include_stopped_swarm_members(
+    statuses: &mut Option<Vec<AwaitedMemberStatus>>,
+    state: &PersistedAwaitMembersState,
+) {
+    // A missing registry is not an empty, hydrated swarm.
+    let Some(statuses) = statuses.as_mut() else {
+        return;
+    };
+    if state.stopped_members.is_empty() {
+        return;
+    }
+    let done = state.target_status.iter().any(|status| status == "stopped");
+    for stopped in &state.stopped_members {
+        if !statuses
+            .iter()
+            .any(|member| member.session_id == stopped.session_id)
+        {
+            statuses.push(AwaitedMemberStatus {
+                session_id: stopped.session_id.clone(),
+                friendly_name: stopped.friendly_name.clone(),
+                status: "stopped".to_owned(),
+                done,
+                completion_report: None,
+            });
+        }
+    }
+    statuses.sort_unstable_by(|a, b| a.session_id.cmp(&b.session_id));
+}
+
+fn short_member_name(member: &AwaitedMemberStatus) -> String {
+    member.friendly_name.clone().unwrap_or_else(|| {
+        member
+            .session_id
+            .strip_prefix("session_")
+            .and_then(|id| id.split('_').next())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| member.session_id.chars().take(12).collect())
+    })
+}
+
+pub(super) fn timeout_summary(member_statuses: &[AwaitedMemberStatus]) -> String {
+    let pending: Vec<String> = member_statuses
+        .iter()
+        .filter(|member| !member.done)
+        .map(|member| format!("{} ({})", short_member_name(member), member.status))
+        .collect();
+    if pending.is_empty() {
+        return "Timed out. No watched members are available.".to_string();
+    }
+    format!("Timed out. Still waiting on: {}", pending.join(", "))
+}
+
+fn completion_summary(member_statuses: &[AwaitedMemberStatus]) -> String {
+    let done_names: Vec<String> = member_statuses.iter().map(short_member_name).collect();
+    format!(
+        "All {} members are done: {}",
+        done_names.len(),
+        done_names.join(", ")
+    )
+}
+
+pub(super) fn completion_mode(mode: Option<&str>) -> &str {
+    match mode {
+        Some("any") => "any",
+        _ => "all",
+    }
+}
+
+pub(super) fn mode_satisfied(member_statuses: &[AwaitedMemberStatus], mode: Option<&str>) -> bool {
+    match completion_mode(mode) {
+        "any" => member_statuses.iter().any(|status| status.done),
+        _ => member_statuses.iter().all(|status| status.done),
+    }
+}
+
+pub(super) fn mode_summary(member_statuses: &[AwaitedMemberStatus], mode: Option<&str>) -> String {
+    match completion_mode(mode) {
+        "any" => {
+            let matching: Vec<String> = member_statuses
+                .iter()
+                .filter(|member| member.done)
+                .map(short_member_name)
+                .collect();
+            format!(
+                "Matched {} member{}: {}",
+                matching.len(),
+                if matching.len() == 1 { "" } else { "s" },
+                matching.join(", ")
+            )
+        }
+        _ => completion_summary(member_statuses),
+    }
+}
+
+pub(super) fn deadline_to_instant(deadline_unix_ms: u64) -> tokio::time::Instant {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    tokio::time::Instant::now() + Duration::from_millis(deadline_unix_ms.saturating_sub(now_ms))
+}
+
+pub(super) async fn respond_to_waiters(
+    runtime: &AwaitMembersRuntime,
+    key: &str,
+    completed: bool,
+    members: Vec<AwaitedMemberStatus>,
+    summary: String,
+) {
+    for (request_id, client_event_tx) in runtime.take_waiters(key).await {
+        let _ = client_event_tx.send(ServerEvent::CommAwaitMembersResponse {
+            id: request_id,
+            completed,
+            members: members.clone(),
+            summary: summary.clone(),
+            background_started: false,
+        });
+    }
+    runtime.clear_active(key).await;
+}
+
+/// Build the swarm-flavored completion notification body delivered to the
+/// requesting agent when a backgrounded await finishes. Reuses the same
+/// member-status + completion-report rendering as the blocking tool result so
+/// the agent sees consistent output whether it waited inline or in the
+/// background.
+fn background_completion_notification(
+    completed: bool,
+    summary: &str,
+    members: &[AwaitedMemberStatus],
+) -> String {
+    let reports = HashMap::new();
+    let body = format_comm_awaited_members_with_reports(completed, summary, members, &reports);
+    format!("🐝 **Swarm await finished**\n\n{}", body)
+}
+
+/// Interval between progress check-ins for a pending background await, or
+/// `None` when disabled (`server.await_checkin_minutes = 0`).
+fn checkin_interval() -> Option<tokio::time::Interval> {
+    let minutes = crate::config::config().server.await_checkin_minutes;
+    if minutes == 0 {
+        return None;
+    }
+    let period = Duration::from_secs(minutes.saturating_mul(60));
+    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    Some(interval)
+}
+
+async fn next_checkin(interval: &mut Option<tokio::time::Interval>) {
+    match interval {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+fn checkin_event(
+    state: &PersistedAwaitMembersState,
+    members: &[AwaitedMemberStatus],
+) -> SwarmAwaitCompleted {
+    let done = members.iter().filter(|member| member.done).count();
+    let waited_minutes =
+        super::durable_state::now_unix_ms().saturating_sub(state.created_at_unix_ms) / 60_000;
+    let summary = format!(
+        "Still waiting after {waited_minutes} min: {done} of {} member(s) finished. The await keeps running.",
+        members.len()
+    );
+    let body = format_comm_awaited_members_with_reports(false, &summary, members, &HashMap::new());
+    SwarmAwaitCompleted {
+        session_id: state.session_id.clone(),
+        completed: false,
+        summary,
+        notification: format!("🐝 **Swarm await still pending**\n\n{body}"),
+        notify: state.notify,
+        wake: state.wake,
+        checkin: true,
+    }
+}
+
+/// Reload the latest persisted pending state for `state.key`, if any. Delivery
+/// prefs (background/notify/wake) can be updated by duplicate requests after a
+/// watcher captured its own copy at spawn, so re-reading before exit/finalize
+/// keeps the watcher in sync with what the requesting tool was last told.
+fn refresh_pending_state(state: &PersistedAwaitMembersState) -> Option<PersistedAwaitMembersState> {
+    load_state(&state.key).filter(|current| {
+        current.created_at_unix_ms == state.created_at_unix_ms && current.is_pending()
+    })
+}
+
+/// Persist the terminal result, reply to any blocking socket waiters, and, when
+/// the await was started in background mode, publish a `SwarmAwaitCompleted`
+/// bus event so the server's bus monitor can wake/notify the requesting agent
+/// the same way background tasks do.
+async fn finalize_await(
+    runtime: &AwaitMembersRuntime,
+    state: &PersistedAwaitMembersState,
+    completed: bool,
+    members: Vec<AwaitedMemberStatus>,
+    summary: String,
+) {
+    if let Some(event) = finish_await(runtime, state, completed, members, summary).await {
+        Bus::global().publish(BusEvent::SwarmAwaitCompleted(event));
+    }
+}
+
+/// Finalize durably before delivery. Recovery can combine newly finalized
+/// results without replaying one notification/wake per historical wait.
+pub(super) async fn finish_await(
+    runtime: &AwaitMembersRuntime,
+    state: &PersistedAwaitMembersState,
+    completed: bool,
+    members: Vec<AwaitedMemberStatus>,
+    summary: String,
+) -> Option<SwarmAwaitCompleted> {
+    let _activity = crate::runtime_activity::global()
+        .enter_session(&state.session_id)
+        .await;
+    // Deliver with the latest persisted prefs: a duplicate request may have
+    // changed background/notify/wake after the caller captured this copy.
+    let state = refresh_pending_state(state).unwrap_or_else(|| state.clone());
+    let (state, newly_finalized) =
+        persist_final_response(&state, completed, members.clone(), summary.clone());
+
+    let event = if newly_finalized
+        && state.background
+        && (state.notify || state.wake)
+        && !crate::turn_activity::session_is_stopped(&state.session_id)
+    {
+        let notification = background_completion_notification(completed, &summary, &members);
+        Some(SwarmAwaitCompleted {
+            session_id: state.session_id.clone(),
+            completed,
+            summary: summary.clone(),
+            notification,
+            notify: state.notify,
+            wake: state.wake,
+            checkin: false,
+        })
+    } else {
+        None
+    };
+
+    let Some(result) = state.final_response.as_ref() else {
+        crate::logging::error(&format!(
+            "Await {} has no final response after finalization",
+            state.dependency_id()
+        ));
+        // Even a violated finalization invariant must release socket waiters.
+        respond_to_waiters(
+            runtime,
+            &state.dependency_id(),
+            false,
+            members,
+            "Await finalization failed: no terminal response was produced".to_string(),
+        )
+        .await;
+        return None;
+    };
+    respond_to_waiters(
+        runtime,
+        &state.dependency_id(),
+        result.completed,
+        result.members.clone(),
+        result.summary.clone(),
+    )
+    .await;
+    event
+}
+
+pub(super) async fn stop_session_awaits(runtime: &AwaitMembersRuntime, session_id: &str) {
+    for state in all_pending_await_members_including_expired()
+        .into_iter()
+        .filter(|state| state.session_id == session_id)
+    {
+        finish_await(
+            runtime,
+            &state,
+            false,
+            Vec::new(),
+            "Await cancelled because the requesting session was stopped".into(),
+        )
+        .await;
+    }
+}
+
+pub(super) async fn spawn_or_resume_await_members(
+    state: PersistedAwaitMembersState,
+    req_session_id: String,
+    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    swarm_event_tx: broadcast::Sender<SwarmEvent>,
+    await_members_runtime: AwaitMembersRuntime,
+) {
+    let key = state.dependency_id();
+    let swarm_id = state.swarm_id.clone();
+    let requested_ids = state.requested_ids.clone();
+    let target_status = state.target_status.clone();
+    let mode = state.mode.clone();
+
+    tokio::spawn(async move {
+        let mut event_rx = swarm_event_tx.subscribe();
+        let deadline = deadline_to_instant(state.deadline_unix_ms);
+        let mut recheck = tokio::time::interval(Duration::from_secs(1));
+        recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        recheck.tick().await;
+        let mut cache_wait = None;
+        let mut checkin = checkin_interval();
+
+        loop {
+            let mut snapshot = awaited_member_snapshot(
+                &req_session_id,
+                &swarm_id,
+                &requested_ids,
+                &target_status,
+                &swarm_members,
+                &swarms_by_id,
+            )
+            .await;
+            let Some(latest) = refresh_pending_state(&state) else {
+                return;
+            };
+            include_stopped_swarm_members(&mut snapshot, &latest);
+            let member_statuses = snapshot.unwrap_or_default();
+
+            // Empty membership during startup is not successful completion.
+            if !member_statuses.is_empty() && mode_satisfied(&member_statuses, mode.as_deref()) {
+                drop(cache_wait.take());
+                let summary = mode_summary(&member_statuses, mode.as_deref());
+                finalize_await(
+                    &await_members_runtime,
+                    &state,
+                    true,
+                    member_statuses,
+                    summary,
+                )
+                .await;
+                return;
+            }
+
+            // Blocking waits stop watching once every socket waiter has
+            // disconnected. Background watchers have no socket waiter, so they
+            // keep running until they resolve or hit the deadline, delivering
+            // the result via notify/wake. Re-read the persisted prefs here: a
+            // duplicate request may have upgraded this wait to background mode
+            // after this watcher was spawned with a blocking-state copy.
+            if !latest.background && await_members_runtime.retain_open_waiters(&key).await == 0 {
+                await_members_runtime.clear_active(&key).await;
+                return;
+            }
+
+            // Both forms of waiting on one's own workers keep the cache warm.
+            let wait_kind = if !latest.background {
+                Some(crate::cache_keepalive::WaitKind::Blocking)
+            } else if latest.wake
+                && crate::config::config().server.wake_mode == crate::config::WakeMode::Internal
+            {
+                Some(crate::cache_keepalive::WaitKind::Background)
+            } else {
+                None
+            };
+            if cache_wait.as_ref().map(crate::cache_keepalive::Wait::kind) != wait_kind {
+                cache_wait = wait_kind.and_then(|kind| {
+                    crate::cache_keepalive::Wait::begin(
+                        &req_session_id,
+                        kind,
+                        latest.deadline_unix_ms,
+                    )
+                });
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    drop(cache_wait.take());
+                    let summary = timeout_summary(&member_statuses);
+                    finalize_await(&await_members_runtime, &state, false, member_statuses, summary).await;
+                    return;
+                }
+                // Re-resolve even without an event: a restored member can appear
+                // without broadcasting a change, or belong to another swarm.
+                _ = recheck.tick() => {}
+                // A long wait must not silence its coordinator: wake it with
+                // progress while the await keeps running.
+                _ = next_checkin(&mut checkin) => {
+                    if latest.background
+                        && (latest.notify || latest.wake)
+                        && !crate::turn_activity::session_is_stopped(&latest.session_id)
+                    {
+                        Bus::global().publish(BusEvent::SwarmAwaitCompleted(
+                            checkin_event(&latest, &member_statuses),
+                        ));
+                    }
+                }
+                event = event_rx.recv() => {
+                    match event {
+                        Ok(event) => {
+                            if event.swarm_id.as_deref() != Some(swarm_id.as_str()) {
+                                continue;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            // Dropped events are recoverable: the loop re-reads
+                            // member statuses from shared state at the top, so
+                            // just keep watching instead of orphaning the wait.
+                            crate::logging::info(&format!(
+                                "await_members watcher lagged by {} swarm events; re-checking statuses",
+                                n
+                            ));
+                            continue;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            await_members_runtime.clear_active(&key).await;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+pub(super) struct CommAwaitMembersContext<'a> {
+    pub client_event_tx: &'a mpsc::UnboundedSender<ServerEvent>,
+    pub swarm_members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
+    pub swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    pub swarm_event_tx: &'a broadcast::Sender<SwarmEvent>,
+    pub await_members_runtime: &'a AwaitMembersRuntime,
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "await request carries protocol fields plus delivery flags; grouping would churn many call sites"
+)]
+pub(super) async fn handle_comm_await_members(
+    id: u64,
+    req_session_id: String,
+    target_status: Vec<String>,
+    requested_ids: Vec<String>,
+    mode: Option<String>,
+    timeout_secs: Option<u64>,
+    background: bool,
+    notify: bool,
+    wake: bool,
+    ctx: CommAwaitMembersContext<'_>,
+) {
+    let swarm_id = {
+        let members = ctx.swarm_members.read().await;
+        members
+            .get(&req_session_id)
+            .and_then(|member| member.swarm_id.clone())
+    };
+
+    if let Some(swarm_id) = swarm_id {
+        let key = request_key(
+            &req_session_id,
+            &swarm_id,
+            &requested_ids,
+            &target_status,
+            mode.as_deref(),
+        );
+        let mut persisted = load_state(&key);
+
+        let mut snapshot = awaited_member_snapshot(
+            &req_session_id,
+            &swarm_id,
+            &requested_ids,
+            &target_status,
+            ctx.swarm_members,
+            ctx.swarms_by_id,
+        )
+        .await;
+
+        if let Some(state) = persisted.as_ref().filter(|state| state.is_pending()) {
+            include_stopped_swarm_members(&mut snapshot, state);
+        }
+        let initial_statuses = snapshot.unwrap_or_default();
+
+        if let Some(final_response) = persisted
+            .as_ref()
+            .and_then(|state| state.final_response.clone())
+        {
+            let same_members = initial_statuses.len() == final_response.members.len()
+                && initial_statuses.iter().all(|current| {
+                    final_response
+                        .members
+                        .iter()
+                        .any(|previous| previous.session_id == current.session_id)
+                });
+            let current_still_satisfies = initial_statuses.is_empty()
+                || (same_members && mode_satisfied(&initial_statuses, mode.as_deref()));
+            if current_still_satisfies {
+                let _ = ctx
+                    .client_event_tx
+                    .send(ServerEvent::CommAwaitMembersResponse {
+                        id,
+                        completed: final_response.completed,
+                        members: final_response.members,
+                        summary: final_response.summary,
+                        background_started: false,
+                    });
+                return;
+            }
+
+            persisted = None;
+        }
+
+        if initial_statuses.is_empty() {
+            let _ = ctx
+                .client_event_tx
+                .send(ServerEvent::CommAwaitMembersResponse {
+                    id,
+                    completed: true,
+                    members: vec![],
+                    summary: "No other members in swarm to wait for.".to_string(),
+                    background_started: false,
+                });
+            return;
+        }
+
+        // Already satisfied right now: answer inline regardless of background
+        // mode. There is nothing to wait for, so the agent should get the
+        // result immediately instead of a "watching in background" stub.
+        if mode_satisfied(&initial_statuses, mode.as_deref()) {
+            let summary = mode_summary(&initial_statuses, mode.as_deref());
+            let _ = ctx
+                .client_event_tx
+                .send(ServerEvent::CommAwaitMembersResponse {
+                    id,
+                    completed: true,
+                    members: initial_statuses,
+                    summary,
+                    background_started: false,
+                });
+            return;
+        }
+
+        let requested_deadline = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+            + Duration::from_secs(timeout_secs.unwrap_or(3600)).as_millis() as u64;
+        let mut state = persisted.unwrap_or_else(|| {
+            ensure_pending_state(
+                &key,
+                &req_session_id,
+                &swarm_id,
+                &requested_ids,
+                &target_status,
+                mode.as_deref(),
+                requested_deadline,
+                background,
+                notify,
+                wake,
+            )
+        });
+
+        // When reusing a persisted pending state (e.g. a resumed call after
+        // reload, or a duplicate request), let the latest call's delivery prefs
+        // win so the watcher and tool response stay in sync. The deadline is
+        // intentionally preserved from the original request.
+        if state.background != background || state.notify != notify || state.wake != wake {
+            state.background = background;
+            state.notify = notify;
+            state.wake = wake;
+            save_state(&state);
+        }
+
+        let already_expired = state.deadline_unix_ms
+            <= SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+        // A completed generation may still be draining socket waiters while
+        // this new one starts. Never share runtime ownership between them.
+        let runtime_key = state.dependency_id();
+
+        // Background mode: hand off to a detached watcher and answer the tool
+        // immediately so the requesting turn stays responsive. Completion is
+        // delivered later via notify/wake.
+        if background {
+            let dependency_id = state.dependency_id();
+            if already_expired {
+                let summary = timeout_summary(&initial_statuses);
+                finalize_await(
+                    ctx.await_members_runtime,
+                    &state,
+                    false,
+                    initial_statuses.clone(),
+                    summary.clone(),
+                )
+                .await;
+                // Answer the requesting tool call directly: no waiter was
+                // registered for this request (waiters are only added in the
+                // blocking branch), so without this the socket call would hang
+                // until its client-side timeout.
+                let _ = ctx
+                    .client_event_tx
+                    .send(ServerEvent::CommAwaitMembersResponse {
+                        id,
+                        completed: false,
+                        members: initial_statuses,
+                        summary,
+                        background_started: false,
+                    });
+                return;
+            }
+
+            if ctx
+                .await_members_runtime
+                .mark_active_if_new(&runtime_key)
+                .await
+            {
+                publish_await_started_card(&state, &initial_statuses);
+                spawn_or_resume_await_members(
+                    state,
+                    req_session_id,
+                    ctx.swarm_members.clone(),
+                    ctx.swarms_by_id.clone(),
+                    ctx.swarm_event_tx.clone(),
+                    ctx.await_members_runtime.clone(),
+                )
+                .await;
+            }
+
+            let summary = format!(
+                "{}\n\nDependency ID: `{dependency_id}`. Set todo.waiting_on to [\"{dependency_id}\"] for work that must wait. It blocks only while this await is pending and releases on completion or timeout, including across reloads.",
+                background_started_summary(&initial_statuses, mode.as_deref(), wake)
+            );
+            let _ = ctx
+                .client_event_tx
+                .send(ServerEvent::CommAwaitMembersResponse {
+                    id,
+                    completed: false,
+                    members: initial_statuses,
+                    summary,
+                    background_started: true,
+                });
+            return;
+        }
+
+        // Blocking mode: register a socket waiter that the watcher resolves.
+        ctx.await_members_runtime
+            .add_waiter(&runtime_key, id, ctx.client_event_tx)
+            .await;
+
+        if already_expired {
+            let summary = timeout_summary(&initial_statuses);
+            let _ =
+                persist_final_response(&state, false, initial_statuses.clone(), summary.clone());
+            respond_to_waiters(
+                ctx.await_members_runtime,
+                &runtime_key,
+                false,
+                initial_statuses,
+                summary,
+            )
+            .await;
+            return;
+        }
+
+        if ctx
+            .await_members_runtime
+            .mark_active_if_new(&runtime_key)
+            .await
+        {
+            spawn_or_resume_await_members(
+                state,
+                req_session_id,
+                ctx.swarm_members.clone(),
+                ctx.swarms_by_id.clone(),
+                ctx.swarm_event_tx.clone(),
+                ctx.await_members_runtime.clone(),
+            )
+            .await;
+        }
+    } else {
+        let _ = ctx.client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
+            retry_after_secs: None,
+        });
+    }
+}
+
+/// One-line summary returned to the tool when a wait is handed off to a
+/// background watcher.
+fn background_started_summary(
+    member_statuses: &[AwaitedMemberStatus],
+    mode: Option<&str>,
+    wake: bool,
+) -> String {
+    let pending: Vec<String> = member_statuses
+        .iter()
+        .filter(|member| !member.done)
+        .map(short_member_name)
+        .collect();
+    let scope = match completion_mode(mode) {
+        "any" => "any of",
+        _ => "all of",
+    };
+    let delivery = if wake {
+        "You'll be woken with the result when it resolves."
+    } else {
+        "A notification will appear when it resolves."
+    };
+    if pending.is_empty() {
+        format!("Watching swarm members in the background. {}", delivery)
+    } else {
+        format!(
+            "Watching {} {} in the background. {}",
+            scope,
+            pending.join(", "),
+            delivery
+        )
+    }
+}
+
+/// Emit a swarm-flavored "await started" activity card so attached clients show
+/// that a background watcher is now running for this session.
+fn publish_await_started_card(
+    state: &PersistedAwaitMembersState,
+    member_statuses: &[AwaitedMemberStatus],
+) {
+    if !state.notify {
+        return;
+    }
+    let pending: Vec<String> = member_statuses
+        .iter()
+        .filter(|member| !member.done)
+        .map(short_member_name)
+        .collect();
+    let watching = if pending.is_empty() {
+        "swarm members".to_string()
+    } else {
+        pending.join(", ")
+    };
+    Bus::global().publish(BusEvent::UiActivity(UiActivity::background(
+        Some(state.session_id.clone()),
+        format!(
+            "🐝 **Swarm await started** · watching `{}`\n\nJcode is waiting for these members in the background and will report back when they finish.",
+            watching
+        ),
+        Some(format!("Swarm await started · {}", watching)),
+    )));
+}
+
+/// Re-spawn detached watchers for every pending background `await_members`
+/// state after a server (re)start. Blocking waits are intentionally skipped:
+/// their requesting tool call is parked on a socket that no longer exists, and
+/// the agent is told to rerun the wait after reload. Background waits, by
+/// contrast, deliver via notify/wake, so they can resume transparently.
+pub(super) async fn resume_background_awaits(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    await_members_runtime: &AwaitMembersRuntime,
+) {
+    let pending: Vec<PersistedAwaitMembersState> = all_pending_await_members_including_expired()
+        .into_iter()
+        .filter(|state| state.background)
+        .collect();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let mut resumed = 0usize;
+    let mut expired = 0usize;
+    let mut recovered: HashMap<String, Vec<(SwarmAwaitCompleted, Vec<AwaitedMemberStatus>)>> =
+        HashMap::new();
+    for state in pending {
+        if crate::turn_activity::session_is_stopped(&state.session_id) {
+            finish_await(
+                await_members_runtime,
+                &state,
+                false,
+                Vec::new(),
+                "Await cancelled because the requesting session was stopped".into(),
+            )
+            .await;
+            continue;
+        }
+        // Deadline passed while the server was down: the wait can never
+        // resolve, so finalize it as a timeout now so the promised
+        // notify/wake still fires instead of the await silently vanishing.
+        if state.deadline_unix_ms <= now_ms {
+            let mut snapshot = awaited_member_snapshot(
+                &state.session_id,
+                &state.swarm_id,
+                &state.requested_ids,
+                &state.target_status,
+                swarm_members,
+                swarms_by_id,
+            )
+            .await;
+            include_stopped_swarm_members(&mut snapshot, &state);
+            let member_statuses = snapshot.unwrap_or_default();
+            let (completed, summary) = if !member_statuses.is_empty()
+                && mode_satisfied(&member_statuses, state.mode.as_deref())
+            {
+                (true, mode_summary(&member_statuses, state.mode.as_deref()))
+            } else {
+                (false, timeout_summary(&member_statuses))
+            };
+            if let Some(mut event) = finish_await(
+                await_members_runtime,
+                &state,
+                completed,
+                member_statuses.clone(),
+                summary,
+            )
+            .await
+            {
+                // Missing workers after restart are not actionable new reports.
+                // Keep the promised UI notice, but do not revive an idle agent
+                // just to explain that historical workers are no longer known.
+                if member_statuses
+                    .iter()
+                    .all(|member| member.status == "unknown")
+                {
+                    event.wake = false;
+                }
+                recovered
+                    .entry(state.session_id.clone())
+                    .or_default()
+                    .push((event, member_statuses));
+            }
+            expired += 1;
+            continue;
+        }
+
+        let key = state.dependency_id();
+        if await_members_runtime.mark_active_if_new(&key).await {
+            let req_session_id = state.session_id.clone();
+            spawn_or_resume_await_members(
+                state,
+                req_session_id,
+                swarm_members.clone(),
+                swarms_by_id.clone(),
+                swarm_event_tx.clone(),
+                await_members_runtime.clone(),
+            )
+            .await;
+            resumed += 1;
+        }
+    }
+
+    for (session_id, results) in recovered {
+        let count = results.len();
+        let completed = results.iter().all(|(event, _)| event.completed);
+        let notify = results.iter().any(|(event, _)| event.notify);
+        let wake = results.iter().any(|(event, _)| event.wake);
+        let timed_out = results.iter().filter(|(event, _)| !event.completed).count();
+        let summary = format!(
+            "Recovered {count} swarm wait(s) after restart: {} completed, {timed_out} timed out. Missing workers are not confirmed complete.",
+            count - timed_out,
+        );
+        let mut members: Vec<AwaitedMemberStatus> = results
+            .into_iter()
+            .flat_map(|(_, members)| members)
+            .collect();
+        members.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        members.dedup_by(|a, b| a.session_id == b.session_id);
+        let notification = background_completion_notification(completed, &summary, &members);
+        Bus::global().publish(BusEvent::SwarmAwaitCompleted(SwarmAwaitCompleted {
+            session_id,
+            completed,
+            summary,
+            notification,
+            notify,
+            wake,
+            checkin: false,
+        }));
+    }
+
+    if resumed > 0 || expired > 0 {
+        crate::logging::info(&format!(
+            "Resumed {} background swarm await watcher(s) after startup ({} finalized as expired)",
+            resumed, expired
+        ));
+    }
+}

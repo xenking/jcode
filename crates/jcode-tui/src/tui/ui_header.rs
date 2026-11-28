@@ -7,13 +7,37 @@ use crate::auth::{AuthState, AuthStatus};
 use crate::tui::color_support::rgb;
 use crate::tui::connection_type_icon;
 use ratatui::prelude::*;
+use unicode_width::UnicodeWidthStr;
 #[path = "ui_header/account_router.rs"]
 mod account_router;
+#[path = "ui_header/routing_chip.rs"]
+mod routing_chip;
 
 pub(super) fn status_usage_accounts(
     remote: bool,
 ) -> Vec<(&'static str, crate::usage::AccountUsageSnapshot)> {
+    #[cfg(test)]
+    if OMIT_STATUS_USAGE_ACCOUNTS.get() {
+        return Vec::new();
+    }
     account_router::status_usage_accounts(remote)
+}
+
+#[cfg(test)]
+thread_local! {
+    static OMIT_STATUS_USAGE_ACCOUNTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn without_status_usage_accounts<R>(draw: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OMIT_STATUS_USAGE_ACCOUNTS.set(self.0);
+        }
+    }
+    let _restore = Restore(OMIT_STATUS_USAGE_ACCOUNTS.replace(true));
+    draw()
 }
 
 /// UI chrome is single-line. Budget the same trailing cell as the transcript
@@ -85,11 +109,21 @@ fn model_header_line(
     upstream: Option<&str>,
     width: usize,
     placeholder: bool,
+    chip: Option<&crate::tui::RoutingChip>,
 ) -> Line<'static> {
     use unicode_width::UnicodeWidthStr;
     let mut spans = Vec::new();
     let mut used = nice_model.width();
-    let budget = width.saturating_sub(4);
+    let mut budget = width.saturating_sub(4);
+    // The routed account outranks the hint, provider and upstream text, so it
+    // is sized first and they give way to it. It never displaces the model.
+    let chip_spans = chip.filter(|_| !placeholder).and_then(|chip| {
+        let sep = routing_chip::CHIP_SEPARATOR.width();
+        routing_chip::fit(chip, budget.saturating_sub(used + sep))
+    });
+    if let Some(chip_spans) = &chip_spans {
+        budget -= routing_chip::CHIP_SEPARATOR.width() + routing_chip::spans_width(chip_spans);
+    }
     if !placeholder && !nice_model.is_empty() {
         let hint = "/model to switch · ";
         if used + hint.width() <= budget {
@@ -110,6 +144,10 @@ fn model_header_line(
         if used + suffix.width() <= budget {
             spans.push(Span::styled(suffix, Style::default().fg(dim_color())));
         }
+    }
+    if let Some(chip_spans) = chip_spans {
+        spans.push(Span::raw(routing_chip::CHIP_SEPARATOR));
+        spans.extend(chip_spans);
     }
     Line::from(spans).alignment(Alignment::Left)
 }
@@ -166,6 +204,7 @@ pub(crate) fn build_preview_header(
             None,
             width as usize,
             model_is_placeholder(model),
+            None,
         ));
     }
     // Resuming a local transcript runs in this client, so its version belongs
@@ -175,24 +214,36 @@ pub(crate) fn build_preview_header(
     }
     fit_header_lines(lines, width)
 }
+/// Per-test changelog fixture. Thread-local, not process-wide: every test that
+/// draws a header reads it, and a fixture visible to tests that never asked for
+/// it injected an "Updates" box into their frames.
 #[cfg(test)]
-use std::sync::OnceLock;
+thread_local! {
+    static UNSEEN_CHANGELOG_OVERRIDE: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
-fn unseen_changelog_entries_override() -> &'static std::sync::Mutex<Option<Vec<String>>> {
-    static OVERRIDE: OnceLock<std::sync::Mutex<Option<Vec<String>>>> = OnceLock::new();
-    OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
+fn unseen_changelog_entries_override_is_set() -> bool {
+    UNSEEN_CHANGELOG_OVERRIDE.with(|entries| entries.borrow().is_some())
 }
 
 fn with_unseen_changelog_entries<R>(render: impl FnOnce(&[String]) -> R) -> R {
     #[cfg(test)]
-    {
-        if let Ok(guard) = unseen_changelog_entries_override().lock()
-            && let Some(entries) = guard.as_ref()
-        {
-            return render(entries);
+    let render = {
+        // Borrow the fixture in place: production rendering never copies the
+        // entries, and the zero-copy test asserts pointer identity.
+        let mut pending = Some(render);
+        let rendered = UNSEEN_CHANGELOG_OVERRIDE.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|entries| (pending.take().expect("render runs once"))(entries))
+        });
+        if let Some(rendered) = rendered {
+            return rendered;
         }
-    }
+        pending.take().expect("render runs once")
+    };
     render(get_unseen_changelog_entries())
 }
 
@@ -205,14 +256,10 @@ fn unseen_changelog_entries() -> Vec<String> {
 
 #[cfg(test)]
 pub(crate) fn set_unseen_changelog_entries_override_for_tests(entries: Option<Vec<String>>) {
-    let mut guard = unseen_changelog_entries_override()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = entries;
+    UNSEEN_CHANGELOG_OVERRIDE.with(|slot| *slot.borrow_mut() = entries);
 }
 
 /// Keep an override in place only while its owning render test is in scope.
-/// Callers must hold the shared render-state test lock before creating this guard.
 #[cfg(test)]
 pub(crate) struct ChangelogEntriesOverrideGuard;
 
@@ -615,23 +662,8 @@ fn abbreviate_home(path: &str) -> String {
 
 #[cfg(test)]
 fn truncate_to_width(text: &str, width: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= width {
-        return text.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    if width == 1 {
-        return "…".to_string();
-    }
-
-    let mut truncated = text
-        .chars()
-        .take(width.saturating_sub(1))
-        .collect::<String>();
-    truncated.push('…');
-    truncated
+    jcode_tui_render::truncate_line_with_ellipsis_to_width(&Line::from(text.to_owned()), width)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -641,7 +673,7 @@ fn choose_header_candidate(width: usize, candidates: Vec<String>) -> String {
         .into_iter()
         .filter(|candidate| !candidate.trim().is_empty())
     {
-        if candidate.chars().count() <= width {
+        if candidate.width() <= width {
             return candidate;
         }
         last_non_empty = candidate;
@@ -797,7 +829,7 @@ fn build_persistent_header_with_auth(
         )];
         if let Some(version) = server_version_label.as_deref() {
             let suffix = format!(" · {}", version);
-            if server_text.chars().count() + suffix.chars().count() <= w {
+            if server_text.width() + suffix.width() <= w {
                 spans.push(Span::styled(suffix, version_style));
             }
         }
@@ -812,7 +844,7 @@ fn build_persistent_header_with_auth(
         )];
         if let Some(version) = client_version_label.as_deref() {
             let suffix = format!(" · {}", version);
-            if client_text.chars().count() + suffix.chars().count() <= w {
+            if client_text.width() + suffix.width() <= w {
                 spans.push(Span::styled(suffix, version_style));
             }
         }
@@ -859,6 +891,7 @@ fn build_persistent_header_with_auth(
             upstream.as_deref(),
             w,
             model_is_placeholder,
+            app.routing_chip().as_ref(),
         ));
     }
 
@@ -948,7 +981,7 @@ fn build_header_lines_with_auth(
         if mcps.len() > MAX_MCPS {
             mcp_text.push_str(&format!(" +{} more", mcps.len() - MAX_MCPS));
         }
-        if mcp_text.chars().count() > w {
+        if mcp_text.width() > w {
             mcp_text = format!("mcp: {} servers", mcps.len());
         }
         lines.push(
@@ -968,7 +1001,7 @@ fn build_header_lines_with_auth(
         if skills.len() > MAX_SKILLS {
             skills_text.push_str(&format!(" +{} more", skills.len() - MAX_SKILLS));
         }
-        if skills_text.chars().count() > w {
+        if skills_text.width() > w {
             skills_text = format!("skills: {} loaded", skills.len());
         }
         lines.push(
@@ -982,7 +1015,7 @@ fn build_header_lines_with_auth(
         let mut text = display_dir;
         if let Some(branch) = app.git_branch() {
             let with_branch = format!("{} ({})", text, branch);
-            if with_branch.chars().count() <= w {
+            if with_branch.width() <= w {
                 text = with_branch;
             }
         }

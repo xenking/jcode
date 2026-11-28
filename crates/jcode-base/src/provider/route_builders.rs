@@ -123,6 +123,8 @@ pub fn build_anthropic_oauth_route(
     detail: impl Into<String>,
 ) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model.to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),
@@ -130,6 +132,8 @@ pub fn build_anthropic_oauth_route(
         detail: detail.into(),
         usage: None,
         cheapness: cheapness_for_route(model, "Anthropic", "claude-oauth"),
+        account: None,
+        icon: None,
     }
 }
 
@@ -151,6 +155,8 @@ pub fn build_openai_api_key_route(
 
 pub fn build_chatgpt_web_route() -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: super::CHATGPT_WEB_MODEL.to_string(),
         provider: "OpenAI".to_string(),
         api_method: "chatgpt-web".to_string(),
@@ -158,6 +164,8 @@ pub fn build_chatgpt_web_route() -> ModelRoute {
         detail: "logged-in Firefox ChatGPT session".to_string(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     }
 }
 
@@ -168,6 +176,8 @@ fn build_openai_route(
     detail: impl Into<String>,
 ) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model.to_string(),
         provider: "OpenAI".to_string(),
         api_method: api_method.to_string(),
@@ -175,11 +185,15 @@ fn build_openai_route(
         detail: detail.into(),
         usage: None,
         cheapness: cheapness_for_route(model, "OpenAI", api_method),
+        account: None,
+        icon: None,
     }
 }
 
 pub fn build_copilot_route(model: &str, available: bool, detail: impl Into<String>) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model.to_string(),
         provider: "Copilot".to_string(),
         api_method: "copilot".to_string(),
@@ -187,6 +201,8 @@ pub fn build_copilot_route(model: &str, available: bool, detail: impl Into<Strin
         detail: detail.into(),
         usage: None,
         cheapness: cheapness_for_route(model, "Copilot", "copilot"),
+        account: None,
+        icon: None,
     }
 }
 
@@ -196,6 +212,8 @@ pub fn build_openrouter_auto_route(
     auto_detail: impl Into<String>,
 ) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model.to_string(),
         provider: "auto".to_string(),
         api_method: "openrouter".to_string(),
@@ -203,6 +221,8 @@ pub fn build_openrouter_auto_route(
         detail: auto_detail.into(),
         usage: None,
         cheapness: cheapness_for_route(model, "auto", "openrouter"),
+        account: None,
+        icon: None,
     }
 }
 
@@ -222,6 +242,8 @@ pub fn build_openrouter_endpoint_route(
     }
 
     ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model.to_string(),
         provider: endpoint.provider_name.clone(),
         api_method: "openrouter".to_string(),
@@ -237,6 +259,8 @@ pub fn build_openrouter_endpoint_route(
                 endpoint.provider_name
             )),
         ),
+        account: None,
+        icon: None,
     }
 }
 
@@ -246,6 +270,8 @@ pub fn build_openrouter_fallback_provider_route(
     provider: &str,
 ) -> ModelRoute {
     ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: display_model.to_string(),
         provider: provider.to_string(),
         api_method: "openrouter".to_string(),
@@ -253,6 +279,8 @@ pub fn build_openrouter_fallback_provider_route(
         detail: String::new(),
         usage: None,
         cheapness: cheapness_for_route(catalog_model, provider, "openrouter"),
+        account: None,
+        icon: None,
     }
 }
 

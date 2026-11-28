@@ -23,10 +23,13 @@ mod update_dev_guard;
 mod update_metadata;
 #[path = "update_rate_limit.rs"]
 mod update_rate_limit;
+#[path = "update_source_build.rs"]
+mod update_source_build;
 pub use update_metadata::UpdateMetadata;
 use update_metadata::{record_release_update_duration, record_source_update_duration};
 pub use update_rate_limit::{RATE_LIMIT_ERROR_PREFIX, is_rate_limit_error};
 use update_rate_limit::{clear_rate_limit_backoff, rate_limit_error};
+pub use update_source_build::{SourceUpdate, main_channel_version};
 
 /// GitHub `owner/name` updates come from (`[features] update_repo`, env
 /// `JCODE_UPDATE_REPO`). Defaults to the xenking fork.
@@ -268,9 +271,11 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
 
 #[path = "update_preview.rs"]
 mod update_preview;
+#[path = "update_stable.rs"]
+mod update_stable;
 pub use update_preview::{check_for_update_with_channel_blocking, fetch_latest_preview_blocking};
 use update_preview::{
-    prepare_preview_update_blocking, prepare_stable_update_blocking, preview_number,
+    is_prerelease_tag, prepare_preview_update_blocking, prepare_stable_update_blocking,
 };
 
 fn github_api_request(
@@ -314,13 +319,9 @@ fn latest_main_sha_blocking() -> Result<String> {
         anyhow::bail!("GitHub API error checking main: {}", response.status());
     }
 
+    // The full id: the source build fetches and verifies this exact commit.
     let commit: serde_json::Value = response.json().context("Failed to parse commit info")?;
-    Ok(commit["sha"]
-        .as_str()
-        .unwrap_or("")
-        .get(..7)
-        .unwrap_or("")
-        .to_string())
+    Ok(commit["sha"].as_str().unwrap_or("").to_string())
 }
 
 fn platform_asset(release: &GitHubRelease) -> Result<&GitHubAsset> {
@@ -329,7 +330,7 @@ fn platform_asset(release: &GitHubRelease) -> Result<&GitHubAsset> {
         .assets
         .iter()
         .find(|a| {
-            if preview_number(&release.tag_name).is_some() {
+            if is_prerelease_tag(&release.tag_name) {
                 (a.name == asset_name || a.name == format!("{asset_name}.tar.gz"))
                     && a._size > 0
                     && !a.browser_download_url.is_empty()
@@ -351,7 +352,7 @@ fn verify_asset_checksum_if_available(
     bytes: &[u8],
 ) -> Result<()> {
     let Some(checksum_asset) = checksum_asset(release) else {
-        if preview_number(&release.tag_name).is_some() {
+        if is_prerelease_tag(&release.tag_name) {
             anyhow::bail!("Preview release is missing SHA256SUMS");
         }
         crate::logging::info(&format!(
@@ -376,7 +377,7 @@ fn verify_asset_checksum_if_available(
 
 fn synthetic_main_release(latest_sha: &str) -> GitHubRelease {
     GitHubRelease {
-        tag_name: format!("main-{}", latest_sha),
+        tag_name: main_channel_version(latest_sha),
         _name: Some(format!("Built from main ({})", latest_sha)),
         _html_url: format!("https://github.com/{}/commit/{}", github_repo(), latest_sha),
         _published_at: None,
@@ -385,36 +386,41 @@ fn synthetic_main_release(latest_sha: &str) -> GitHubRelease {
     }
 }
 
-fn install_main_source_update_blocking(latest_sha: &str) -> Result<PathBuf> {
-    let path = build_from_source()?;
-    crate::logging::info(&format!(
-        "Main channel: built successfully at {}",
-        path.display()
-    ));
+fn install_main_source_update_blocking(latest_sha: &str) -> Result<SourceUpdate> {
+    let remote = format!("https://github.com/{}.git", github_repo());
+    install_source_update_from(&remote, latest_sha)
+}
 
-    let mut metadata = UpdateMetadata::load().unwrap_or_default();
-    let channel_version = format!("main-{}", latest_sha);
-    build::install_binary_at_version(&path, &channel_version)
-        .context("Failed to install built binary")?;
-    // Carry the long-lived daemon's reload target forward too, but only when it
-    // was tracking stable. A deliberately-promoted self-dev shared-server build
-    // is left untouched so the update never silently wipes it out.
-    if let Err(error) = build::advance_shared_server_if_tracking_stable(&channel_version) {
-        crate::logging::warn(&format!(
-            "update: failed to advance shared-server channel to {}: {}",
-            channel_version, error
-        ));
+/// Build and install commit `sha` from the updater's own clone, fetching it
+/// from `remote` (a URL or a local repository). The checkout the user works in
+/// is never built in and never supplies the binary.
+pub fn install_source_update_from(remote: &str, sha: &str) -> Result<SourceUpdate> {
+    let started = Instant::now();
+    let outcome = update_source_build::install_source_update(
+        &source_build_repo_dir()?,
+        remote,
+        sha,
+        update_source_build::cargo_build_release,
+    )?;
+    match &outcome {
+        SourceUpdate::Installed { version, path } => {
+            crate::logging::info(&format!(
+                "Source update: installed {} at {}",
+                version,
+                path.display()
+            ));
+            record_source_update_duration(started.elapsed());
+            let mut metadata = UpdateMetadata::load().unwrap_or_default();
+            metadata.installed_version = Some(version.clone());
+            metadata.installed_from = Some("source".to_string());
+            metadata.last_check = SystemTime::now();
+            metadata.save()?;
+        }
+        SourceUpdate::Held { reason } => {
+            crate::logging::info(&format!("Source update not applied: {reason}"));
+        }
     }
-    build::update_stable_symlink(&channel_version)?;
-    build::update_current_symlink(&channel_version)?;
-    build::update_launcher_symlink_to_current()?;
-
-    metadata.installed_version = Some(channel_version.clone());
-    metadata.installed_from = Some("source".to_string());
-    metadata.last_check = SystemTime::now();
-    metadata.save()?;
-
-    Ok(path)
+    Ok(outcome)
 }
 
 fn prepare_release_update(release: GitHubRelease) -> Result<PreparedUpdate> {
@@ -469,7 +475,7 @@ fn prepare_main_update_blocking() -> Result<PreparedUpdate> {
         current_hash
     };
 
-    if current_short == latest_sha {
+    if latest_sha.starts_with(current_short) {
         crate::logging::info(&format!("Main channel: up to date ({})", current_short));
         return Ok(PreparedUpdate::None {
             current: format!("main-{}", current_short),
@@ -493,17 +499,17 @@ fn prepare_main_update_blocking() -> Result<PreparedUpdate> {
         );
         let action = if repo_exists {
             if has_previous_build {
-                "git pull + cargo build with a warm build cache"
+                "git fetch + cargo build with a warm build cache"
             } else {
-                "git pull + cargo build"
+                "git fetch + cargo build"
             }
         } else {
             "initial clone + cargo build"
         };
         let summary = format!(
-            "Source update {} → main-{} requires {} ({}). Running in the background and will reload when it is ready.",
+            "Source update {} → {} requires {} ({}). Running in the background and will reload when it is ready.",
             current_short,
-            latest_sha,
+            main_channel_version(&latest_sha),
             action,
             format_duration_estimate(duration)
         );
@@ -514,15 +520,26 @@ fn prepare_main_update_blocking() -> Result<PreparedUpdate> {
     }
 
     crate::logging::info("Main channel: cargo not found, falling back to latest release");
-    prepare_stable_update_blocking()
+    prepare_stable_update_blocking(false)
 }
 
 pub fn prepare_update_blocking() -> Result<PreparedUpdate> {
-    let channel = crate::config::config().features.update_channel;
+    prepare_update_with_channel_blocking(None)
+}
+
+pub fn prepare_update_with_channel_blocking(
+    explicit_channel: Option<crate::config::UpdateChannel>,
+) -> Result<PreparedUpdate> {
+    let channel =
+        explicit_channel.unwrap_or_else(|| crate::config::config().features.update_channel);
     match channel {
         crate::config::UpdateChannel::Main => prepare_main_update_blocking(),
-        crate::config::UpdateChannel::Stable => prepare_stable_update_blocking(),
-        crate::config::UpdateChannel::Preview => prepare_preview_update_blocking(),
+        crate::config::UpdateChannel::Stable => {
+            prepare_stable_update_blocking(explicit_channel.is_some())
+        }
+        crate::config::UpdateChannel::Preview => {
+            prepare_preview_update_blocking(explicit_channel.is_some())
+        }
     }
 }
 
@@ -536,6 +553,13 @@ fn short_update_error(context: &str, error: &anyhow::Error) -> String {
 }
 
 pub fn spawn_background_session_update(session_id: String) {
+    spawn_background_session_update_with_channel(session_id, None);
+}
+
+pub fn spawn_background_session_update_with_channel(
+    session_id: String,
+    explicit_channel: Option<crate::config::UpdateChannel>,
+) {
     std::thread::spawn(move || {
         use crate::bus::{Bus, BusEvent, ClientMaintenanceAction, SessionUpdateStatus};
 
@@ -543,7 +567,7 @@ pub fn spawn_background_session_update(session_id: String) {
 
         let publish = |status| Bus::global().publish(BusEvent::SessionUpdateStatus(status));
 
-        match prepare_update_blocking() {
+        match prepare_update_with_channel_blocking(explicit_channel) {
             Ok(PreparedUpdate::None { current }) => {
                 publish(SessionUpdateStatus::NoUpdate {
                     session_id,
@@ -603,16 +627,23 @@ pub fn spawn_background_session_update(session_id: String) {
                     session_id: session_id.clone(),
                     action,
                     message: format!(
-                        "Building main-{} in the background (estimated {})...",
-                        latest_sha,
+                        "Building {} in the background (estimated {})...",
+                        main_channel_version(&latest_sha),
                         format_duration_estimate(estimate.duration)
                     ),
                 });
                 match install_main_source_update_blocking(&latest_sha) {
-                    Ok(_) => publish(SessionUpdateStatus::ReadyToReload {
+                    Ok(SourceUpdate::Installed { version, .. }) => {
+                        publish(SessionUpdateStatus::ReadyToReload {
+                            session_id,
+                            action,
+                            version,
+                        })
+                    }
+                    Ok(SourceUpdate::Held { reason }) => publish(SessionUpdateStatus::Error {
                         session_id,
                         action,
-                        version: format!("main-{}", latest_sha),
+                        message: format!("Update not applied: {reason}"),
                     }),
                     Err(error) => publish(SessionUpdateStatus::Error {
                         session_id,
@@ -659,7 +690,7 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
         current_hash
     };
 
-    if current_short == latest_sha {
+    if latest_sha.starts_with(current_short) {
         crate::logging::info(&format!("Main channel: up to date ({})", current_short));
         return Ok(None);
     }
@@ -673,9 +704,11 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
     if has_cargo() {
         crate::logging::info("Main channel: cargo found, attempting build from source");
         match install_main_source_update_blocking(&latest_sha) {
-            Ok(_) => {
+            Ok(SourceUpdate::Installed { .. }) => {
                 return Ok(Some(synthetic_main_release(&latest_sha)));
             }
+            // Self-dev owns the channels: there is nothing to update to.
+            Ok(SourceUpdate::Held { .. }) => return Ok(None),
             Err(e) => {
                 crate::logging::error(&format!("Main channel: build failed: {}", e));
                 // Fall through to release fallback
@@ -685,16 +718,9 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
         crate::logging::info("Main channel: cargo not found, falling back to latest release");
     }
 
-    // Fallback: use latest stable release if available
-    if let Ok(release) = fetch_latest_release_blocking() {
-        let asset_name = get_asset_name();
-        let has_asset = release
-            .assets
-            .iter()
-            .any(|a| a.name.starts_with(asset_name));
-        if has_asset && release_is_update(&release)? {
-            return Ok(Some(release));
-        }
+    // Fallback: newest installable stable release, if any.
+    if let Ok(Some(release)) = update_stable::find_stable_update_blocking() {
+        return Ok(Some(release));
     }
 
     Ok(None)
@@ -707,104 +733,6 @@ fn has_cargo() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-}
-
-/// Build jcode from source by cloning/pulling the repo and running cargo build
-fn build_from_source() -> Result<PathBuf> {
-    let started = Instant::now();
-    let build_dir = source_build_root()?;
-    fs::create_dir_all(&build_dir)?;
-
-    let repo_dir = build_dir.join("jcode");
-
-    let branch = update_branch();
-    let remote_ref = format!("origin/{branch}");
-    if repo_dir.join(".git").exists() {
-        // Pull latest
-        crate::logging::info("Main channel: pulling latest from main...");
-        let output = std::process::Command::new("git")
-            .args(["pull", "--ff-only", "origin", branch.as_str()])
-            .current_dir(&repo_dir)
-            .output()
-            .context("Failed to run git pull")?;
-
-        if !output.status.success() {
-            // If pull fails (e.g. diverged), reset to origin/main
-            let summary = summarize_git_pull_failure(&output.stderr);
-            crate::logging::warn(&format!("{}, trying reset", summary));
-            let output = std::process::Command::new("git")
-                .args(["fetch", "origin", branch.as_str()])
-                .current_dir(&repo_dir)
-                .output()
-                .context("Failed to run git fetch")?;
-            if !output.status.success() {
-                anyhow::bail!(
-                    "git fetch failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            let output = std::process::Command::new("git")
-                .args(["reset", "--hard", remote_ref.as_str()])
-                .current_dir(&repo_dir)
-                .output()
-                .context("Failed to run git reset")?;
-            if !output.status.success() {
-                anyhow::bail!(
-                    "git reset failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-        }
-    } else {
-        // Clone
-        crate::logging::info("Main channel: cloning repository...");
-        let clone_url = format!("https://github.com/{}.git", github_repo());
-        let output = std::process::Command::new("git")
-            .args([
-                "clone",
-                "--depth",
-                "1",
-                "--branch",
-                branch.as_str(),
-                &clone_url,
-                "jcode",
-            ])
-            .current_dir(&build_dir)
-            .output()
-            .context("Failed to run git clone")?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "git clone failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-
-    // Build
-    crate::logging::info("Main channel: building with cargo...");
-    let output = std::process::Command::new("cargo")
-        .args(["build", "--release"])
-        .current_dir(&repo_dir)
-        .env("JCODE_RELEASE_BUILD", "1")
-        .output()
-        .context("Failed to run cargo build")?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "cargo build failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let binary = build::release_binary_path(&repo_dir);
-    if !binary.exists() {
-        anyhow::bail!("Built binary not found at {}", binary.display());
-    }
-
-    record_source_update_duration(started.elapsed());
-
-    Ok(binary)
 }
 
 /// Download an asset into memory, retrying with HTTP Range resume so a slow or
@@ -1136,6 +1064,12 @@ pub fn download_and_install_blocking_with_progress(
         ));
     }
     build::update_stable_symlink(version)?;
+    if let Err(error) = build::repair_stale_shared_server_channel() {
+        crate::logging::warn(&format!(
+            "update: failed to repair stale shared-server channel after installing {}: {}",
+            version, error
+        ));
+    }
     build::update_current_symlink(version)?;
     build::update_launcher_symlink_to_current()?;
 

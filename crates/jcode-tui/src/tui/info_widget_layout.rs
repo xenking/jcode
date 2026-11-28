@@ -1,9 +1,86 @@
-use super::info_widget::{
-    InfoWidgetData, Side, WidgetKind, WidgetPlacement, calculate_widget_height,
-    is_overview_mergeable,
+use super::{
+    InfoWidgetData, Side, WidgetKind, WidgetPlacement, compute_page_layout, is_overview_mergeable,
+    render_widget_content,
 };
 use ratatui::layout::Rect;
 use std::collections::HashSet;
+
+/// Calculate the height needed for a specific widget type
+pub(crate) fn calculate_widget_height(
+    kind: WidgetKind,
+    data: &InfoWidgetData,
+    width: u16,
+    max_height: u16,
+) -> u16 {
+    let inner_width = width.saturating_sub(2) as usize;
+    let border_height = 2u16;
+
+    let content_height = match kind {
+        WidgetKind::WorkspaceMap => {
+            if data.workspace_rows.is_empty() {
+                return 0;
+            }
+            let (_preferred_w, preferred_h) =
+                super::super::workspace_map_widget::preferred_size(&data.workspace_rows);
+            preferred_h.min(max_height.saturating_sub(border_height))
+        }
+        WidgetKind::Overview => {
+            let mut overview = data.clone();
+            // Keep memory in its own widget so graph rendering stays focused.
+            overview.memory_info = None;
+            let inner_h = max_height.saturating_sub(border_height);
+            let layout = compute_page_layout(&overview, inner_width, inner_h);
+            if layout.max_page_height == 0 {
+                // Taller than the pocket even as a compact page. Rather than
+                // dropping the Overview (and with it usage limits and changes,
+                // which it merges in place of their own widgets), take the
+                // pocket and let the renderer truncate the compact page. The
+                // sections are ordered by importance, so the tail is what goes.
+                let full = compute_page_layout(&overview, inner_width, u16::MAX);
+                if full.max_page_height == 0
+                    || inner_h
+                        < WidgetKind::Overview
+                            .min_height()
+                            .saturating_sub(border_height)
+                {
+                    return 0;
+                }
+                return max_height;
+            }
+            layout.max_page_height
+        }
+        WidgetKind::Diagrams => {
+            if data.diagrams.is_empty() {
+                return 0;
+            }
+            // Use the full available height so the image fills the panel
+            max_height.saturating_sub(border_height)
+        }
+        // Text widgets: the height is whatever the body actually renders at
+        // the full available height, so estimate and render can never drift.
+        _ => {
+            // Rendering is permissive (e.g. the swarm widget still draws a
+            // session list), but layout only admits widgets with data.
+            if !data.has_data_for(kind) {
+                return 0;
+            }
+            let inner = Rect::new(
+                0,
+                0,
+                width.saturating_sub(2),
+                max_height.saturating_sub(border_height),
+            );
+            let framed = render_widget_content(kind, data, inner);
+            if framed.is_empty() {
+                return 0;
+            }
+            framed.row_count() as u16
+        }
+    };
+
+    let total = content_height + border_height;
+    total.min(max_height)
+}
 
 /// Minimum width needed to show the widget.
 const MIN_WIDGET_WIDTH: u16 = 24;
@@ -343,7 +420,7 @@ pub(crate) fn calculate_placements_anchored(
         // directly above or below when there are any (the render path truncates
         // when there are not, so the widget never disappears).
         let (row_start, row_end, target_y, content_top) = {
-            let needed = super::info_widget::calculate_widget_height(
+            let needed = calculate_widget_height(
                 prev.kind,
                 data,
                 kept_width,

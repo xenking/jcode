@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::session::Inherit;
 use crate::{session, storage};
 
 #[derive(Debug)]
@@ -48,20 +49,20 @@ pub(super) fn fork(
         bail!("cannot fork a non-owning local transcript: {block}");
     }
     let mut child = session::Session::create(Some(parent_id.clone()), None);
-    child.replace_messages(parent.messages.clone());
-    child.compaction = parent.compaction.clone();
-    child.system_prompt = parent.system_prompt.clone();
-    child.working_dir = parent.working_dir.clone();
-    child.model = parent.model.clone();
-    child.provider_key = parent.provider_key.clone();
-    child.route_api_method = parent.route_api_method.clone();
-    child.reasoning_effort = parent.reasoning_effort.clone();
-    child.context_cap = parent.context_cap;
-    child.status = session::SessionStatus::Closed;
+    child.inherit_from(
+        &parent,
+        Inherit::MESSAGES
+            | Inherit::COMPACTION
+            | Inherit::SYSTEM_PROMPT
+            | Inherit::WORKING_DIR
+            | Inherit::ROUTE
+            | Inherit::LIMITS,
+    );
+    child.mark_closed_unregistered();
     child.append_fork_notice(&parent_id, parent.display_name());
     child.save()?;
-    crate::session_env::inherit_session_env(&parent_id, &child.id);
-    let id = child.id.clone();
+    crate::session_env::inherit_session_env(&parent_id, child.id());
+    let id = child.id().to_owned();
     // A failure intentionally retains the new child so its transcript is recoverable.
     let moved = super::run_move(Some(&id), target, false, false)
         .with_context(|| format!("fork {id} was saved locally, but could not be moved"))?;
@@ -299,9 +300,8 @@ fn read_report(id: &str, directory: &Path, messages: usize, log_lines: usize) ->
         "idle"
     };
     let recent = sess
-        .messages
-        .iter()
-        .skip(sess.messages.len().saturating_sub(messages))
+        .iter_messages()
+        .skip(sess.message_count().saturating_sub(messages))
         .map(serde_json::to_value)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(Report {
@@ -401,7 +401,7 @@ pub(super) fn run_detached(reference: &str, message: &str) -> Result<()> {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log));
-        if let Some(cwd) = &sess.working_dir {
+        if let Some(cwd) = &sess.working_dir() {
             command.current_dir(cwd);
         }
         // Duplicate above the reserved destinations first to avoid descriptor overlap.

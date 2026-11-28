@@ -21,6 +21,47 @@ impl Drop for HomeGuard {
 }
 
 #[test]
+fn write_amp_unchanged_saves_leave_journal_and_recency_alone() -> anyhow::Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir()?;
+    let _home = HomeGuard::set(home.path());
+    let mut session = Session::create_with_id("session_write_amp".into(), None, None);
+    session.title = Some("Keep me".into());
+    session.save_prepared()?;
+    let snapshot = crate::session::session_path(&session.id)?;
+    let journal = crate::session::session_journal_path_from_snapshot(&snapshot);
+    let updated_at = session.updated_at;
+    let wal = home.path().join("session-metadata-v1.sqlite3-wal");
+    let wal_before = std::fs::metadata(&wal)?.len();
+    for _ in 0..20 {
+        session.save()?;
+    }
+    assert!(!journal.exists(), "no-op saves appended a journal");
+    assert_eq!(session.updated_at, updated_at);
+    assert_eq!(std::fs::metadata(&wal)?.len(), wal_before);
+    session.last_provider_request_at = Some(Utc::now());
+    session.last_provider_cache_domain = Some(crate::kv_cache_monitor::RequestCacheDomain {
+        provider: "Claude".into(),
+        model: "claude-opus-5-5".into(),
+        credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+        account: Some("source-account".into()),
+    });
+    session.model = Some("gpt-6.1-sol".into());
+    session.save()?;
+    let restored = Session::load(&session.id)?;
+    assert_eq!(
+        restored.last_provider_request_at,
+        session.last_provider_request_at
+    );
+    assert_eq!(
+        restored.last_provider_cache_domain,
+        session.last_provider_cache_domain
+    );
+    assert_eq!(restored.model.as_deref(), Some("gpt-6.1-sol"));
+    Ok(())
+}
+
+#[test]
 fn test_crashed_sessions_info_struct() {
     let info = CrashedSessionsInfo {
         session_ids: vec!["session_test_1".to_string(), "session_test_2".to_string()],

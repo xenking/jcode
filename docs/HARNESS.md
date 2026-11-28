@@ -30,6 +30,37 @@ overrides before submitting resumed work, including after reconnecting to a
 restarted daemon. Automatic recovery may run without them: this feature adds no
 fail-closed recovery barrier and must not be treated as one.
 
+The ACP adapter defaults to `jcode acp --session-env none`, which leaves session
+overrides unchanged. `jcode acp --session-env inherit` or
+`JCODE_ACP_SESSION_ENV=inherit` replaces the overrides with the ACP process's own
+environment after each `session/new`, `session/load`, or `session/resume`
+subscription, before the request succeeds. The adapter drops `JCODE_*` keys
+case-insensitively and names that are empty or contain `=` or NUL. Environment
+names and values must be UTF-8, and values cannot contain NUL. An invalid value,
+daemon rejection, or disconnect fails session setup instead of proceeding without
+the requested environment. An explicit `--session-env` flag takes precedence over
+the environment variable.
+
+ACP automatically reconnects session connections after a daemon restart or
+reload, starting a stopped daemon through the normal daemon-start path. It
+re-attaches the same session ID and, with `--session-env inherit`, re-applies the
+original environment snapshot before sending more work. It also restores a model
+selected with `--model`, `session/set_config_option`, or `/model`. Loading or
+resuming another session still keeps that session's saved model.
+
+Reconnect attempts use exponential backoff from 100 ms up to 5 seconds, with a
+120-second total deadline that includes attachment and environment/model setup.
+A turn interrupted by a disconnect or reload returns an ACP error and is not
+replayed. If reconnecting times out, waiting requests fail with a reconnect error.
+The ACP process stays alive and the next request starts a new reconnect attempt.
+
+For `session/new`, an explicit ACP `--model` selects the session's model even
+when the daemon is already running. A bare model uses `--provider-profile` or an
+explicit non-`auto` `--provider` as its route. An explicitly routed model such as
+`openai:gpt-5.5` keeps its route. The adapter waits for model confirmation and fails
+session setup if the daemon rejects the model. `session/load` and `session/resume`
+keep the existing session's model instead of applying the ACP launch model.
+
 This is environment isolation, not a security sandbox or secret-redaction system.
 The registry does not intentionally log or persist values, but a command can print
 its environment into tool output, write it to disk, or transmit it elsewhere.
@@ -122,11 +153,112 @@ Both return the effective budget. Live `token_usage` events also carry an option
 `effective_budget` from the daemon, allowing clients to render a context meter
 without treating the model's full window as the active compaction budget.
 
+## Account routing
+
+A daemon that advertises the `routing_v1` capability (harness API minor 24) carries
+account routing: which credential serves a session, a spending-limit gate that
+holds a turn until a person answers, human intents, and a settings view. Clients
+that do not know these events ignore them.
+
+Events, all scoped by `session_id`:
+
+```json
+{"v":1,"ev":"routing_decision","session_id":"s1","account":"claude:team","reason":"priority 1","warnings":["budget hf-month $45.00 of $50.00"],"pending":"claude:spare"}
+{"v":1,"ev":"routing_gate","session_id":"s1","gate_id":"g1","reason":"claude:team reached its 5h limit","options":[{"kind":"switch","account":"claude:spare","detail":"40% used"},{"kind":"wait_until","resets_at":1900000000},{"kind":"ack","account":"claude:team"}]}
+{"v":1,"ev":"routing_gate_closed","session_id":"s1","gate_id":"g1"}
+```
+
+`routing_decision` names the account for the next turn. `pending` is the account a
+warm session moves to at its next cache-cold seam, so a header chip can show the
+intended move. `warnings` and `pending` are omitted when empty. A gate holds the
+turn until `routing_gate_answer` arrives. `routing_gate_closed` follows every
+answer, from any attached client, and also an abandoned gate: close the matching
+card.
+
+Requests:
+
+```json
+{"v":1,"id":7,"req":"routing_gate_answer","session_id":"s1","gate_id":"g1","choice":{"kind":"switch","account":"claude:spare"}}
+{"v":1,"id":8,"req":"routing_intent","session_id":"s1","action":{"action":"hold","account":"claude:team","minutes":90}}
+{"v":1,"id":9,"req":"get_routing_view"}
+```
+
+`choice` is `switch {account}`, `compact_switch {account}`, `redeem_reset`,
+`wait`, `ack {minutes}` or `cancel`. Gate options are `switch`, `compact_switch`
+(compact on the warm current account, then move), `redeem_reset {account,
+expires_at}` (spend a reset grant and stay), `wait_until` and `ack`. An answer
+replies `ok`, or an error when no such gate is waiting, for example because another
+client answered first. `action` is `status`, `pin`, `switch`, `hold`, `ack`, `paid`
+or `unstick`, with the same arguments as the TUI's `/acct`. An omitted `account`
+clears a pin or switch. The reply is `routing_status {text}`, ready to show.
+
+`get_routing_view` needs no attached session. It replies `routing_view {view}` with
+the configured mode and paid setting, every account (kind, priority, per-class
+priority, model globs, egress, `on_limit`) with its measured usage windows, every
+budget with its live `used` next to `limit`, labelled API keys per provider (source,
+active, whether a routing account exists, usage windows) and any configuration
+problems. A meter that cannot be read is absent from the reply, never zero. The view
+holds metadata only: no key or token ever appears.
+
+Rust SDK: `client.answer_routing_gate(session_id, gate_id, choice)`,
+`client.routing_intent(session_id, action)` and `client.routing_view()`.
+TypeScript SDK: `await client.answerRoutingGate(...)`, `await client.routingIntent(...)`
+and `await client.routingView()`. All three fail before sending a frame when the
+runtime does not advertise `routing_v1`.
+
+## Voice transcription
+
+A daemon that advertises `transcribe_v1` (harness API minor 26) runs its own
+`[dictation]` backend on a recording a paired device sends, so a phone needs no
+provider key. The request needs no attached session. The same bearer-token scope
+as every other Harness request applies; the connection must hold a Harness
+device token.
+
+```json
+{"v":1,"id":7,"req":"transcribe_audio","wav":"<base64>","language":"en"}
+{"v":1,"reply_to":7,"ev":"audio_transcript","text":"hello there"}
+{"v":1,"reply_to":7,"ev":"error","code":"transcription_not_configured","message":"Configure a valid Soniox API key (...)"}
+```
+
+`wav` is a standard-alphabet, padded base64 mono PCM16 WAV: at most 5 minutes and
+10 MiB decoded (a base64 string of at most 13,981,016 bytes), 16 kHz for Nari,
+Soniox and ElevenLabs. The Jcode subscription backend also takes 8 to 192 kHz.
+`language` is an optional lowercase ISO 639-1 hint, used by the subscription
+backend only. An empty `text` means no speech was recognised. One transcription
+runs per connection at a time; a second request is `invalid_request` until the
+first replies. The bridge keeps serving other requests meanwhile, and closing the
+connection cancels the backend call. The largest frame is about 14 MB, inside the
+bridge's 64 MiB frame bound and the paired WebSocket's 16 MiB frame default.
+
+The backend is the one `[dictation] backend` selects, with its `base_url` and
+`model`; a missing key is an error that names that backend, never a switch to
+another one. `subscription` uploads the WAV; `nari`, `soniox`, `elevenlabs` and
+`auto` (Nari, then Soniox, by key) stream the PCM to the provider. `command`, and
+`auto` with `[dictation] command` set, record on their own and answer
+`transcription_not_configured`; the daemon does not advertise `transcribe_v1`
+for them. The wait is `[dictation] timeout_secs` (0 means 120 s, never more than
+600 s). A provider that fails after speaking is an error, not a shortened
+transcript. Audio stays in memory: nothing is written to disk, including the
+recovery file live dictation keeps on failure. Only sizes and timings are logged,
+never audio or text. Keys never leave the machine.
+
+Error codes: `audio_too_large` (checked before decoding), `invalid_request` (bad
+base64, language or WAV), `transcription_not_configured`,
+`transcription_unavailable` (provider failed, rejected the key or audio, or is
+unreachable), `transcription_timeout`, and `unknown_request` when this runtime has
+no backend.
+
+Rust SDK: `client.transcribe_audio(wav, language)`. TypeScript SDK:
+`await client.transcribeAudio(wav, language)`. Both fail with an unsupported
+error before sending a frame when the runtime does not advertise `transcribe_v1`,
+and with `audio_too_large` before sending an oversized recording, and wait at
+least ten minutes for the reply.
+
 ## Token optimization
 
 `agentgrep` is jcode's grep tool, built for agents. Matches include file structure, such as functions and their locations, so an agent can understand the surrounding code without reading an entire file. Results are adaptively trimmed based on what the agent has already seen to reduce repeated context.
 
-See the [agentgrep implementation](../crates/jcode-app-core/src/tool/agentgrep.rs).
+See the [agentgrep implementation](../crates/jcode-app-core/src/tool/search/agentgrep.rs).
 
 ## KV cache
 
@@ -188,6 +320,24 @@ progress and does not dim a prerequisite-ready lane merely because its phase is
 later. This note describes the prerequisite gate, not the lane's lifecycle or
 other blockers.
 
+## Cancelling a todo
+
+The active plan uses three statuses: `pending`, `in_progress`, and `completed`.
+Cancel work you no longer intend to do with an action rather than another status:
+
+```json
+{"cancel":[{"name":"compiler-promotion","reason":"Superseded by publish-built-014"}]}
+```
+
+Cancellation removes the item from the plan and records why it was withdrawn.
+It does not count as successful completion. If another lane explicitly depends
+on that item, redirect its prerequisite to a replacement or explicitly clear
+that dependency before cancelling (or in the same edit).
+
+The cancellation history for a session lives at `todos/cancellations/<session-id>.json` under `JCODE_HOME`. It contains the item as it was before cancellation, the reason, and the timestamp.
+
+When space is tight, the collapsed pinned todo view prioritizes rows with live workers before showing `+N more`. This is a display choice only. Expanding the list restores plan order, and scheduling and dependencies are unchanged.
+
 ## Pausing a todo
 
 A todo has no "blocked" state. An unfinished todo keeps receiving automatic continuation unless one of these applies:
@@ -228,4 +378,4 @@ A hill-climbable task has a concrete objective and a repeatable way to measure p
 
 Jcode's todo assessments record the feedback loop, its coverage, how directly it tests the requested outcome, and the evidence for stopping. This distinguishes an implementation change from a validated user workflow.
 
-See the [todo tool implementation](../crates/jcode-app-core/src/tool/todo.rs).
+See the [todo tool implementation](../crates/jcode-app-core/src/tool/todo/todo.rs).

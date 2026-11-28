@@ -36,6 +36,10 @@ so each agent "owns" the subtree it spawned. An agent may stop any agent in its
 own subtree (itself or a transitive descendant); `force=true` is still required
 to stop sessions outside the requester's subtree (e.g. user-created peers).
 
+Interrupting a coordinator cancels only its own turn. Workers keep running
+and can still report back. To stop a worker, target it explicitly with
+`swarm stop`.
+
 When a mid-tree member leaves (stop, crash, disconnect, feature-off), its direct
 children are reparented rather than orphaned: they attach to their live
 grandparent, falling back to the current coordinator, else they become roots.
@@ -327,3 +331,31 @@ This design emphasizes parallelism, explicit communication, and optional worktre
 isolation. The coordinator is responsible for planning and plan updates; worktree
 managers are responsible for integration; agents collaborate directly to resolve
 conflicts.
+
+## `ask` from a worker
+
+A spawned worker runs its turns on the daemon with no attached client of its
+own. Its `ask` is routed to a person, never to a model:
+
+1. The question is registered once, keyed by its ask id, with the spawn chain
+   above the worker (`report_back_to_session_id` ancestry: spawner first, root
+   last). The worker's tool call parks on it and spends no tokens.
+2. The card is shown on the nearest client in `[worker, spawner, .., root]` as an
+   ordinary `ask_user_request`. The question text names the worker
+   (`Worker "rabbit": ...`) when the card is shown away from it. When several
+   clients are attached to that session all of them see it; the first answer
+   wins and the others are dismissed. The client answers with
+   `ask_user_response`, and the answer is the worker's ordinary `ask` tool
+   result.
+3. If no client is reachable the ask stays pending, with no timeout, and is shown
+   as soon as a client attaches to any session in the chain. Nothing answers it
+   for the owner: there is no recommended-option fallback and no escalation to a
+   coordinator model. A card whose clients all go away moves to the next
+   reachable client.
+
+Stopping or removing the worker withdraws its pending asks and fails the tool
+call as cancelled. A daemon reload or rollout exec interrupts the worker's turn;
+the persisted interrupted call is replayed after restart and registers the ask
+again, so it reappears on the first client that attaches. A plain stop and start
+of the daemon does not resume workers (see the recovery rules), so their asks go
+with them.

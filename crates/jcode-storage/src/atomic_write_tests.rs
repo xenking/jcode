@@ -2,6 +2,26 @@ use super::*;
 use serde::ser::SerializeSeq;
 
 #[test]
+fn sidecar_backup_never_overwrites_snapshot_backup() {
+    let home = tempfile::tempdir().unwrap();
+    let snapshot = home.path().join("session.json");
+    let sidecar = snapshot.with_extension("tool-surface");
+    write_json_fast(&snapshot, &"first transcript").unwrap();
+    write_json_fast(&snapshot, &"second transcript").unwrap();
+    write_json_secret_sidecar(&sidecar, &"first tool surface").unwrap();
+    write_json_secret_sidecar(&sidecar, &"second tool surface").unwrap();
+    assert_eq!(
+        std::fs::read(snapshot.with_extension("bak")).unwrap(),
+        b"\"first transcript\""
+    );
+    std::fs::write(&sidecar, b"{").unwrap();
+    assert_eq!(
+        read_json_sidecar::<String>(&sidecar).unwrap(),
+        "first tool surface"
+    );
+}
+
+#[test]
 fn streamed_json_matches_encoding_and_preserves_backup() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.json");
@@ -50,7 +70,8 @@ fn failed_streamed_json_preserves_primary_backup_and_cleans_temp() {
             write_json(&path, &"primary").unwrap();
             let primary = std::fs::read(&path).unwrap();
             let backup = std::fs::read(path.with_extension("bak")).unwrap();
-            let error = write_json_inner(&path, &FailingDocument, durable, secret).unwrap_err();
+            let error =
+                write_json_inner(&path, &FailingDocument, durable, secret, true).unwrap_err();
             assert!(
                 error
                     .to_string()

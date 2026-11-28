@@ -7,7 +7,7 @@ impl App {
         // SSH clients cannot attribute local laptop telemetry to the remote host.
         self.justrust_status.refresh(
             session.as_deref(),
-            self.session.working_dir.as_deref(),
+            self.session.working_dir(),
             !crate::tui::is_ssh_remote(),
         )
     }

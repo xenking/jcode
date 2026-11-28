@@ -58,6 +58,10 @@ pub enum TimelineEventKind {
         output: String,
         #[serde(default)]
         is_error: bool,
+        #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+        codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ask: Option<Box<jcode_session_types::AskRecord>>,
     },
 
     /// Token usage update (drives context bar)
@@ -138,7 +142,7 @@ fn cap_initial_replay_idle(events: &mut [TimelineEvent]) {
 pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
     let mut events = Vec::new();
     let mut t: u64 = 0;
-    let session_start = session.created_at;
+    let session_start = session.created_at();
 
     // Track tool IDs for pairing ToolUse → ToolResult
     let mut pending_tools: Vec<(String, String, serde_json::Value)> = Vec::new(); // (id, name, input)
@@ -146,13 +150,13 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
     // Track memory injections by message index
     let mut memory_by_msg: std::collections::HashMap<usize, Vec<_>> =
         std::collections::HashMap::new();
-    for inj in &session.memory_injections {
+    for inj in session.memory_injections() {
         if let Some(idx) = inj.before_message {
             memory_by_msg.entry(idx).or_default().push(inj);
         }
     }
 
-    for (msg_idx, msg) in session.messages.iter().enumerate() {
+    for (msg_idx, msg) in session.iter_messages().enumerate() {
         // Insert memory injections before this message
         if let Some(injs) = memory_by_msg.get(&msg_idx) {
             for inj in injs {
@@ -200,13 +204,22 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
 
                         // Use stored duration or estimate
                         let duration_ms = msg.tool_duration_ms.unwrap_or(500);
+                        let output = truncate_for_timeline(content);
+                        let mut codemode = msg.codemode.clone();
+                        if output != *content
+                            && let Some(summary) = codemode.as_mut()
+                        {
+                            summary.report_body_bytes = None;
+                        }
 
                         events.push(TimelineEvent {
                             t,
                             kind: TimelineEventKind::ToolDone {
                                 name: tool_name,
-                                output: truncate_for_timeline(content),
+                                output,
                                 is_error: is_error.unwrap_or(false),
+                                codemode,
+                                ask: msg.ask.clone(),
                             },
                         });
                         t += duration_ms.min(100); // Small gap after tool result
@@ -317,13 +330,14 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
         }
     }
 
-    for replay_event in &session.replay_events {
+    for replay_event in session.replay_events() {
         let offset = replay_event
             .timestamp
             .signed_duration_since(session_start)
             .num_milliseconds()
             .max(0) as u64;
         let kind = match &replay_event.kind {
+            StoredReplayEventKind::Unknown => continue,
             StoredReplayEventKind::DisplayMessage {
                 role,
                 title,
@@ -348,6 +362,35 @@ pub fn export_timeline(session: &Session) -> Vec<TimelineEvent> {
                 items: items.clone(),
                 participants: participants.clone(),
                 reason: reason.clone(),
+            },
+            // A compaction divider replays as the display row it is: the demo
+            // timeline shows the same label the transcript shows.
+            StoredReplayEventKind::Compaction {
+                method,
+                trigger,
+                pre_tokens,
+                post_tokens,
+                duration_ms,
+                messages_compacted,
+                messages_dropped,
+                active_messages,
+                summary,
+                idle,
+            } => TimelineEventKind::DisplayMessage {
+                role: "compaction".to_string(),
+                title: None,
+                content: crate::session::compaction_divider_content(
+                    method.as_deref(),
+                    trigger.as_deref(),
+                    *pre_tokens,
+                    *post_tokens,
+                    *duration_ms,
+                    *messages_compacted,
+                    *messages_dropped,
+                    *active_messages,
+                    summary.as_deref(),
+                    *idle,
+                ),
             },
         };
         events.push(TimelineEvent { t: offset, kind });
@@ -477,6 +520,8 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                 name,
                 output,
                 is_error,
+                codemode,
+                ask,
             } => {
                 let id = pending_tool_ids.pop().unwrap_or_else(|| {
                     tool_id_counter += 1;
@@ -485,6 +530,8 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                 out.push((
                     delay,
                     ReplayEvent::Server(ServerEvent::ToolDone {
+                        codemode: codemode.clone(),
+                        ask: ask.clone(),
                         id,
                         name: name.clone(),
                         output: output.clone(),
@@ -621,9 +668,9 @@ pub fn load_swarm_sessions(
     auto_edit: bool,
 ) -> Result<Vec<SwarmReplaySession>> {
     let seed = load_session(seed_id_or_path)?;
-    let seed_working_dir = seed.working_dir.clone();
-    let lower_bound = seed.created_at - Duration::hours(6);
-    let upper_bound = seed.updated_at + Duration::hours(6);
+    let seed_working_dir = seed.working_dir().map(str::to_owned);
+    let lower_bound = seed.created_at() - Duration::hours(6);
+    let upper_bound = seed.updated_at() + Duration::hours(6);
 
     let sessions_dir = crate::storage::jcode_dir()?.join("sessions");
     if !sessions_dir.exists() {
@@ -647,20 +694,20 @@ pub fn load_swarm_sessions(
     }
 
     let mut selected_ids: BTreeSet<String> = BTreeSet::new();
-    selected_ids.insert(seed.id.clone());
+    selected_ids.insert(seed.id().to_owned());
 
     for session in &all_sessions {
-        if session.id == seed.id {
+        if session.id() == seed.id() {
             continue;
         }
         let same_working_dir =
-            seed_working_dir.is_some() && session.working_dir == seed_working_dir;
-        let linked_parent = session.parent_id.as_deref() == Some(seed.id.as_str())
-            || seed.parent_id.as_deref() == Some(session.id.as_str())
-            || (seed.parent_id.is_some() && session.parent_id == seed.parent_id);
+            seed_working_dir.is_some() && session.working_dir() == seed_working_dir.as_deref();
+        let linked_parent = session.parent_id() == Some(seed.id())
+            || seed.parent_id() == Some(session.id())
+            || (seed.parent_id().is_some() && session.parent_id() == seed.parent_id());
         let overlapping_time =
-            session.updated_at >= lower_bound && session.created_at <= upper_bound;
-        let has_swarm_events = session.replay_events.iter().any(|evt| {
+            session.updated_at() >= lower_bound && session.created_at() <= upper_bound;
+        let has_swarm_events = session.replay_events().iter().any(|evt| {
             matches!(
                 evt.kind,
                 StoredReplayEventKind::SwarmStatus { .. } | StoredReplayEventKind::SwarmPlan { .. }
@@ -668,22 +715,22 @@ pub fn load_swarm_sessions(
         });
 
         if overlapping_time && (same_working_dir || linked_parent || has_swarm_events) {
-            selected_ids.insert(session.id.clone());
+            selected_ids.insert(session.id().to_owned());
         }
     }
 
     let mut selected: Vec<Session> = all_sessions
         .into_iter()
-        .filter(|session| selected_ids.contains(&session.id))
+        .filter(|session| selected_ids.contains(session.id()))
         .collect();
-    if !selected.iter().any(|session| session.id == seed.id) {
+    if !selected.iter().any(|session| session.id() == seed.id()) {
         selected.push(seed.clone());
     }
 
     selected.sort_by(|a, b| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then_with(|| a.id.cmp(&b.id))
+        a.created_at()
+            .cmp(&b.created_at())
+            .then_with(|| a.id().cmp(b.id()))
     });
     Ok(selected
         .into_iter()

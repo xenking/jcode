@@ -10,6 +10,12 @@ pub(super) fn cache_anthropic_account_failure(
     cache_key: String,
     error: anyhow::Error,
 ) -> UsageData {
+    if error.is::<auth::oauth::ClaudeRefreshDeferred>() {
+        return UsageData {
+            last_error: Some(error.to_string()),
+            ..UsageData::default()
+        };
+    }
     // A first-ever HTTP failure can already carry a provider Retry-After.
     // Credential failures happen before that cache, so persist those too.
     let data = cached_or_shared_anthropic_usage(&cache_key).unwrap_or_else(|| {
@@ -55,18 +61,23 @@ pub async fn fetch_oauth_account_usage(
                 bounded_probe(account.label.clone(), account.email.clone(), async move {
                     let cache_key =
                         anthropic_usage_cache_key(&account.access, Some(&account.label));
+                    let mut reset_token = account.access.clone();
                     let usage = if let Some(cached) = cached_or_shared_anthropic_usage(&cache_key) {
                         Ok(cached)
                     } else {
                         let now = chrono::Utc::now().timestamp_millis();
                         let token =
                             if account.expires < now + 300_000 && !account.refresh.is_empty() {
-                                auth::oauth::refresh_claude_tokens_for_account(
+                                match auth::oauth::refresh_claude_tokens_for_account(
                                     &account.refresh,
                                     &account.label,
                                 )
                                 .await
-                                .map(|tokens| tokens.access_token)
+                                {
+                                    Ok(tokens) => Ok(tokens.access_token),
+                                    Err(_) if account.expires > now => Ok(account.access),
+                                    Err(error) => Err(error),
+                                }
                             } else if account.expires < now {
                                 Err(anyhow::anyhow!("OAuth token expired"))
                             } else {
@@ -75,13 +86,31 @@ pub async fn fetch_oauth_account_usage(
                         match token {
                             Ok(token) => {
                                 let key = anthropic_usage_cache_key(&token, Some(&account.label));
-                                fetch_anthropic_usage_data(token, key).await
+                                reset_token = token.clone();
+                                fetch_anthropic_usage_data(token, key, Some(&account.label)).await
                             }
                             Err(error) => Err(error),
                         }
                     };
-                    let data = usage
-                        .unwrap_or_else(|error| cache_anthropic_account_failure(cache_key, error));
+                    let data = usage.unwrap_or_else(|error| {
+                        cache_anthropic_account_failure(cache_key.clone(), error)
+                    });
+                    // The account summary must warm the same saved-grant ledger
+                    // as /usage, even when no usage card has been opened yet.
+                    if data.last_error.is_none()
+                        && anthropic_banked::cached_banked_resets(
+                            &reset_token,
+                            Some(&account.label),
+                        )
+                        .is_none()
+                    {
+                        imported_banked::import_for_account(
+                            &reset_token,
+                            &cache_key,
+                            Some(&account.label),
+                        )
+                        .await;
+                    }
                     anthropic_snapshot_from_usage(account.label, account.email, &data)
                 })
             }))
@@ -184,6 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn cached_usage_does_not_clear_runtime_quota_failures() {
+        let _shared = super::cache::lock_usage_cache_tests();
         let label = "usage-recovery-cache-hit-test";
         let key = format!("label:{label}");
         let data = UsageData {
@@ -206,7 +236,7 @@ mod tests {
             );
         }
         assert!(
-            fetch_anthropic_usage_data("unused-token".into(), format!("label:{label}"))
+            fetch_anthropic_usage_data("unused-token".into(), format!("label:{label}"), None)
                 .await
                 .is_ok()
         );

@@ -35,3 +35,9 @@ rustc-wrapper = "scripts/rustc-parallel-frontend"
 # memory-safe on a ~15 GiB machine while staying parallel. The adaptive
 # dev_cargo.sh path uses more cores when memory allows.
 jobs = 4
+
+[env]
+# Parsing the whole CLI with clap in an unoptimized build needs more than the
+# 2 MiB a spawned test thread gets: `cli::args` and `cli::cloud_managed` tests
+# aborted with a stack overflow. Applies to `cargo test` and `cargo run`.
+RUST_MIN_STACK = { value = "8388608", force = false }

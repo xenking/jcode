@@ -55,10 +55,35 @@ pub(super) fn account_usage_probe(
     crate::usage::account_usage_probe_sync(kind)
 }
 
+static ROUTING_DECIDER: std::sync::OnceLock<fn(&str, &str) -> bool> = std::sync::OnceLock::new();
+
+/// Installs the daemon's routing service as the decider `routing_decides`
+/// asks; the service sits above providers, so it registers itself here.
+/// Without one (no daemon in this process) the account pool decides.
+pub fn set_routing_decider(applies: fn(&str, &str) -> bool) {
+    let _ = ROUTING_DECIDER.set(applies);
+}
+
+/// Whether the routing service, not the account pool, chooses `provider`'s
+/// account for `model`. With routing in `auto` it is the only decider: the pool
+/// rotation, same-provider failover prompts and banked-reset spending in this
+/// module stand down, so one account is chosen and one redeemer claims a grant.
+pub(super) fn routing_decides(provider: ActiveProvider, model: &str) -> bool {
+    let provider = match provider {
+        ActiveProvider::Claude => "claude",
+        ActiveProvider::OpenAI => "openai",
+        _ => return false,
+    };
+    ROUTING_DECIDER
+        .get()
+        .is_some_and(|applies| applies(provider, model))
+}
+
 pub(super) fn same_provider_account_failover_enabled() -> bool {
     crate::config::Config::load()
         .provider
         .same_provider_account_failover
+        && crate::auth::account_pool::AccountPool::load().auto_switch()
 }
 
 pub(super) fn active_account_label_for_provider(provider: ActiveProvider) -> Option<String> {
@@ -132,20 +157,27 @@ pub fn has_eligible_alternate_account(provider: &str) -> bool {
 /// Whether the multi-account router owns an OAuth account failure. Includes
 /// cooling-down pool members so the final login in a rotation also returns its
 /// failure immediately rather than sleeping before reporting pool exhaustion.
-pub fn has_alternate_account_in_pool(provider: &str) -> bool {
+pub fn has_alternate_account_in_pool(provider: &str, model: &str) -> bool {
     let provider = match provider {
         "claude" | "anthropic" => ActiveProvider::Claude,
         "openai" => ActiveProvider::OpenAI,
         _ => return false,
     };
-    same_provider_account_failover_enabled()
+    !routing_decides(provider, model)
+        && same_provider_account_failover_enabled()
         && active_account_label_for_provider(provider).is_some()
         && !same_provider_account_rotation(provider).is_empty()
 }
 
 pub(super) fn account_switch_guidance(provider: ActiveProvider) -> Option<String> {
     let kind = multi_account_provider_kind(provider)?;
-    active_account_label_for_provider(provider)?;
+    let label = active_account_label_for_provider(provider)?;
+    if !crate::auth::account_pool::AccountPool::load().auto_switch() {
+        return Some(format!(
+            "Auto-switch is off, so Jcode stayed on {} account `{label}`. Switch account yourself or turn Auto-switch on in Accounts.",
+            kind.display_name()
+        ));
+    }
     let alternatives = same_provider_account_candidates(provider);
     Some(if alternatives.is_empty() {
         format!(

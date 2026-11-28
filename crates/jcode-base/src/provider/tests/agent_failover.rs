@@ -40,8 +40,11 @@ fn agent_failover_fixture(models: &[&str]) -> MultiProvider {
 
 fn agent_failover_target(provider: &MultiProvider, tokens: usize, reason: &str) -> Option<String> {
     // Changing the configured default bumps the config generation, which is
-    // part of the memo key. Re-key the fixture catalog so the test keeps
-    // measuring its own routes instead of the real built-in catalog.
+    // part of the memo key. Reload the cached config first (the routing check
+    // inside the prompt would otherwise bump it after the re-key), then re-key
+    // the fixture catalog so the test keeps measuring its own routes instead
+    // of the real built-in catalog.
+    let _ = crate::config::config();
     let routes = provider
         .routes_memo
         .lock()
@@ -60,6 +63,30 @@ fn agent_failover_target(provider: &MultiProvider, tokens: usize, reason: &str) 
             tokens,
         )
         .and_then(|prompt| prompt.target_route)
+}
+
+#[test]
+fn agent_failover_skips_configured_excluded_models() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        let mut config = crate::config::Config::load();
+        config.provider.failover_excluded_models = vec!["opus".into(), "astra".into()];
+        config.save().unwrap();
+        let provider = agent_failover_fixture(&["gpt-6-astra", "gpt-5.4"]);
+        assert_eq!(
+            agent_failover_target(&provider, 128, "401 unauthorized"),
+            Some("openai-api:gpt-5.4".into())
+        );
+        agent_failover_catalog(
+            &provider,
+            vec![build_openai_api_key_route("gpt-6-astra", true, "")],
+        );
+        assert_eq!(
+            agent_failover_target(&provider, 128, "401 unauthorized"),
+            None
+        );
+    });
 }
 
 #[test]
@@ -129,8 +156,7 @@ fn automatic_reset_defers_to_ready_pool_route_before_any_redemption() {
                 &[],
                 CompletionMode::Unified { system: "" },
             ))
-            .err()
-            .expect("ready alternate must route, not redeem");
+            .expect_err("ready alternate must route, not redeem");
         assert!(error.to_string().contains("openai-api:gpt-5.4"));
         assert!(
             models::provider_unavailability_detail_for_account_label(
@@ -276,6 +302,112 @@ fn agent_failover_curated_order_beats_larger_context_window() {
                 "272K preferred model outranks a 1M less-preferred model when both fit"
             );
         }
+    });
+}
+
+#[test]
+fn agent_failover_api_capacity_does_not_inherit_codex_limits() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        let provider = agent_failover_fixture(&["gpt-5.4", "gpt-6.1-sol"]);
+        models::persist_openai_model_catalog_for_scope(
+            "openai-fox",
+            &models::OpenAIModelCatalog {
+                available_models: vec!["gpt-6.1-sol".into()],
+                context_limits: HashMap::from([("gpt-6.1-sol".into(), 500_000)]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            agent_failover_target(&provider, 625_657, "429 rate limit exceeded"),
+            Some("openai-api:gpt-6.1-sol".into()),
+            "a Codex catalog must not cap the platform API route"
+        );
+
+        let scope = models::openai_catalog_scope_for_credential(
+            false,
+            &std::env::var("OPENAI_API_KEY").unwrap(),
+        );
+        models::persist_openai_model_catalog_for_scope(
+            &scope,
+            &models::OpenAIModelCatalog {
+                available_models: vec!["gpt-6.1-sol".into(), "gpt-5.4".into()],
+                context_limits: HashMap::from([("gpt-6.1-sol".into(), 128_000)]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            agent_failover_target(&provider, 625_657, "429 rate limit exceeded"),
+            Some("openai-api:gpt-5.4".into()),
+            "capacity advertised by this API credential remains authoritative"
+        );
+    });
+}
+
+#[test]
+fn agent_failover_context_limits_follow_exact_saved_account() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        let provider = agent_failover_fixture(&[]);
+        let mut pool = crate::auth::account_pool::AccountPool::load();
+        for (account, limit) in [("openai-fox", 500_000), ("openai-otter", 900_000)] {
+            auth::codex::upsert_account_from_tokens(account, "fresh", "refresh", None, None)
+                .unwrap();
+            pool.members.push(format!("openai:{account}"));
+            models::persist_openai_model_catalog_for_scope(
+                account,
+                &models::OpenAIModelCatalog {
+                    available_models: vec!["gpt-6.1-sol".into()],
+                    context_limits: HashMap::from([("gpt-6.1-sol".into(), limit)]),
+                    ..Default::default()
+                },
+            );
+        }
+        pool.save().unwrap();
+        agent_failover_catalog(
+            &provider,
+            ["openai-fox", "openai-otter"]
+                .into_iter()
+                .map(|account| ModelRoute {
+                    speed_options: Vec::new(),
+                    reasoning_efforts: None,
+                    api_method: format!("openai-oauth@{account}"),
+                    ..build_openai_oauth_route("gpt-6.1-sol", true, "")
+                })
+                .collect(),
+        );
+        assert_eq!(
+            agent_failover_target(&provider, 625_657, "429 rate limit exceeded"),
+            Some("openai-oauth@openai-otter:gpt-6.1-sol".into()),
+            "do not borrow a larger or smaller window from another login"
+        );
+        let messages = [Message::user_with_images(
+            "Run the benchmark",
+            vec![
+                ("image/png".into(), "a".repeat(844_300)),
+                ("image/png".into(), "b".repeat(908_712)),
+            ],
+        )];
+        let tools = [ToolDefinition::new(
+            "unloaded_catalog_tool",
+            "x".repeat(700_000),
+            serde_json::json!({"type": "object"}),
+        )
+        .deferred()];
+        let (_, tokens) = MultiProvider::estimate_request_input(
+            crate::message::TokenFamily::default(),
+            &messages,
+            &tools,
+            CompletionMode::Unified { system: "" },
+        );
+        assert!(tokens < 10_000, "images and unloaded schemas are not text");
+        assert_eq!(
+            agent_failover_target(&provider, tokens, "429 rate limit exceeded"),
+            Some("openai-oauth@openai-fox:gpt-6.1-sol".into()),
+            "the screenshot-shaped request must fit the preferred modern OAuth route"
+        );
     });
 }
 
@@ -453,6 +585,8 @@ fn agent_failover_pool_order_beats_global_model_quality_and_configured_identity(
             vec![
                 build_openai_api_key_route("gpt-6-astra", true, ""),
                 ModelRoute {
+                    speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: "claude-sonnet-4-6".into(),
                     provider: "Anthropic".into(),
                     api_method: "anthropic-api-key".into(),
@@ -460,6 +594,8 @@ fn agent_failover_pool_order_beats_global_model_quality_and_configured_identity(
                     detail: String::new(),
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 },
             ],
         );
@@ -541,6 +677,8 @@ fn agent_failover_configured_account_pin_matches_only_exact_target_login() {
                 ["gpt-6-astra", "gpt-5.5"]
                     .into_iter()
                     .map(|model| ModelRoute {
+                        speed_options: Vec::new(),
+                        reasoning_efforts: None,
                         api_method: "openai-oauth@openai-fox".into(),
                         ..build_openai_oauth_route(model, true, "")
                     })

@@ -47,6 +47,27 @@ impl SessionLease {
     }
 }
 
+/// A set of staged local leases becomes owned here on one durable publication.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GroupReturnCommit {
+    pub coordinator: String,
+    pub epoch: u64,
+}
+
+impl GroupReturnCommit {
+    pub fn path(&self) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            lease_path(&self.coordinator).is_some(),
+            "invalid group coordinator"
+        );
+        Ok(jcode_dir()?
+            .join("cloud-returns")
+            .join(&self.coordinator)
+            .join(self.epoch.to_string())
+            .join("group-committed"))
+    }
+}
+
 /// Why a session copy may not run a turn or persist on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionLeaseBlock {
@@ -91,7 +112,21 @@ fn lease_path(session_id: &str) -> Option<PathBuf> {
 pub fn read_session_lease(session_id: &str) -> Option<SessionLease> {
     let path = lease_path(session_id)?;
     let raw = std::fs::read(path).ok()?;
-    serde_json::from_slice(&raw).ok()
+    #[derive(Deserialize)]
+    struct Staged {
+        group_return: Option<GroupReturnCommit>,
+    }
+    let mut lease: SessionLease = serde_json::from_slice(&raw).ok()?;
+    if lease.away_host.as_deref() == Some("group-activation-pending")
+        && serde_json::from_slice::<Staged>(&raw)
+            .ok()
+            .and_then(|staged| staged.group_return)
+            .and_then(|commit| commit.path().ok())
+            .is_some_and(|path| path.is_file())
+    {
+        lease.away_host = None;
+    }
+    Some(lease)
 }
 
 pub fn write_session_lease(lease: &SessionLease) -> anyhow::Result<()> {
@@ -156,6 +191,34 @@ mod tests {
     #[test]
     fn no_lease_never_blocks() {
         with_home(|| assert_eq!(session_lease_block("session_x", 0), None));
+    }
+
+    #[test]
+    fn group_return_publishes_all_member_leases_together() {
+        with_home(|| {
+            let commit = GroupReturnCommit {
+                coordinator: "session_x".into(),
+                epoch: 7,
+            };
+            let mut first = lease(7, Some("group-activation-pending"));
+            let mut second = lease(4, Some("group-activation-pending"));
+            second.session_id = "session_y".into();
+            for lease in [&mut first, &mut second] {
+                let path = lease_path(&lease.session_id).unwrap();
+                write_session_lease(lease).unwrap();
+                let mut json = serde_json::to_value(&lease).unwrap();
+                json["group_return"] = serde_json::to_value(&commit).unwrap();
+                std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+                assert!(session_lease_block(&lease.session_id, lease.epoch).is_some());
+            }
+            let marker = commit.path().unwrap();
+            std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            std::fs::write(marker, "1").unwrap();
+            for lease in [first, second] {
+                assert!(session_lease_block(&lease.session_id, lease.epoch).is_none());
+                assert!(session_lease_block(&lease.session_id, lease.epoch - 1).is_some());
+            }
+        });
     }
 
     #[test]

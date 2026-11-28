@@ -10,6 +10,15 @@ const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit
 /// Serialize automatic redemption across agents, then recheck quota under the
 /// lock. A failed or uncertain POST must not spend another grant on retry.
 pub(crate) async fn auto_reset_weekly_usage(account_label: Option<String>) -> Result<bool> {
+    auto_reset_weekly_usage_with(account_label, ResetMode::AtWall).await
+}
+
+/// [`auto_reset_weekly_usage`] for either reason in [`ResetMode`]. The same
+/// cross-agent lock and receipt guard both.
+pub(crate) async fn auto_reset_weekly_usage_with(
+    account_label: Option<String>,
+    mode: ResetMode,
+) -> Result<bool> {
     let credentials = match account_label.as_deref() {
         Some(label) => auth::codex::load_credentials_for_account(label),
         None => auth::codex::load_oauth_credentials(),
@@ -44,7 +53,13 @@ pub(crate) async fn auto_reset_weekly_usage(account_label: Option<String>) -> Re
     )
     .await;
     let usage = openai_usage_data_from_provider_report(&report);
-    if !auto_reset_eligible(&usage, account_label.as_deref()) {
+    let eligible = match mode {
+        ResetMode::AtWall => auto_reset_eligible(&usage, account_label.as_deref()),
+        ResetMode::Expiring { within_secs } => {
+            expiring_reset_eligible(&usage, account_label.as_deref(), now, within_secs)
+        }
+    };
+    if !eligible {
         return Ok(false);
     }
     let Some(pending) = prepare_openai_usage_reset_for_account(account_label.clone()).await? else {
@@ -85,6 +100,32 @@ fn write_auto_reset_receipt(path: &std::path::Path, now: i64, restored: bool) ->
     file.write_all(&serde_json::to_vec(&(now, restored))?)?;
     file.sync_all()?;
     Ok(())
+}
+
+/// A banked reset that lapses within `within_secs`, on a login whose plan
+/// windows have used quota for it to restore.
+fn expiring_reset_eligible(
+    usage: &OpenAIUsageData,
+    label: Option<&str>,
+    now: i64,
+    within_secs: i64,
+) -> bool {
+    let Some(credits) = &usage.openai_reset_credits else {
+        return false;
+    };
+    let lapsing = credits.available_expirations.iter().flatten().any(|at| {
+        chrono::DateTime::parse_from_rfc3339(at)
+            .is_ok_and(|at| at.timestamp() > now && at.timestamp() - now <= within_secs)
+    });
+    !usage.is_stale()
+        && usage.last_error.is_none()
+        && credits.available_count > 0
+        && credits.account_label.as_deref() == label
+        && lapsing
+        && [usage.five_hour.as_ref(), usage.seven_day.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|window| window.usage_ratio > 0.0)
 }
 
 fn auto_reset_eligible(usage: &OpenAIUsageData, label: Option<&str>) -> bool {
@@ -291,11 +332,25 @@ struct ConsumeRequest<'a> {
     credit_id: &'a str,
 }
 
+#[cfg(test)]
 fn reset_client() -> Result<reqwest::Client> {
+    reset_builder()
+        .build()
+        .context("Could not create the OpenAI reset client")
+}
+
+fn reset_builder() -> reqwest::ClientBuilder {
     // Do not follow redirects with credentials or retry a mutation automatically.
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
+}
+
+/// The reset client for one login, through that login's egress.
+async fn reset_client_for(account_label: Option<&str>) -> Result<reqwest::Client> {
+    crate::egress::transport("openai", account_label)
+        .await?
+        .apply(reset_builder())?
         .build()
         .context("Could not create the OpenAI reset client")
 }
@@ -398,7 +453,7 @@ pub async fn prepare_openai_usage_reset_for_account(
             .unwrap_or_else(|| "current ChatGPT login".into()),
     };
     prepare_with_credentials(
-        &reset_client()?,
+        &reset_client_for(account_label.as_deref()).await?,
         RESET_CREDITS_URL,
         credentials,
         account_label,
@@ -466,7 +521,12 @@ async fn prepare_with_credentials(
 pub async fn consume_openai_usage_reset(
     pending: &PendingOpenAiUsageReset,
 ) -> Result<OpenAiUsageResetOutcome> {
-    let result = consume_with_client(&reset_client()?, RESET_CREDITS_URL, pending).await;
+    let result = consume_with_client(
+        &reset_client_for(pending.account_label.as_deref()).await?,
+        RESET_CREDITS_URL,
+        pending,
+    )
+    .await;
     // Invalidate even on uncertain errors: a timed-out POST may have reset usage.
     super::cache::invalidate_openai_usage_after_reset(
         &pending.credentials.access_token,

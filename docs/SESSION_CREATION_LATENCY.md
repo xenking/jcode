@@ -42,6 +42,9 @@ from idle prewarm, so future startup regressions are directly attributable.
 
 ## Reproducible transport regression
 
+> Removed in this fork: `jcode-telemetry-core` is a no-op facade with no
+> transport, so the test and commands below no longer exist. Kept as history.
+
 `crates/jcode-telemetry-core/tests/session_creation_latency.rs` calls the real
 public telemetry API in a subprocess with a temporary JCODE_HOME. It seeds a
 session and turn, then times the same begin_session replacement used by Agent

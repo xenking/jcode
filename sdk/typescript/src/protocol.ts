@@ -8,9 +8,150 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 11;
+export const API_VERSION_MINOR = 26;
+/** The bridge can run the daemon's dictation backend on uploaded audio. */
+export const TRANSCRIBE_CAPABILITY = "transcribe_v1";
+/** Largest WAV (decoded) `transcribe_audio` accepts. */
+export const MAX_TRANSCRIBE_WAV_BYTES = 10 * 1024 * 1024;
+export const SIDE_QUESTIONS_CAPABILITY = "side_questions_v1";
+/** Routing events, gate answers, intents and the routing view. */
+export const ROUTING_CAPABILITY = "routing_v1";
 
-export type RuntimeCommand = "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout";
+/** The last time a keepalive request warmed a cached prefix. */
+export interface CacheKeepaliveHit {
+  at_ms: number;
+  model: string;
+  ttl_secs: number;
+  cached_tokens: number;
+}
+
+/** Keepalive spend, separate from turn usage. */
+export interface CacheKeepaliveUsage {
+  attempted: number;
+  warmed: number;
+  /** Public-rate equivalent, including for subscription requests. */
+  cost_micros: number;
+  /** Worst-case reservations for requests without a definitive usage response. */
+  unconfirmed_micros: number;
+  last_hit?: CacheKeepaliveHit;
+}
+
+/** One way out of a routing gate. */
+export type RoutingGateOption =
+  | { kind: "switch"; account: string; detail: string }
+  /** Compact on the warm current account, then move to `account`. */
+  | { kind: "compact_switch"; account: string; detail: string }
+  /** Redeem a reset grant on `account` and stay; it lapses at `expires_at`. */
+  | { kind: "redeem_reset"; account: string; expires_at: number }
+  /** Wait for the limit window to reset (unix seconds). */
+  | { kind: "wait_until"; resets_at: number }
+  | { kind: "ack"; account: string };
+
+/** The answer to a gate: move, hold the turn, keep spending, or drop it. */
+export type RoutingGateChoice =
+  | { kind: "switch"; account: string }
+  | { kind: "compact_switch"; account: string }
+  | { kind: "redeem_reset" }
+  | { kind: "wait" }
+  | { kind: "ack"; minutes: number }
+  | { kind: "cancel" };
+
+/**
+ * A human routing intent. Session-scoped actions (pin, switch, unstick) apply
+ * to the session the request names. An omitted `account` clears the pin or switch.
+ */
+export type RoutingIntentAction =
+  | { action: "status" }
+  | { action: "pin"; account?: string }
+  | { action: "switch"; account?: string }
+  | { action: "hold"; account?: string; minutes?: number }
+  | { action: "ack"; account: string; minutes?: number }
+  /** `auto`, `off`, or a duration such as `2h`. */
+  | { action: "paid"; mode: string }
+  | { action: "unstick" };
+
+/** A usage window of an account. Unreadable meters are absent, never zero. */
+export interface RoutingWindowView {
+  /** `5h`, `1w`, `month`, ... (a week is `1w`, never `7d`). */
+  window: string;
+  unit: "percent" | "usd" | "credits" | "tokens";
+  used: number;
+  limit?: number;
+  /** Unix seconds. */
+  resets_at?: number;
+  model_class?: string;
+}
+
+export interface RoutingAccountView {
+  /** `provider` or `provider:label`. */
+  id: string;
+  kind: "subscription" | "credits" | "metered";
+  /** Flat priority or the `default` entry of a per-class map. Lower wins. */
+  priority?: number;
+  class_priority?: Record<string, number>;
+  models?: string[];
+  egress?: string;
+  on_limit: "switch" | "ask" | "block";
+  windows?: RoutingWindowView[];
+}
+
+export interface RoutingBudgetView {
+  name: string;
+  scope_kind: "account" | "provider" | "model";
+  scope: string;
+  meter: "provider" | "ledger";
+  window: string;
+  unit: "percent" | "usd" | "credits" | "tokens";
+  warn?: number;
+  limit: number;
+  action: "audit" | "switch" | "ask" | "block";
+  /** Usage in `unit`. Absent when the meter is unreadable. */
+  used?: number;
+}
+
+/** One API key by label. Never carries the key. */
+export interface RoutingKeyView {
+  account: string;
+  label?: string;
+  source: "default" | "stored" | "key_command";
+  /** Requests use this key right now. */
+  active: boolean;
+  /** A routing account is configured for it. */
+  routed: boolean;
+  windows?: RoutingWindowView[];
+}
+
+export interface RoutingApiKeyView {
+  provider: string;
+  keys: RoutingKeyView[];
+}
+
+/** One Desktop state entry. `value` is absent for a deletion. */
+export interface DesktopStateEntry {
+  key: string;
+  rev: number;
+  value?: unknown;
+}
+
+export interface DesktopStateChange {
+  key: string;
+  value?: unknown;
+}
+
+export type DesktopStateRejection = "invalid" | "too_large" | "unavailable";
+
+/** The routing configuration with live usage, for a settings page. */
+export interface RoutingView {
+  mode: "off" | "shadow" | "auto";
+  paid: "auto" | "off";
+  /** Configuration problems. The rest of the view still loads. */
+  problems?: string[];
+  accounts?: RoutingAccountView[];
+  budgets?: RoutingBudgetView[];
+  api_keys?: RoutingApiKeyView[];
+}
+
+export type RuntimeCommand = "mode" | "skills" | "context" | "info" | "cache" | "memory" | "swarm" | "agents" | "subagent_model" | "autoreview" | "autojudge" | "transport" | "fast" | "telemetry" | "subscription" | "overnight" | "productivity" | "initiatives" | "premium" | "provider_test_coverage" | "refresh_model_list" | "continue" | "resume_all" | "remote" | "server_reload" | "review" | "judge" | "subagent" | "auth" | "logout" | "background_output";
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -18,8 +159,13 @@ export type ErrorCode =
   | "unsupported_version"
   | "unknown_request"
   | "unknown_session"
+  | "unknown_skill"
   | "invalid_request"
-  | "internal";
+  | "internal"
+  | "transcription_not_configured"
+  | "transcription_unavailable"
+  | "transcription_timeout"
+  | "audio_too_large";
 
 /** Cumulative built-in file-tool changes, not net worktree diff. */
 export interface SessionEditStats {
@@ -28,8 +174,22 @@ export interface SessionEditStats {
   approximate: boolean;
 }
 
+export interface SessionCatalogContext {
+  model?: string;
+  reasoning_effort?: string;
+  modes?: string[];
+  /** Estimated prompt-cache expiry in Unix milliseconds, not a guaranteed hit. */
+  cache_expires_at_ms?: number;
+  activity?: {
+    origin: "user" | "agent";
+    /** Last persisted assistant message in Unix milliseconds. */
+    last_agent_activity_at_ms?: number;
+  };
+}
+
 export interface SessionInfo {
   edit_stats?: SessionEditStats;
+  context?: SessionCatalogContext;
   session_id: string;
   /** Swarm owner, never the transcript's ordinary fork parent. */
   parent_session_id?: string;
@@ -46,6 +206,42 @@ export interface SessionInfo {
   transcript_bytes?: number;
   archived?: boolean;
   archived_at_ms?: number;
+}
+
+/** Durable child session in a parent's BTW history, not a message-tree entry. */
+export interface SideQuestionTopic {
+  session_id: string;
+  parent_session_id: string;
+  created_at_ms: number;
+  /** Raw transcript offset. Not an index into rendered getHistory results. */
+  message_start?: number;
+  /** The child's last persisted model selection. Reading it does not attach a runtime. */
+  context?: SessionCatalogContext;
+}
+
+/** Live lifecycle fact from one daemon publication. */
+export interface SwarmMemberInfo {
+  session_id: string;
+  status: string;
+  parent_session_id?: string;
+  agent_label?: string;
+}
+
+/** What a session's own record says: model, effort, spend and live phase. */
+export interface WorkerMeta {
+  model?: string;
+  provider?: string;
+  effort?: string;
+  /** Provider-reported prompt tokens, summed over the session. */
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  phase?: "thinking" | "tool" | "waiting" | "idle";
+  /** Tool the worker is running, when `phase` is "tool". */
+  tool?: string;
+  /** Unix epoch millis of the newest message. */
+  last_activity_ms?: number;
 }
 
 /** Tracked turns with a persisted response, separate from historical picker selections. */
@@ -66,6 +262,15 @@ export function compareModelUsage(a?: ModelUsage | null, b?: ModelUsage | null):
     || (b.last_selected_unix_secs ?? -1) - (a.last_selected_unix_secs ?? -1);
 }
 
+export type SpeedMode = "standard" | "fast" | "ultrafast";
+export type SpeedAvailability = "available" | "unknown" | "unavailable";
+
+export interface SpeedOption {
+  mode: SpeedMode;
+  availability: SpeedAvailability;
+  reason?: string;
+}
+
 export interface ModelRouteInfo {
   model: string;
   provider: string;
@@ -73,6 +278,7 @@ export interface ModelRouteInfo {
   available: boolean;
   detail: string;
   usage?: ModelUsage;
+  speed_options?: SpeedOption[];
 }
 
 export interface TextMatch {
@@ -80,6 +286,27 @@ export interface TextMatch {
   line: number;
   column: number;
   preview: string;
+}
+
+/** Which half of the corpus a global-search hit came from. */
+export type SessionSearchRole = "title" | "user" | "assistant";
+
+/** A highlighted span of `SessionSearchHit.snippet`, in char indices. */
+export interface SessionSearchHighlight {
+  start: number;
+  end: number;
+}
+
+/** One matching session title or transcript message. */
+export interface SessionSearchHit {
+  session_id: string;
+  title: string;
+  role: SessionSearchRole;
+  snippet: string;
+  highlights: SessionSearchHighlight[];
+  /** Unix epoch milliseconds: the message time, or the session's last activity. */
+  timestamp_ms: number;
+  message_id?: string;
 }
 
 /** A session's persisted todo state, as read by the follow-up policy.
@@ -92,6 +319,8 @@ export interface TodoSnapshot {
   long_session_review_due: boolean;
   /** Session-scoped background task IDs still running. Absent on older servers. */
   running_background_tasks?: string[];
+  /** A wake-enabled swarm await is pending; absent on older bridges. */
+  pending_swarm_await?: boolean;
 }
 
 /** Persistent effects of a follow-up decision. */
@@ -111,12 +340,49 @@ export interface ResponseStats {
   cache_creation_tokens?: number;
 }
 
+export interface HistoryFragment { index: number; start: number; total: number; text: string }
+
+/** SHA-256 bytes of the row's role, a zero byte, and its trimmed UTF-8 text. */
+export interface RewindAnchor {
+  selected: readonly number[];
+  before?: readonly number[] | null;
+  after?: readonly number[] | null;
+}
+
 export interface HistoryMessage {
   /** Only on the final assistant row. Preview/old-server history may omit it. */
   response_stats?: ResponseStats;
   /** "user" | "assistant" | "tool" */
   role: string;
   content: string;
+  attachments?: StoredAttachment[];
+  tool?: HistoryTool;
+}
+
+export type CodemodeStatus = "success" | "error";
+
+export interface CodemodeCall {
+  external?: boolean;
+  tool: string;
+  action?: string;
+  actor?: string;
+  target?: string;
+  direction?: "outbound";
+  status: CodemodeStatus | "interrupted";
+  duration_ms: number;
+  preview?: string;
+  diagnostic?: string;
+}
+
+export interface HistoryTool {
+  id: string;
+  name: string;
+  input?: unknown;
+  duration_ms?: number;
+  codemode_status?: CodemodeStatus;
+  codemode_calls?: CodemodeCall[];
+  codemode_calls_omitted?: number;
+  report_body_bytes?: number;
 }
 
 export type RenderedImageSource =
@@ -128,6 +394,12 @@ export type RenderedImageAnchor =
   | { kind: "tool_call"; id: string }
   | { kind: "user_prompt"; ordinal: number };
 
+export interface SessionImageRef {
+  image_id: string;
+  /** One-based image number in the complete session. */
+  ordinal: number;
+}
+
 export interface RenderedImage {
   media_type: string;
   data: string;
@@ -136,10 +408,60 @@ export interface RenderedImage {
   anchor?: RenderedImageAnchor;
   /** Insert before this History.messages index (including hidden rows). Length means append. */
   history_message_index?: number;
+  session_image?: SessionImageRef;
 }
 
 /** Base64 image attachment: [mediaType, base64Data]. */
 export type ImageAttachment = [string, string];
+
+export type Attachment =
+  | { type: "file"; name: string; mime: string; size: number; data: string; path?: never }
+  | { type: "file"; name: string; mime: string; size: number; path: string; data?: never }
+  | { type: "pasted_text"; text: string };
+
+export type StoredAttachment =
+  | { type: "file"; name: string; mime: string; size: number; path?: string }
+  | { type: "pasted_text"; text: string };
+
+export type MemoryState =
+  | "idle" | "embedding"
+  | { sidecar_checking: { count: number } }
+  | { found_relevant: { count: number } }
+  | { extracting: { reason: string } }
+  | { maintaining: { phase: string } }
+  | { tool_action: { action: string; detail: string } };
+
+type MemoryStepStatus = "pending" | "running" | "done" | "error" | "skipped";
+type MemoryStepResult = { summary: string; latency_ms: number };
+
+export interface MemoryActivitySnapshot {
+  state: MemoryState;
+  state_age_ms: number;
+  pipeline?: {
+    search: MemoryStepStatus;
+    search_result?: MemoryStepResult;
+    verify: MemoryStepStatus;
+    verify_result?: MemoryStepResult;
+    verify_progress?: [number, number];
+    inject: MemoryStepStatus;
+    inject_result?: MemoryStepResult;
+    maintain: MemoryStepStatus;
+    maintain_result?: MemoryStepResult;
+  };
+}
+
+/** Delivery point of a daemon-owned prompt. */
+export type QueuedPromptMode = "steer" | "after_yield";
+export type QueuedPromptRemovalOutcome = "removed" | "in_flight" | "already_delivered" | "not_found";
+export type QueuedPromptEditOutcome = "edited" | "in_flight" | "already_delivered" | "not_found";
+export interface QueuedPrompt {
+  client_id: string;
+  content: string;
+  images?: ImageAttachment[];
+  attachments?: Attachment[];
+  mode: QueuedPromptMode;
+  active_skill?: string;
+}
 
 /** A tool definition exposed to the model. */
 export interface SessionToolDefinition {
@@ -155,8 +477,44 @@ export interface ToolConfiguration {
   custom?: SessionToolDefinition[];
 }
 
+export interface BackgroundTaskProgress {
+  kind: "determinate" | "indeterminate";
+  percent: number | null;
+  message: string | null;
+  current: number | null;
+  total: number | null;
+  unit: string | null;
+  eta_seconds: number | null;
+  updated_at: string;
+  source: "reported" | "parsed_output" | "heuristic";
+}
+
+export interface BackgroundTaskSummary {
+  task_id: string;
+  label: string;
+  status: "running" | "completed" | "superseded" | "failed" | "interrupted";
+  started_at: string;
+  duration_secs?: number;
+  stalled: boolean;
+  can_cancel: boolean;
+  progress?: BackgroundTaskProgress;
+  error?: string;
+  exit_code?: number;
+  cancelled?: boolean;
+  last_output_line?: string;
+}
+
+export interface BackgroundTaskOutput {
+  task_id: string;
+  tail: string;
+  truncated: boolean;
+}
+
 export type ApiRequest =
-  | { req: "hello"; min_version: number; max_version: number; client: string; supports_user_response?: boolean }
+  | { req: "list_draft_models" }
+  | { req: "watch_background_tasks"; session_id: string; task_id?: string }
+  | { req: "cancel_background_task"; session_id: string; task_id: string }
+  | { req: "hello"; min_version: number; max_version: number; client: string; supports_user_response?: boolean; supports_applets?: boolean }
   | { req: "list_sessions"; include_archived?: boolean; limit?: number }
   | { req: "archive_session"; session_id: string }
   | { req: "restore_session"; session_id: string }
@@ -164,6 +522,10 @@ export type ApiRequest =
   | { req: "create_session"; working_dir?: string; system_prompt?: string }
   | { req: "attach_session"; session_id: string }
   | { req: "fork_session"; session_id: string }
+  | { req: "fork_side_question"; session_id: string }
+  | { req: "list_side_questions"; parent_session_id: string }
+  | { req: "get_side_question_history"; session_id: string }
+  | { req: "promote_side_question"; session_id: string }
   | { req: "transfer_session"; session_id: string }
   | { req: "detach_session"; session_id: string }
   | { req: "configure_tools"; session_id: string; tools: ToolConfiguration }
@@ -174,10 +536,13 @@ export type ApiRequest =
       session_id: string;
       content: string;
       images?: ImageAttachment[];
+      attachments?: Attachment[];
       no_reply?: boolean;
       system_reminder?: string;
     }
+  | { req: "send_skill_message"; session_id: string; content: string; active_skill: string; system_reminder?: string; images?: ImageAttachment[]; attachments?: Attachment[] }
   | { req: "cancel"; session_id: string }
+  | { req: "force_stop_turn"; session_id: string }
   | {
       req: "soft_interrupt";
       session_id: string;
@@ -187,10 +552,27 @@ export type ApiRequest =
       /** Opaque id echoed in `soft_interrupt_injected` and accepted by a filtered cancel. */
       client_id?: string;
     }
+  | { req: "queue_prompt"; session_id: string; client_id: string; content: string; images?: ImageAttachment[]; attachments?: Attachment[]; mode: QueuedPromptMode; system_reminder?: string; active_skill?: string }
+  | { req: "edit_queued_prompt"; session_id: string; client_id: string; prompt_id: string; content: string; images?: ImageAttachment[]; attachments?: Attachment[] }
+  | { req: "set_queued_prompt_editing"; session_id: string; client_id: string; prompt_id: string; editing: boolean }
+  | { req: "set_queued_prompt_mode"; session_id: string; client_id: string; mode: QueuedPromptMode }
+  | { req: "interrupt_queued_prompt"; session_id: string; client_id: string }
+  | { req: "interrupt_queued_prompts"; session_id: string; ids: string[] }
+  | { req: "get_queued_prompts"; session_id: string }
+  | { req: "remove_queued_prompt"; session_id: string; client_id: string; prompt_id: string }
+  | { req: "reorder_queued_prompts"; session_id: string; client_id: string; order: string[] }
   | { req: "get_history"; session_id: string }
+  | { req: "get_compacted_history"; session_id: string; visible_messages: number }
+  | { req: "get_history_page"; session_id: string; before: string | null; limit: number }
+  | { req: "get_history_image_chunk"; session_id: string; key: string; offset: number }
+  | { req: "list_session_images"; session_id: string }
+  | { req: "get_session_image"; session_id: string; image_id: string; offset: number }
+  | { req: "session_context_breakdown"; session_id?: string | null; model?: string | null; cwd?: string | null; summary_only?: boolean; include_snapcompact?: boolean }
+  | { req: "session_shake_tools"; session_id: string; action: ShakeToolsAction }
   | { req: "peek_session"; session_id: string; limit?: number }
   | { req: "clear"; session_id: string }
   | { req: "rewind"; session_id: string; message_index: number }
+  | { req: "rewind_transcript"; session_id: string; target: RewindAnchor }
   | {
       req: "ask_response";
       session_id: string;
@@ -218,8 +600,19 @@ export type ApiRequest =
   | { req: "get_todo_state"; session_id: string }
   | { req: "ack_todo_follow_up"; session_id: string; effects: TodoEffects }
   | { req: "set_model"; session_id: string; model: string }
+  | { req: "cancel_pending_model"; session_id: string }
   | { req: "set_context_cap"; session_id: string; max_context_tokens: number | null }
+  | { req: "routing_gate_answer"; session_id: string; gate_id: string; choice: RoutingGateChoice }
+  | { req: "routing_intent"; session_id: string; action: RoutingIntentAction }
+  | { req: "get_routing_view" }
+  /** `wav` is base64 mono PCM16, at most 10 MiB decoded; needs `transcribe_v1`. */
+  | { req: "transcribe_audio"; wav: string; language?: string }
+  /** Needs a dedicated connection with no attached session. */
+  | { req: "desktop_state_get"; space: string }
+  | { req: "desktop_state_subscribe"; space: string }
+  | { req: "desktop_state_put"; space: string; device: string; expected_rev: number; changes: DesktopStateChange[] }
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
+  | { req: "set_speed_mode"; session_id: string; speed_mode: SpeedMode }
   | { req: "compact"; session_id: string }
   | { req: "rename_session"; session_id: string; title?: string }
   | { req: "set_session_env"; session_id: string; env: Record<string, string> }
@@ -238,6 +631,8 @@ export type ApiRequest =
   | { req: "cancel_soft_interrupts"; session_id: string; client_ids?: string[] }
   /** Replies `background_tool_result` when the `background_tool_result` capability is advertised, else `ok`. */
   | { req: "background_tool"; session_id: string }
+  /** Cross-session search over titles and transcripts. Replies `session_search`. */
+  | { req: "search_sessions"; query: string; limit?: number }
   | { req: "ping" };
 
 /** Markdown/PDF panel state, shared with the native runtime. */
@@ -289,15 +684,98 @@ export interface SidePanelSnapshot {
   pages?: SidePanelPage[];
 }
 
+export interface ContextMeter {
+  state: "live" | "saved" | "draft" | "unavailable";
+  occupied_tokens: number | null;
+  source: "provider_reported" | "historical_report" | "compaction_estimate" | "local_estimate" | "unknown";
+  measured_at_ms: number | null;
+  route: string | null;
+  model_window_tokens: number | null;
+  effective_budget_tokens: number | null;
+  session_cap_tokens: number | null;
+  compaction_mode: string | null;
+  compaction_threshold_tokens: number | null;
+  idle_precompaction_tokens: number | null;
+  /** Published threshold above which one request's input costs more. Not an occupancy cap. */
+  long_context_pricing_above_input_tokens?: number;
+}
+
+export type ContextBreakdownKind =
+  | "system_prompt"
+  | "builtin_tools"
+  | "skills_modes"
+  | "dynamic_tools"
+  | "agents"
+  | "conversation"
+  /** The snapcompact checkpoint projected for the serving route, not the stored archive. */
+  | "snapcompact"
+  | "unattributed";
+
+export interface ContextBreakdownCategory {
+  kind: ContextBreakdownKind;
+  /** null means unavailable, not empty. */
+  tokens: number | null;
+}
+
+export type ContextActionSavings =
+  | { kind: "no_change" }
+  | { kind: "estimate"; tokens: number }
+  | { kind: "upper_bound"; tokens: number };
+
+export type ContextActionStatus =
+  | "no_eligible"
+  | "unsupported"
+  | "busy"
+  | "savings_unknown"
+  | "unknown";
+
+export interface ContextActionForecast {
+  current_tokens: number | null;
+  compact: ContextActionSavings | null;
+  shake: ContextActionSavings | null;
+  /** Dry-run of the local archive, excluding provider-generated decisions. */
+  compact_measurement?: ContextActionMeasurement;
+  compact_status?: ContextActionStatus;
+  shake_status?: ContextActionStatus;
+}
+
+export interface ContextActionMeasurement {
+  before_tokens: number;
+  after_tokens: number;
+}
+
+export type ShakeToolsAction =
+  | { kind: "preview" }
+  | { kind: "apply"; confirmation: string };
+
+export interface ShakeToolsStats {
+  outputs_elided: number;
+  estimated_tokens_saved: number;
+}
+
+export type ShakeToolsResult =
+  | { kind: "no_change" }
+  | { kind: "preview"; confirmation: string; cache_at_risk: boolean; stats: ShakeToolsStats }
+  | { kind: "applied"; stats: ShakeToolsStats; measurement?: ContextActionMeasurement };
+
 export type ApiEvent =
-  | { ev: "hello_ok"; version: number; server: string; capabilities?: string[] }
+  | { ev: "draft_models"; current: string | null; routes: ModelRouteInfo[] }
+  | { ev: "hello_ok"; version: number; server: string; capabilities?: string[]; runtime_identity?: { pid: number; binary_path: string; git_hash: string; version_label?: string; reload_id?: string; generation: number } }
   | { ev: "ok" }
   | { ev: "runtime_command_result"; session_id: string; command: RuntimeCommand; data: unknown; message: string }
   | { ev: "error"; code: ErrorCode; message: string }
-  | { ev: "sessions"; sessions: SessionInfo[] }
-  | { ev: "attached"; session: SessionInfo }
+  | { ev: "sessions"; sessions: SessionInfo[]; workers?: Record<string, WorkerMeta> }
+  | { ev: "swarm_status"; session_id: string; updated_at_unix_ms: number; members: SwarmMemberInfo[] }
+  | { ev: "attached"; session: SessionInfo; pending_ask_ids?: string[] }
   | { ev: "session_forked"; session: SessionInfo }
+  | { ev: "side_question_forked"; topic: SideQuestionTopic }
+  | { ev: "side_questions"; topics: SideQuestionTopic[] }
   | { ev: "history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[] }
+  | { ev: "memory_injected"; session_id: string; count: number; content: string }
+  | { ev: "memory_activity"; session_id: string; activity: MemoryActivitySnapshot }
+  | { ev: "compacted_history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[]; compacted_total: number; compacted_visible: number; compacted_remaining: number; compacted_hidden_prompts?: number }
+  | { ev: "history_page"; session_id: string; fragments: HistoryFragment[]; before: string | null }
+  | { ev: "history_image_chunk"; session_id: string; key: string; offset: number; total: number; data: string }
   | { ev: "pong" }
   | { ev: "text_delta"; session_id: string; text: string; message_id?: string }
   | { ev: "text_done"; session_id: string; message_id?: string }
@@ -307,6 +785,27 @@ export type ApiEvent =
   | { ev: "tool_start"; session_id: string; call_id: string; name: string }
   | { ev: "tool_input_delta"; session_id: string; call_id: string; delta: string }
   | { ev: "tool_exec"; session_id: string; call_id: string; name: string }
+  | { ev: "queued_prompts"; session_id: string; prompts: QueuedPrompt[] }
+  | { ev: "queued_prompt_removed"; session_id: string; prompt_id: string; outcome: QueuedPromptRemovalOutcome }
+  | { ev: "queued_prompt_edited"; session_id: string; prompt_id: string; outcome: QueuedPromptEditOutcome }
+  | { ev: "session_images"; session_id: string; images: unknown[] }
+  | { ev: "session_image"; session_id: string; image_id: string; media_type: string; offset: number; total: number; data: string }
+  | {
+      ev: "context_breakdown";
+      session_id: string | null;
+      model: string | null;
+      total_tokens: number | null;
+      limit_tokens: number | null;
+      estimated: boolean;
+      categories: ContextBreakdownCategory[];
+      action_forecast?: ContextActionForecast;
+      meter?: ContextMeter;
+      /** Occupancy minus estimated categories. A signed discrepancy, not a category. */
+      residual_tokens?: number;
+    }
+  | { ev: "shake_tools"; session_id: string; result: ShakeToolsResult }
+  | { ev: "user_image_ids"; session_id: string; original_content: string; content: string; image_ids: string[]; image_ordinals?: number[] }
+  | { ev: "usage_limit"; session_id: string; provider: string; model: string; account: string | null; window: string; reset: string; action: string; target: string | null; message: string }
   | { ev: "tools"; session_id: string; tools: SessionToolDefinition[] }
   | { ev: "tool_call"; session_id: string; call_id: string; name: string; input: unknown }
   | {
@@ -316,6 +815,13 @@ export type ApiEvent =
       name: string;
       output: string;
       error?: string;
+      codemode_status?: CodemodeStatus;
+      /** Dispatched calls only. This does not replace the wrapper output. */
+      codemode_calls?: CodemodeCall[];
+      codemode_calls_omitted?: number;
+      report_body_bytes?: number;
+      /** The typed answer when this is a completed `ask`. */
+      ask?: AskRecord;
     }
   | { ev: "side_panel_state"; session_id: string; snapshot: SidePanelSnapshot }
   | { ev: "applet_state"; session_id: string; snapshot: AgentApplets }
@@ -329,7 +835,38 @@ export type ApiEvent =
       cache_creation_input?: number;
       effective_budget?: number;
     }
+  | {
+      /** Final counters for one completed provider request. Not replayed with history. */
+      ev: "request_usage";
+      session_id: string;
+      request_id: string;
+      provider: string;
+      model: string;
+      input: number | null;
+      output: number | null;
+      cache_read_input?: number;
+      cache_creation_input?: number;
+    }
   | { ev: "context_cap_changed"; session_id: string; max_context_tokens: number | null; effective_budget: number }
+  /** The routing policy chose the account for the session's next turn. `pending` is the account a warm session moves to at its next cache-cold seam. */
+  | { ev: "routing_decision"; session_id: string; account: string; reason: string; warnings?: string[]; pending?: string }
+  /** The turn is held on a spending limit. Answer with `routing_gate_answer`. */
+  | { ev: "routing_gate"; session_id: string; gate_id: string; reason: string; options: RoutingGateOption[] }
+  /** A gate was answered or abandoned. Close the matching card. */
+  | { ev: "routing_gate_closed"; session_id: string; gate_id: string }
+  /** Text answer to `routing_intent`. */
+  | { ev: "routing_status"; text: string }
+  | { ev: "routing_view"; view: RoutingView }
+  | { ev: "audio_transcript"; text: string }
+  | { ev: "desktop_state"; space: string; rev: number; entries: DesktopStateEntry[] }
+  | { ev: "desktop_state_applied"; space: string; rev: number; entries: DesktopStateEntry[] }
+  | { ev: "desktop_state_conflict"; space: string; rev: number; full: boolean; entries: DesktopStateEntry[] }
+  | { ev: "desktop_state_rejected"; reason: DesktopStateRejection; message: string }
+  | { ev: "desktop_state_changed"; space: string; rev: number; device: string; entries: DesktopStateEntry[] }
+  /** Persisted prompt occupancy replayed on attach, so a context meter is filled before the next turn reports usage. Not a turn's usage: no cost or turn stats. */
+  | { ev: "context_occupancy"; session_id: string; prompt_tokens: number }
+  /** Cumulative keepalive-only usage. Not a turn or transcript event. */
+  | { ev: "cache_keepalive"; session_id: string; usage: CacheKeepaliveUsage }
   | {
       ev: "kv_cache_miss";
       session_id: string;
@@ -342,6 +879,11 @@ export type ApiEvent =
       message: string;
     }
   | { ev: "turn_stopped"; session_id: string; reason: TurnStopReason; message: string; provider_stop_reason?: string }
+  | { ev: "provider_guardrail_retry"; session_id: string; turn_id: string; attempt: number; max_attempts: number }
+  | { ev: "peer_user_message"; session_id: string; content: string }
+  | { ev: "agent_message"; session_id: string; from_session: string; from_name: string | null; message: string }
+  /** A swarm worker posted a notice for the coordinator's session. */
+  | { ev: "swarm_worker_notice"; session_id: string; message: string }
   /** `pending_soft_interrupts`: queued messages this turn never saw (only when nonzero). */
   | { ev: "turn_done"; session_id: string; pending_soft_interrupts?: number }
   /**
@@ -353,6 +895,7 @@ export type ApiEvent =
   | {
       ev: "soft_interrupt_injected";
       session_id: string;
+      content?: string;
       client_ids: string[];
       point: string;
       tools_skipped?: number;
@@ -362,6 +905,7 @@ export type ApiEvent =
   | { ev: "soft_interrupts_cancelled"; cancelled: string[]; not_queued: string[] }
   /** Reply to `background_tool`. */
   | { ev: "background_tool_result"; moved: boolean; tool_call_id?: string; tool_name?: string }
+  | { ev: "focus_requested"; session_id: string; from_session?: string; from_name?: string }
   | {
       ev: "wake_requested";
       session_id: string;
@@ -375,8 +919,10 @@ export type ApiEvent =
       label: string;
       percent?: number;
       summary: string;
+      detail?: string;
       done?: boolean;
     }
+  | { ev: "background_tasks"; session_id: string; snapshot: { tasks: BackgroundTaskSummary[]; output?: BackgroundTaskOutput } }
   | { ev: "message_accepted"; session_id: string }
   | {
       ev: "ask_request";
@@ -384,6 +930,8 @@ export type ApiEvent =
       request_id: string;
       tool_call_id: string;
       questions: AskQuestion[];
+      /** Who may answer; omitted means a plain question. */
+      kind?: "mcp_approval" | "worker_mcp_approval" | "premium_spawn" | "cold_wake";
     }
   | {
       ev: "permission_request";
@@ -406,6 +954,18 @@ export type ApiEvent =
       /** OAuth account the daemon's account router selected. */
       account_label?: string;
     }
+  /**
+   * Where a model switch stands. A switch asked for mid-turn is answered with
+   * `queued` and applies once the turn ends. `model_info` keeps the model the
+   * session actually runs until `applied` follows.
+   */
+  | {
+      ev: "model_switch";
+      session_id: string;
+      state: "queued" | "applied" | "cancelled" | "failed";
+      model?: string;
+      error?: string;
+    }
   | { ev: "models"; session_id: string; models: string[]; current?: string }
   | {
       ev: "runtime_info";
@@ -417,7 +977,12 @@ export type ApiEvent =
       /** OAuth account the daemon's account router selected. */
       account_label?: string;
       routes: ModelRouteInfo[];
+      speed_mode?: SpeedMode;
+      speed_options?: SpeedOption[];
     }
+  | { ev: "speed_mode_changed"; session_id: string; speed_mode: SpeedMode; speed_options: SpeedOption[] }
+  | { ev: "speed_mode_reported"; session_id: string; requested: SpeedMode | null; actual: SpeedMode }
+  | { ev: "provider_status_detail"; session_id: string; detail: string }
   | { ev: "credential_updated"; provider: string; configured: boolean }
   | {
       ev: "file_content";
@@ -439,7 +1004,29 @@ export type ApiEvent =
       modified_ms?: number;
     }
   | { ev: "todo_state"; session_id: string; state: TodoSnapshot }
+  | {
+      ev: "session_search";
+      query: string;
+      titles: SessionSearchHit[];
+      messages: SessionSearchHit[];
+      indexed_sessions: number;
+      truncated?: boolean;
+    }
   | { ev: "compacted"; session_id: string; message: string }
+  | {
+      ev: "compaction_divider";
+      session_id: string;
+      /** Divider body: the label, then the expandable detail after a blank line. */
+      content: string;
+      /** The compaction is still summarizing: show the running divider. */
+      running?: boolean;
+      /** summary | snapcompact | native | drop */
+      method?: string;
+      /** Trigger label, e.g. reactive or idle_precompact. */
+      trigger?: string;
+      pre_tokens?: number;
+      post_tokens?: number;
+    }
   | {
       ev: "session_renamed";
       session_id: string;
@@ -480,13 +1067,29 @@ export type ServerFrame = { v: number; reply_to?: number } & UnknownApiEvent;
 /** Every event tag the SDK knows about, for drift checks and routing. */
 export const KNOWN_EVENT_KINDS = [
   "runtime_command_result",
+  "draft_models",
   "hello_ok",
   "ok",
   "error",
   "sessions",
+  "swarm_status",
   "attached",
   "session_forked",
+  "side_question_forked",
+  "side_questions",
   "history",
+  "compacted_history",
+  "history_page",
+  "history_image_chunk",
+  "queued_prompts",
+  "queued_prompt_removed",
+  "queued_prompt_edited",
+  "session_images",
+  "session_image",
+  "context_breakdown",
+  "shake_tools",
+  "user_image_ids",
+  "usage_limit",
   "side_pane_images",
   "side_panel_state",
   "applet_state",
@@ -503,15 +1106,37 @@ export const KNOWN_EVENT_KINDS = [
   "tool_exec",
   "tool_done",
   "token_usage",
+  "request_usage",
   "context_cap_changed",
+  "routing_decision",
+  "routing_gate",
+  "routing_gate_closed",
+  "routing_status",
+  "routing_view",
+  "audio_transcript",
+  "desktop_state",
+  "desktop_state_applied",
+  "desktop_state_conflict",
+  "desktop_state_rejected",
+  "desktop_state_changed",
+  "context_occupancy",
+  "cache_keepalive",
   "kv_cache_miss",
+  "memory_injected",
+  "memory_activity",
+  "peer_user_message",
+  "agent_message",
+  "swarm_worker_notice",
   "turn_done",
+  "provider_guardrail_retry",
   "soft_interrupt_injected",
   "soft_interrupts_cancelled",
   "background_tool_result",
   "turn_stopped",
   "wake_requested",
+  "focus_requested",
   "background_progress",
+  "background_tasks",
   "message_accepted",
   "ask_request",
   "permission_request",
@@ -519,15 +1144,21 @@ export const KNOWN_EVENT_KINDS = [
   "session_recovery",
   "connection_phase",
   "model_info",
+  "model_switch",
   "models",
   "runtime_info",
+  "speed_mode_changed",
+  "speed_mode_reported",
+  "provider_status_detail",
   "credential_updated",
   "file_content",
   "files",
   "text_matches",
   "file_status",
   "todo_state",
+  "session_search",
   "compacted",
+  "compaction_divider",
   "session_renamed",
 ] as const;
 
@@ -535,6 +1166,9 @@ export const KNOWN_EVENT_KINDS = [
 export const KNOWN_REQUEST_KINDS = [
   "runtime_command",
   "hello",
+  "list_draft_models",
+  "watch_background_tasks",
+  "cancel_background_task",
   "list_sessions",
   "archive_session",
   "restore_session",
@@ -542,18 +1176,41 @@ export const KNOWN_REQUEST_KINDS = [
   "create_session",
   "attach_session",
   "fork_session",
+  "fork_side_question",
+  "list_side_questions",
+  "get_side_question_history",
+  "promote_side_question",
   "transfer_session",
   "detach_session",
   "configure_tools",
   "list_tools",
   "tool_result",
   "send_message",
+  "send_skill_message",
   "cancel",
+  "force_stop_turn",
   "soft_interrupt",
+  "queue_prompt",
+  "edit_queued_prompt",
+  "set_queued_prompt_editing",
+  "set_queued_prompt_mode",
+  "interrupt_queued_prompt",
+  "interrupt_queued_prompts",
+  "get_queued_prompts",
+  "remove_queued_prompt",
+  "reorder_queued_prompts",
+  "list_session_images",
+  "get_session_image",
+  "session_context_breakdown",
+  "session_shake_tools",
   "get_history",
+  "get_compacted_history",
+  "get_history_page",
+  "get_history_image_chunk",
   "peek_session",
   "clear",
   "rewind",
+  "rewind_transcript",
   "ask_response",
   "permission_response",
   "list_models",
@@ -569,8 +1226,17 @@ export const KNOWN_REQUEST_KINDS = [
   "get_todo_state",
   "ack_todo_follow_up",
   "set_model",
+  "cancel_pending_model",
   "set_context_cap",
+  "routing_gate_answer",
+  "routing_intent",
+  "get_routing_view",
+  "transcribe_audio",
+  "desktop_state_get",
+  "desktop_state_subscribe",
+  "desktop_state_put",
   "set_reasoning_effort",
+  "set_speed_mode",
   "compact",
   "rename_session",
   "set_session_env",
@@ -580,6 +1246,7 @@ export const KNOWN_REQUEST_KINDS = [
   "rewind_undo",
   "cancel_soft_interrupts",
   "background_tool",
+  "search_sessions",
   "ping",
 ] as const;
 
@@ -602,9 +1269,19 @@ export interface AskQuestion {
 export interface AskAnswer {
   selected: string[];
   other?: string;
+  comments?: Record<string, string>;
+  /** Images as [media type, base64], matching QueuePrompt. */
+  other_images?: [string, string][];
+  comment_images?: Record<string, [string, string][]>;
 }
 
 /** `answers` absent means the user declined. */
 export interface AskResponse {
   answers?: AskAnswer[];
+}
+
+/** One answered `ask` call: the questions as asked and the reply. Image payloads are not kept. */
+export interface AskRecord {
+  questions: AskQuestion[];
+  response: AskResponse;
 }

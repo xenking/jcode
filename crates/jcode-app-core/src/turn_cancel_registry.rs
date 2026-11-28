@@ -25,14 +25,89 @@
 
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 /// All interrupt signals registered for one session's in-flight turns.
-type SessionTurnSignals = Vec<(u64, InterruptSignal)>;
+type SessionTurnSignals = Vec<(u64, InterruptSignal, Arc<AtomicU8>)>;
 static ACTIVE_TURNS: LazyLock<Mutex<HashMap<String, SessionTurnSignals>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+// HashMap mutations retain valid entries during unwinding. Poison must not turn
+// a live turn into an apparently idle session or prevent its RAII cleanup.
+fn active_turns() -> MutexGuard<'static, HashMap<String, SessionTurnSignals>> {
+    ACTIVE_TURNS.lock().unwrap_or_else(|error| {
+        crate::logging::warn("Recovering poisoned active-turn cancellation registry");
+        let guard = error.into_inner();
+        ACTIVE_TURNS.clear_poison();
+        guard
+    })
+}
+
+type ForceStopRegistrations = HashMap<String, Vec<(u64, futures::future::AbortHandle)>>;
+
+/// A session can own more than one abortable supervisor: the client-processing
+/// turn and a server-initiated `spawn_tracked_live_turn` (swarm wake, recovery)
+/// can both be live for the same id. Keeping one entry per session meant the
+/// later registration silently replaced the earlier one, so a force stop
+/// aborted a supervisor that had already finished and the turn the user was
+/// staring at kept running.
+static FORCE_STOPS: LazyLock<Mutex<ForceStopRegistrations>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The supervisor owns this registration until the turn and its cleanup finish.
+pub struct ForceStopGuard {
+    token: u64,
+}
+
+pub fn register_force_stop(
+    session_id: &str,
+    handle: futures::future::AbortHandle,
+) -> ForceStopGuard {
+    let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
+    FORCE_STOPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(session_id.to_owned())
+        .or_default()
+        .push((token, handle));
+    ForceStopGuard { token }
+}
+
+/// Abort every supervisor registered for `session_id`. Returns whether at
+/// least one live registration was aborted.
+pub fn force_stop(session_id: &str) -> bool {
+    let handles: Vec<futures::future::AbortHandle> = FORCE_STOPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session_id)
+        .map(|entries| entries.iter().map(|(_, handle)| handle.clone()).collect())
+        .unwrap_or_default();
+    for handle in &handles {
+        handle.abort();
+    }
+    !handles.is_empty()
+}
+
+/// True after an abort request until the supervisor has finished cleanup.
+pub fn force_stop_in_progress(session_id: &str) -> bool {
+    FORCE_STOPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session_id)
+        .is_some_and(|entries| entries.iter().any(|(_, handle)| handle.is_aborted()))
+}
+
+impl Drop for ForceStopGuard {
+    fn drop(&mut self) {
+        let mut map = FORCE_STOPS.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, entries| {
+            entries.retain(|(token, _)| *token != self.token);
+            !entries.is_empty()
+        });
+    }
+}
 
 /// RAII registration for one running turn. Dropping the guard removes the
 /// signal from the registry, so signals never outlive the turn that owns them.
@@ -43,42 +118,126 @@ static ACTIVE_TURNS: LazyLock<Mutex<HashMap<String, SessionTurnSignals>>> =
 /// control handle's signal). Without this, one interrupt would leave the flag
 /// permanently set and instantly abort every subsequent turn on the agent.
 pub struct ActiveTurnGuard {
+    _activity: crate::turn_activity::AdmissionGuard,
     session_id: String,
     token: u64,
     signal: InterruptSignal,
+    reason: Arc<AtomicU8>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TurnInterruptionReason {
+    Cancel = 1,
+    Reload = 2,
+}
+
+impl ActiveTurnGuard {
+    pub fn interruption_reason(&self) -> Option<TurnInterruptionReason> {
+        match self.reason.load(Ordering::Acquire) {
+            1 => Some(TurnInterruptionReason::Cancel),
+            2 => Some(TurnInterruptionReason::Reload),
+            _ => None,
+        }
+    }
+}
+
+/// Record the first interruption before firing the shared wake-up signal.
+pub fn mark_interruption(session_id: &str, reason: TurnInterruptionReason) {
+    if let Some(entries) = active_turns().get(session_id) {
+        for (_, _, stored) in entries {
+            // Failure means a prior interruption already won, which must be preserved.
+            let _ = stored.compare_exchange(0, reason as u8, Ordering::Release, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The reason recorded for the first interruption of a running turn in
+/// `session_id`, if any.
+///
+/// Tools need this to tell a user cancel from a server reload: both fire the
+/// same `graceful_shutdown` signal, but a cancel must kill the command it is
+/// running while a reload leaves it running so the work survives the restart.
+/// A cancel wins when two turns of one session disagree, because stopping the
+/// user's command is the recoverable direction.
+pub fn current_interruption_reason(session_id: &str) -> Option<TurnInterruptionReason> {
+    let entries = active_turns();
+    let stored = entries.get(session_id)?;
+    let mut reload = false;
+    for (_, _, reason) in stored {
+        match reason.load(Ordering::Acquire) {
+            1 => return Some(TurnInterruptionReason::Cancel),
+            2 => reload = true,
+            _ => {}
+        }
+    }
+    reload.then_some(TurnInterruptionReason::Reload)
+}
+
+/// Whether a fired shutdown signal for `session_id` must stop running work.
+///
+/// Only a reload is allowed to leave work running. An unrecorded interruption
+/// counts as a cancel: nothing else fires a turn's shutdown signal, and a
+/// command the user asked to stop is always the safe default.
+pub fn cancellation_stops_running_work(session_id: &str) -> bool {
+    current_interruption_reason(session_id) != Some(TurnInterruptionReason::Reload)
+}
+
+/// Keep the originating turn's reason after its guard has left the registry.
+/// A promoted command must not mistake a reload for Escape during teardown.
+#[cfg(unix)]
+pub(crate) fn capture_running_work_cancel(session_id: &str) -> impl Fn() -> bool + use<> {
+    let reason = active_turns().get(session_id).and_then(|entries| {
+        entries
+            .iter()
+            .max_by_key(|(token, _, _)| *token)
+            .map(|(_, _, reason)| Arc::clone(reason))
+    });
+    move || {
+        reason.as_ref().is_none_or(|reason| {
+            reason.load(Ordering::Acquire) != TurnInterruptionReason::Reload as u8
+        })
+    }
 }
 
 /// Register `signal` as the cancel signal for a turn running in `session_id`.
 /// Call at turn start; keep the guard alive for the duration of the turn.
 pub fn register_active_turn(session_id: &str, signal: InterruptSignal) -> ActiveTurnGuard {
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-    let active = match ACTIVE_TURNS.lock() {
-        Ok(mut map) => {
-            let entry = map.entry(session_id.to_string()).or_default();
-            entry.push((token, signal.clone()));
-            entry.len()
-        }
-        Err(_) => 0,
+    let reason = Arc::new(AtomicU8::new(0));
+    let active = {
+        let mut map = active_turns();
+        let entry = map.entry(session_id.to_string()).or_default();
+        entry.push((token, signal.clone(), Arc::clone(&reason)));
+        entry.len()
     };
+    // Stop may land after the turn reserved admission but before the stream
+    // registered its signal. Once registered, either side observes the stop.
+    if crate::turn_activity::session_is_stopped(session_id) {
+        reason.store(TurnInterruptionReason::Cancel as u8, Ordering::Release);
+        signal.fire();
+    }
     crate::logging::info(&format!(
         "TURN_CANCEL_REGISTERED session={} active_turns={}",
         session_id, active
     ));
     ActiveTurnGuard {
+        _activity: crate::turn_activity::global().executing(session_id),
         session_id: session_id.to_string(),
         token,
         signal,
+        reason,
     }
 }
 
 /// All cancel signals currently registered for turns in `session_id`.
 pub fn active_turn_signals(session_id: &str) -> Vec<InterruptSignal> {
-    ACTIVE_TURNS
-        .lock()
-        .ok()
-        .and_then(|map| {
-            map.get(session_id)
-                .map(|entries| entries.iter().map(|(_, signal)| signal.clone()).collect())
+    active_turns()
+        .get(session_id)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(_, signal, _)| signal.clone())
+                .collect()
         })
         .unwrap_or_default()
 }
@@ -86,15 +245,11 @@ pub fn active_turn_signals(session_id: &str) -> Vec<InterruptSignal> {
 /// Snapshot the session IDs that currently own at least one running turn.
 /// Unlike swarm status, these registrations follow the actual turn lifetime.
 pub fn active_session_ids() -> Vec<String> {
-    ACTIVE_TURNS
-        .lock()
-        .map(|map| {
-            map.iter()
-                .filter(|(_, turns)| !turns.is_empty())
-                .map(|(session_id, _)| session_id.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+    active_turns()
+        .iter()
+        .filter(|(_, turns)| !turns.is_empty())
+        .map(|(session_id, _)| session_id.clone())
+        .collect()
 }
 
 /// Move every in-flight turn registration from `old_session_id` to
@@ -112,8 +267,16 @@ pub fn rename_active_turns(old_session_id: &str, new_session_id: &str) {
     if old_session_id == new_session_id {
         return;
     }
-    let moved = match ACTIVE_TURNS.lock() {
-        Ok(mut map) => match map.remove(old_session_id) {
+    {
+        let mut force = FORCE_STOPS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = force.remove(old_session_id) {
+            force.insert(new_session_id.to_owned(), entry);
+        }
+    }
+    crate::turn_activity::global().rename_session(old_session_id, new_session_id);
+    let moved = {
+        let mut map = active_turns();
+        match map.remove(old_session_id) {
             Some(entries) => {
                 let moved = entries.len();
                 map.entry(new_session_id.to_string())
@@ -122,8 +285,7 @@ pub fn rename_active_turns(old_session_id: &str, new_session_id: &str) {
                 moved
             }
             None => 0,
-        },
-        Err(_) => 0,
+        }
     };
     if moved > 0 {
         crate::logging::info(&format!(
@@ -135,25 +297,23 @@ pub fn rename_active_turns(old_session_id: &str, new_session_id: &str) {
 
 impl Drop for ActiveTurnGuard {
     fn drop(&mut self) {
-        let remaining = match ACTIVE_TURNS.lock() {
-            Ok(mut map) => {
-                // Remove by token across every session bucket: the turn may
-                // have been migrated to a new session id by
-                // [`rename_active_turns`] after this guard was created, so the
-                // guard's own `session_id` can be stale. Leaving an orphaned
-                // entry behind would let a finished turn's signal be fired by
-                // a later cancel.
-                let mut remaining = 0usize;
-                map.retain(|_, entries| {
-                    entries.retain(|(token, _)| *token != self.token);
-                    !entries.is_empty()
-                });
-                if let Some(entries) = map.get(&self.session_id) {
-                    remaining = entries.len();
-                }
-                remaining
+        let remaining = {
+            let mut map = active_turns();
+            // Remove by token across every session bucket: the turn may
+            // have been migrated to a new session id by
+            // [`rename_active_turns`] after this guard was created, so the
+            // guard's own `session_id` can be stale. Leaving an orphaned
+            // entry behind would let a finished turn's signal be fired by
+            // a later cancel.
+            let mut remaining = 0usize;
+            map.retain(|_, entries| {
+                entries.retain(|(token, _, _)| *token != self.token);
+                !entries.is_empty()
+            });
+            if let Some(entries) = map.get(&self.session_id) {
+                remaining = entries.len();
             }
-            Err(_) => 0,
+            remaining
         };
         // A turn's cancel flag must never outlive the turn: if a cancel fired
         // this signal (possibly through a stale control handle that nothing
@@ -177,15 +337,75 @@ impl Drop for ActiveTurnGuard {
 /// with no reply. The registry already knows whether a turn exists, so ask it
 /// rather than guessing.
 pub fn has_active_turn(session_id: &str) -> bool {
-    ACTIVE_TURNS
-        .lock()
-        .ok()
-        .is_some_and(|map| map.get(session_id).is_some_and(|turns| !turns.is_empty()))
+    active_turns()
+        .get(session_id)
+        .is_some_and(|turns| !turns.is_empty())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_turn_registry_preserves_live_cancellation_and_cleanup() {
+        const CHILD: &str = "JCODE_TEST_POISONED_TURN_REGISTRY";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "turn_cancel_registry::tests::poisoned_turn_registry_preserves_live_cancellation_and_cleanup", "--test-threads=1"])
+                .env(CHILD, "1")
+                .env("JCODE_HOME", home.path())
+                .env("JCODE_TEST_SESSION", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let _lock = crate::storage::lock_test_env();
+        let id = "poisoned_turn_registry";
+        let signal = InterruptSignal::new();
+        let guard = register_active_turn(id, signal.clone());
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = ACTIVE_TURNS.lock().unwrap();
+            panic!("injected registry owner panic");
+        });
+        assert!(poisoned.is_err());
+        let listed = active_session_ids().iter().any(|session| session == id);
+        let signals = active_turn_signals(id);
+        let active = has_active_turn(id);
+        mark_interruption(id, TurnInterruptionReason::Cancel);
+        let reason_recorded = guard.interruption_reason() == Some(TurnInterruptionReason::Cancel);
+        drop(guard);
+        let cleaned = !ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(id);
+        ACTIVE_TURNS.clear_poison();
+        assert!(listed && active, "poison hid a live turn");
+        assert_eq!(signals.len(), 1);
+        assert!(signals[0].same_instance(&signal));
+        assert!(reason_recorded && cleaned);
+    }
+
+    #[test]
+    fn interruption_reason_is_per_turn_and_first_signal_wins() {
+        let id = "turn_reason_first_wins";
+        let first = register_active_turn(id, InterruptSignal::new());
+        mark_interruption(id, TurnInterruptionReason::Cancel);
+        mark_interruption(id, TurnInterruptionReason::Reload);
+        assert!(first.interruption_reason() == Some(TurnInterruptionReason::Cancel));
+        drop(first);
+        let second = register_active_turn(id, InterruptSignal::new());
+        assert!(second.interruption_reason().is_none());
+        mark_interruption(id, TurnInterruptionReason::Reload);
+        mark_interruption(id, TurnInterruptionReason::Cancel);
+        assert!(second.interruption_reason() == Some(TurnInterruptionReason::Reload));
+    }
 
     #[test]
     fn active_session_snapshot_tracks_unique_ids_rename_and_drop() {
@@ -269,6 +489,51 @@ mod tests {
         let registered = active_turn_signals(session_id);
         assert_eq!(registered.len(), 1);
         assert!(registered[0].same_instance(&first));
+    }
+
+    /// One session can own more than one abortable supervisor (a client turn
+    /// plus a server-initiated turn). Force stop must abort every live one: a
+    /// single slot per session let the later registration replace the live
+    /// turn, so the abort hit an already-finished task and the turn the user
+    /// was watching kept running.
+    #[tokio::test]
+    async fn force_stop_aborts_every_registration_for_a_session() {
+        let session_id = "turn_cancel_registry_force_stop_multi";
+        let (first_handle, first_registration) = futures::future::AbortHandle::new_pair();
+        let (second_handle, second_registration) = futures::future::AbortHandle::new_pair();
+        let first_guard = register_force_stop(session_id, first_handle);
+        let second_guard = register_force_stop(session_id, second_handle);
+
+        let first_task = tokio::spawn(futures::future::Abortable::new(
+            tokio::time::sleep(std::time::Duration::from_secs(30)),
+            first_registration,
+        ));
+        let second_task = tokio::spawn(futures::future::Abortable::new(
+            tokio::time::sleep(std::time::Duration::from_secs(30)),
+            second_registration,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert!(force_stop(session_id));
+        assert!(
+            first_task.await.unwrap().is_err(),
+            "the older supervisor must be aborted too"
+        );
+        assert!(
+            second_task.await.unwrap().is_err(),
+            "the newer supervisor must be aborted"
+        );
+        assert!(force_stop_in_progress(session_id));
+
+        // Dropping one guard must leave the other registration intact.
+        drop(second_guard);
+        assert!(
+            force_stop_in_progress(session_id),
+            "the remaining guard keeps the session registered"
+        );
+        drop(first_guard);
+        assert!(!force_stop_in_progress(session_id));
+        assert!(!force_stop(session_id), "nothing is registered any more");
     }
 
     /// Issue #732: a session renamed mid-turn (attach/resume) must carry its

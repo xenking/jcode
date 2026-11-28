@@ -118,6 +118,28 @@ pub struct LoginProviderDescriptor {
     pub order: LoginProviderSurfaceOrder,
 }
 
+impl LoginProviderDescriptor {
+    /// Canonical provider key written to config after login, if the target can be a default.
+    pub fn default_provider_key(self) -> Option<&'static str> {
+        match self.target {
+            LoginProviderTarget::Claude | LoginProviderTarget::ClaudeApiKey => Some("claude"),
+            LoginProviderTarget::OpenAi | LoginProviderTarget::OpenAiApiKey => Some("openai"),
+            LoginProviderTarget::OpenRouter => Some("openrouter"),
+            LoginProviderTarget::Bedrock => Some("bedrock"),
+            LoginProviderTarget::OpenAiCompatible(profile) => Some(profile.id),
+            LoginProviderTarget::Cursor => Some("cursor"),
+            LoginProviderTarget::Copilot => Some("copilot"),
+            LoginProviderTarget::Gemini => Some("gemini"),
+            LoginProviderTarget::Antigravity => Some("antigravity"),
+            LoginProviderTarget::AutoImport
+            | LoginProviderTarget::Jcode
+            | LoginProviderTarget::Azure
+            | LoginProviderTarget::GrokBuild
+            | LoginProviderTarget::Google => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenAiCompatibleProfile {
     pub id: &'static str,
@@ -142,9 +164,15 @@ pub struct ResolvedOpenAiCompatibleProfile {
     pub requires_api_key: bool,
 }
 
+mod api_key_detect;
 mod catalog;
 mod muse;
 
+pub use api_key_detect::{
+    AMBIGUOUS_SK_CANDIDATES, ApiKeyDetection, detect_api_key_provider, format_api_key_candidates,
+    is_api_key_login_provider, is_auto_api_key_login_alias, normalize_pasted_api_key,
+    resolve_api_key_provider_input,
+};
 pub use catalog::*;
 use catalog::{LOGIN_PROVIDERS, OPENAI_COMPAT_PROFILES};
 pub use muse::{
@@ -422,6 +450,38 @@ mod tests {
             ALIBABA_CODING_PLAN_PROFILE.api_base,
             "https://coding-intl.dashscope.aliyuncs.com/v1"
         );
+    }
+
+    #[test]
+    fn advertised_login_keys_keep_the_legacy_config_defaults() {
+        for descriptor in login_providers() {
+            let expected = match descriptor.id {
+                "anthropic-api" => Some("claude"),
+                "openai-api" => Some("openai"),
+                "auto-import" | "jcode" | "azure" | "grok-build" | "google" => None,
+                id => Some(id),
+            };
+            assert_eq!(
+                descriptor.default_provider_key(),
+                expected,
+                "{}",
+                descriptor.id
+            );
+            for input in std::iter::once(descriptor.id).chain(descriptor.aliases.iter().copied()) {
+                assert_eq!(
+                    resolve_login_provider(input)
+                        .unwrap_or_else(|| panic!("advertised login key {input:?} did not resolve"))
+                        .default_provider_key(),
+                    expected,
+                    "{input:?} ({})",
+                    descriptor.id,
+                );
+            }
+        }
+
+        for input in ["", "  ", "not-a-provider"] {
+            assert_eq!(resolve_login_provider(input), None, "{input:?}");
+        }
     }
 
     #[test]

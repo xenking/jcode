@@ -2,6 +2,7 @@
 //! rquickjs-sys has no prebuilt bindings.
 
 use super::{CallReceipt, CallStatus, Host, Limits, RunOutput, ToolInfo};
+use crate::strip::Stripped;
 use rquickjs::{
     AsyncContext, AsyncRuntime, CatchResultExt, Function, Promise, Value as JsValue, prelude::Async,
 };
@@ -9,6 +10,11 @@ use serde_json::{Map, Value, json};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Lines the engine prepends to the script when it wraps the body in an async
+/// function, so a position in the evaluated source is that many lines ahead of
+/// the script the model wrote.
+const WRAPPER_LINES: u32 = 1;
 
 const PRELUDE: &str = r#"
 (() => {
@@ -54,6 +60,38 @@ const PRELUDE: &str = r#"
   globalThis.storedKeys = () => JSON.parse(__storeKeys());
 })();
 "#;
+
+/// Wall-clock limit of one run, extended by the time the host reports as
+/// spent waiting on a person. Cloning shares the clock.
+#[derive(Clone)]
+struct Deadline {
+    started: Instant,
+    timeout: Duration,
+    clock: Option<Arc<crate::PauseClock>>,
+}
+
+impl Deadline {
+    fn at(&self) -> Instant {
+        let paused = self.clock.as_ref().map_or(Duration::ZERO, |c| c.paused());
+        self.started + self.timeout + paused
+    }
+
+    fn expired(&self) -> bool {
+        Instant::now() >= self.at()
+    }
+
+    /// Resolves once the deadline passes. The deadline can move later while
+    /// this waits, so it re-reads it after every sleep.
+    async fn elapsed(&self) {
+        loop {
+            let at = self.at();
+            if Instant::now() >= at {
+                return;
+            }
+            tokio::time::sleep_until(at.into()).await;
+        }
+    }
+}
 
 struct Shared {
     host: Arc<dyn Host>,
@@ -205,13 +243,27 @@ async fn run_on_thread(
     shared: Arc<Shared>,
     started: Instant,
 ) -> Result<Option<Value>, String> {
+    // Erase TypeScript types before QuickJS ever sees the script. A script that
+    // does not parse as JavaScript or TypeScript returns here, so the model
+    // gets its own line and column instead of a bare `unexpected token`.
+    let stripped = crate::strip::strip(&code).map_err(|err| {
+        format!(
+            "script did not parse: {err}\ncodemode runs JavaScript and TypeScript; types are erased, so fix the syntax at that position."
+        )
+    })?;
     let rt = AsyncRuntime::new().map_err(|e| format!("failed to create JS runtime: {e}"))?;
     rt.set_memory_limit(shared.limits.memory_bytes).await;
     rt.set_max_stack_size(1024 * 1024).await;
-    let deadline = started + shared.limits.timeout;
+    let clock = shared.host.pause_clock();
+    let deadline = Deadline {
+        started,
+        timeout: shared.limits.timeout,
+        clock,
+    };
     let interrupt_cancel = shared.cancelled.clone();
+    let interrupt_deadline = deadline.clone();
     rt.set_interrupt_handler(Some(Box::new(move || {
-        interrupt_cancel.load(Ordering::Relaxed) || Instant::now() >= deadline
+        interrupt_cancel.load(Ordering::Relaxed) || interrupt_deadline.expired()
     })))
     .await;
     let ctx = AsyncContext::full(&rt)
@@ -231,16 +283,16 @@ async fn run_on_thread(
         ctx.eval::<(), _>(PRELUDE)
             .catch(&ctx)
             .map_err(|e| format!("prelude failed: {e}"))?;
-        let wrapped = format!("(async () => {{\n{code}\n}})()");
+        let wrapped = format!("(async () => {{\n{code}\n}})()", code = stripped.code);
         let promise: Promise = ctx
             .eval(wrapped)
             .catch(&ctx)
-            .map_err(|e| format_js_error(&e.to_string()))?;
+            .map_err(|e| format_js_parse_error(&stripped, &e.to_string()))?;
         let value: JsValue = promise
             .into_future::<JsValue>()
             .await
             .catch(&ctx)
-            .map_err(|e| format_js_error(&e.to_string()))?;
+            .map_err(|e| format_js_error(&stripped, &e.to_string()))?;
         if value.is_undefined() {
             return Ok(None);
         }
@@ -259,15 +311,28 @@ async fn run_on_thread(
         }
     });
 
+    let timeout_message = || {
+        format!(
+            "codemode timed out after {timeout:?} (wall-clock limit per run); split the work into shorter new codemode runs."
+        )
+    };
     let result = tokio::select! {
         result = script => result,
-        _ = tokio::time::sleep(timeout) => Err(format!("timed out after {}s", timeout.as_secs())),
+        _ = deadline.elapsed() => Err(timeout_message()),
         _ = cancelled => Err("cancelled".to_string()),
     };
     let result = match result {
-        Err(err) if err.contains("interrupted") && Instant::now() >= deadline => {
-            Err(format!("timed out after {}s", timeout.as_secs()))
+        Err(err) if err.contains("interrupted") && deadline.expired() => Err(timeout_message()),
+        Err(err) if err.contains("out of memory") || err.contains("memory limit reached") => {
+            Err(format!(
+                "{err} (codemode heap limit: {} bytes per run); process smaller batches in a new codemode run.",
+                shared.limits.memory_bytes
+            ))
         }
+        Err(err) if err.contains("Exception generated by quickjs: Null\"null\"") => Err(format!(
+            "{err}; QuickJS could not describe the exception. This can happen at the codemode heap limit ({} bytes per run); try smaller batches in a new codemode run, or inspect thrown null values.",
+            shared.limits.memory_bytes
+        )),
         other => other,
     };
     // Drop pending host-call futures before the runtime goes away.
@@ -276,12 +341,28 @@ async fn run_on_thread(
     result
 }
 
-fn format_js_error(raw: &str) -> String {
-    let trimmed = raw.trim();
+/// QuickJS reports positions in the stripped, wrapped source. Put them back on
+/// the script the model wrote before anything else looks at the message.
+fn format_js_error(stripped: &Stripped, raw: &str) -> String {
+    let trimmed = stripped.remap_error(raw.trim(), WRAPPER_LINES);
     if trimmed.contains("out of memory") {
         return format!("{trimmed} (memory limit reached)");
     }
     trimmed.to_string()
+}
+
+/// [`crate::strip`] has already produced the JavaScript QuickJS evaluates, and
+/// it only returns code the parser and codegen agree on. Reaching a parse error
+/// at this point means the stripper, not the model's script, is at fault, so
+/// say that instead of sending the model off to rewrite working code.
+fn format_js_parse_error(stripped: &Stripped, raw: &str) -> String {
+    let message = format_js_error(stripped, raw);
+    if message.contains("memory limit reached") {
+        return message;
+    }
+    format!(
+        "{message}\nThe stripped script did not parse. That is a codemode bug rather than a problem with your script: nothing about your code was rejected for its types.\n"
+    )
 }
 
 fn install_globals<'js>(ctx: &rquickjs::Ctx<'js>, shared: &Arc<Shared>) -> rquickjs::Result<()> {
@@ -328,6 +409,7 @@ fn install_globals<'js>(ctx: &rquickjs::Ctx<'js>, shared: &Arc<Shared>) -> rquic
                         "name": t.name,
                         "description": t.description,
                         "input_schema": t.input_schema,
+                        "output_schema": t.output_schema,
                         "typescript": crate::ts::declarations(std::iter::once(t)),
                     })
                     .to_string()
@@ -438,7 +520,7 @@ async fn call_tool(shared: &Arc<Shared>, name: String, raw_args: String) -> Stri
     let count = shared.calls.fetch_add(1, Ordering::SeqCst) + 1;
     if count > shared.limits.max_tool_calls {
         let msg = format!(
-            "tool call limit reached ({} per run)",
+            "tool call limit reached ({} per run); split the work into a new codemode run and reuse stored results where appropriate.",
             shared.limits.max_tool_calls
         );
         return refuse(&name, msg);
@@ -446,7 +528,14 @@ async fn call_tool(shared: &Arc<Shared>, name: String, raw_args: String) -> Stri
     let args: Value = match serde_json::from_str(&raw_args) {
         Ok(Value::Null) => Value::Object(Map::new()),
         Ok(value) => value,
-        Err(err) => return refuse(&name, format!("arguments are not JSON: {err}")),
+        Err(err) => {
+            return refuse(
+                &name,
+                format!(
+                    "arguments are not JSON: {err}; pass JSON-serializable arguments and retry."
+                ),
+            );
+        }
     };
     let seq = shared.record(&name, CallStatus::InFlight, 0, 0, None);
     let started = Instant::now();

@@ -168,6 +168,10 @@ pub enum NodeKind {
     KeyValue {
         rows: Vec<KeyValueRow>,
     },
+    /// Read-only projection of the owning agent session's task events. No arbitrary data source.
+    SessionTasks {
+        title: String,
+    },
     Table {
         columns: Vec<String>,
         rows: Vec<Vec<String>>,
@@ -289,6 +293,7 @@ pub const KNOWN_TYPES: &[&str] = &[
     "image",
     "icon",
     "key_value",
+    "session_tasks",
     "table",
     "progress",
     "empty",

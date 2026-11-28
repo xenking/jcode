@@ -60,6 +60,8 @@ impl JcodeProvider {
     fn model_routes_for(tier: crate::subscription_catalog::JcodeTier) -> Vec<ModelRoute> {
         Self::entitled_models_for(tier)
             .map(|model| ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: model.id.to_string(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
@@ -67,6 +69,8 @@ impl JcodeProvider {
                 detail: crate::subscription_catalog::routing_policy_detail(model),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect()
     }
@@ -245,6 +249,10 @@ impl Provider for JcodeProvider {
 
     fn uses_jcode_compaction(&self) -> bool {
         self.inner.uses_jcode_compaction()
+    }
+
+    fn supports_explicit_native_compaction(&self) -> bool {
+        self.inner.supports_explicit_native_compaction()
     }
 
     async fn native_compact(

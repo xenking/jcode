@@ -1,12 +1,70 @@
 use super::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::{Command, Stdio};
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn test_own_process_not_reading_stdin() {
     let pid = std::process::id();
     let state = is_waiting_for_stdin(pid);
     assert_ne!(state, StdinState::Reading);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_waiting_process_with_null_stdin_is_not_reading() {
+    use std::io::{BufRead, BufReader};
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "echo ready; exec /bin/sleep 10"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    let ready = output.read_line(&mut line);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let state = is_waiting_for_stdin(child.id());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(ready.is_ok());
+    assert_eq!(line.trim(), "ready");
+    assert_eq!(state, StdinState::NotReading);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_process_waiting_for_pty_stdin_is_reading() {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    let (mut master, mut slave) = (-1, -1);
+    let result = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(result, 0, "openpty: {}", std::io::Error::last_os_error());
+    let (_master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    let mut child = Command::new("/usr/bin/head")
+        .arg("-n1")
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let state = loop {
+        let state = is_waiting_for_stdin(child.id());
+        if state == StdinState::Reading || std::time::Instant::now() >= deadline {
+            break state;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(state, StdinState::Reading);
 }
 
 #[test]

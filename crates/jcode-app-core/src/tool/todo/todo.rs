@@ -1,0 +1,1700 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
+use super::{Tool, ToolContext, ToolOutput};
+use crate::bus::{Bus, BusEvent, TodoEvent};
+use crate::todo::{
+    GateObservation, GateObservationKind, SEVERE_INTENT_MISUNDERSTANDING,
+    TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE, TodoGoal, TodoGoalChange, TodoGoalField,
+    TodoItem, TodoPlan, TodoPlanChange, TodoPlanField, append_gate_observations,
+    feedback_loop_passes, intent_understanding_passes, load_goals, load_plan, load_todos,
+    save_goals, save_plan, save_todos, update_todo_review_cycle,
+};
+use anyhow::{Result, bail};
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+
+pub struct TodoTool;
+
+#[path = "todo_names.rs"]
+mod names;
+
+#[cfg(test)]
+#[path = "todo_name_tests.rs"]
+mod name_tests;
+
+#[cfg(test)]
+#[path = "todo_pause_tests.rs"]
+mod pause_tests;
+
+#[cfg(test)]
+#[path = "todo_lane_dependency_tests.rs"]
+mod lane_dependency_tests;
+
+/// A lane-wide field edit naming one member applies atomically to its entire
+/// lane (`lane_after`, `lane_owner`, `lane_speed`).
+fn patch_lane_field(todos: &mut [Value], id: &str, field: &str, value: Value) -> Result<()> {
+    let typed: Vec<TodoItem> = serde_json::from_value(Value::Array(todos.to_vec()))?;
+    let target = typed
+        .iter()
+        .find(|todo| todo.id == id)
+        .ok_or_else(|| anyhow::anyhow!("unknown todo {id:?}"))?;
+    let lane = crate::todo::stages::lane_id(target);
+    for (raw, todo) in todos.iter_mut().zip(&typed) {
+        if crate::todo::stages::lane_id(todo) == lane {
+            raw[field] = value.clone();
+        }
+    }
+    Ok(())
+}
+
+fn patch_lane_after(todos: &mut [Value], id: &str, value: Value) -> Result<()> {
+    patch_lane_field(todos, id, "lane_after", value)
+}
+
+/// Resolve the item pause fields at the tool boundary. `waiting_on` arrives as
+/// `{ids, reason}` (a bare ID list is still accepted) and is stored as the ID
+/// list plus `waiting_reason`. Items have no block of their own, so the removed
+/// blocker fields are rejected with the replacement spelled out.
+fn normalize_item_pauses(input: &mut Value) -> Result<()> {
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(());
+    };
+    for key in ["update", "add", "todos"] {
+        let Some(items) = obj.get_mut(key).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            let Some(fields) = item.as_object_mut() else {
+                continue;
+            };
+            for removed in ["external_blocker", "completely_blocked"] {
+                if fields.get(removed).is_some_and(|value| !value.is_null()) {
+                    bail!(
+                        "{removed} was removed: todos cannot be blocked. Use waiting_on for \
+                         running tasks or other agents, requires_user_auth when the step needs a login \
+                         or credential only the user has, or the goal's cannot_complete when the goal \
+                         is impossible. Otherwise keep working."
+                    );
+                }
+                fields.remove(removed);
+            }
+            let Some(waiting) = fields.get_mut("waiting_on") else {
+                continue;
+            };
+            if let Value::String(raw) = waiting
+                && let Ok(parsed @ (Value::Object(_) | Value::Array(_) | Value::Null)) =
+                    serde_json::from_str::<Value>(raw.trim())
+            {
+                *waiting = parsed;
+            }
+            // Writing `{ids, reason}` replaces the reason. A bare list is
+            // either a model write without a reason (clears it) or an already
+            // normalized item, whose resolved reason must survive a second pass.
+            match waiting {
+                Value::Object(wait) => {
+                    let reason = wait
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|reason| !reason.is_empty())
+                        .map(|reason| json!(reason));
+                    *waiting = wait.remove("ids").unwrap_or(Value::Null);
+                    fields.insert("waiting_reason".into(), reason.unwrap_or(Value::Null));
+                }
+                _ => {
+                    fields.entry("waiting_reason").or_insert(Value::Null);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate the entire replacement before touching either todo storage or
+/// background delivery. A terminal dependency remains valid but needs no wake.
+async fn prepare_background_dependencies(
+    manager: &crate::background::BackgroundTaskManager,
+    session_id: &str,
+    previous: &[TodoItem],
+    todos: &[TodoItem],
+) -> Result<()> {
+    let mut ids: HashMap<&str, (bool, bool)> = HashMap::new();
+    for todo in todos {
+        let prior = previous.iter().find(|old| old.id == todo.id);
+        let active = !crate::todo::todo_status_is_completed(&todo.status)
+            && !crate::todo::todo_status_is_cancelled(&todo.status)
+            && !crate::todo::todo_requires_user_auth(todo);
+        for id in &todo.waiting_on {
+            // Check before the manager constructs any filesystem path.
+            if id.is_empty()
+                || !id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+            {
+                bail!("Invalid waiting_on background task ID: {id}");
+            }
+            let is_new = !prior.is_some_and(|old| old.waiting_on.contains(id));
+            let entry = ids.entry(id).or_default();
+            entry.0 |= is_new;
+            entry.1 |= active;
+        }
+    }
+    let mut running = Vec::new();
+    let mut awaits = Vec::new();
+    for (id, (is_new, active)) in ids {
+        if id.starts_with(crate::todo::await_dependency::ID_PREFIX) {
+            let dependency =
+                crate::todo::await_dependency::load(&crate::storage::runtime_dir(), id);
+            match dependency {
+                Some(dependency) => {
+                    if dependency.session_id != session_id {
+                        bail!("waiting_on await does not belong to this session: {id}");
+                    }
+                    if active && dependency.is_running() {
+                        awaits.push(id);
+                    }
+                }
+                None if is_new => bail!("Unknown waiting_on await dependency: {id}"),
+                None => {}
+            }
+            continue;
+        }
+        let Some(task) = manager.status(id).await else {
+            if is_new {
+                bail!("Unknown waiting_on background task: {id}");
+            }
+            // Cleanup can remove historical task files. Retaining that same
+            // todo's reference must not prevent unrelated or assessment writes.
+            continue;
+        };
+        if task.task_id != id {
+            bail!("Unknown waiting_on background task: {id}");
+        }
+        if task.session_id != session_id {
+            bail!("waiting_on background task does not belong to this session: {id}");
+        }
+        if active && task.status == crate::bus::BackgroundTaskStatus::Running {
+            running.push(id);
+        }
+    }
+    for id in awaits {
+        crate::await_members_state::subscribe_dependency(id, session_id)?;
+    }
+    for id in running {
+        // The task may finish between validation and subscription. Terminal
+        // dependencies do not block, and callers re-read current task state.
+        manager.update_delivery(id, true, true).await?;
+    }
+    Ok(())
+}
+
+impl TodoTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// How a todo call wrote, for measuring whether agents use incremental edits
+/// instead of resending the list. Counted locally in
+/// `~/.jcode/stats/todo-write-modes.json`; nothing leaves the machine.
+fn todo_write_mode(input: &Value) -> &'static str {
+    let has = |key: &str| input.get(key).is_some_and(|value| !value.is_null());
+    match (
+        has("todos") || has("phases"),
+        has("update") || has("add") || has("remove") || has("cancel"),
+    ) {
+        (true, _) => "full",
+        (false, true) => "patch",
+        (false, false) if has("goals") || has("plan") => "assessment",
+        _ => "read",
+    }
+}
+
+fn record_todo_write_mode(input: &Value) {
+    static COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Diagnostic counters must not fail the actual todo write. Keep failures
+    // observable and preserve unreadable counters instead of replacing them.
+    let result = (|| -> Result<()> {
+        let _guard = COUNTER_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("todo counter lock poisoned"))?;
+        let dir = crate::storage::jcode_dir()?.join("stats");
+        let path = dir.join("todo-write-modes.json");
+        let mut counts: HashMap<String, u64> = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let count = counts
+            .entry(todo_write_mode(input).to_string())
+            .or_default();
+        *count = count.saturating_add(1);
+        crate::storage::write_json_fast(&path, &counts)
+    })();
+    if let Err(error) = result {
+        crate::logging::debug(&format!("Todo diagnostic counter unavailable: {error:#}"));
+    }
+}
+
+/// Every key an update may carry once names and pauses are normalized: the
+/// stored todo fields plus their public aliases.
+const UPDATE_FIELDS: &[&str] = &[
+    "id",
+    "content",
+    "details",
+    "status",
+    "priority",
+    "group",
+    "lane",
+    "stage",
+    "phase",
+    "wave",
+    "lane_after",
+    "lane_dependencies",
+    "lane_owner",
+    "lane_speed",
+    "lane_profile",
+    "confidence",
+    "completion_confidence",
+    "confidence_history",
+    "blocked_by",
+    "waiting_on",
+    "waiting_reason",
+    "requires_user_auth",
+    "assigned_to",
+    "intent",
+];
+
+/// Turn incremental edits into a full `todos` list so every downstream rule
+/// (status validation, confidence history, gates, lane and plan sync) runs on
+/// one path. `update` changes only the given fields of todos matched by `id`;
+/// `add` appends new todos (or inserts each after its `after` id); `remove`
+/// drops ids. Full replacements and incremental edits are mutually exclusive.
+#[cfg(test)]
+fn apply_todo_patch(input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+    prepare_todo_patch(input, stored, &mut Vec::new())
+}
+
+fn prepare_todo_patch(
+    mut input: Value,
+    stored: impl FnOnce() -> Value,
+    cancellations: &mut Vec<crate::todo::store::TodoCancellation>,
+) -> Result<Value> {
+    names::normalize_containers(&mut input);
+    let patching = ["update", "add", "remove", "cancel"]
+        .iter()
+        .any(|key| input.get(*key).is_some_and(|value| !value.is_null()));
+    let named_replacement = ["phases", "todos"]
+        .iter()
+        .any(|key| input.get(*key).is_some_and(names::uses_names));
+    let stored = if patching || named_replacement {
+        stored()
+    } else {
+        json!([])
+    };
+    names::normalize_public_input(
+        &mut input,
+        stored.as_array().map(Vec::as_slice).unwrap_or(&[]),
+    )?;
+    flatten_phases(&mut input)?;
+    normalize_item_pauses(&mut input)?;
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(input);
+    };
+    let patching = ["update", "add", "remove", "cancel"]
+        .iter()
+        .any(|key| obj.get(*key).is_some_and(|value| !value.is_null()));
+    if !patching {
+        return Ok(input);
+    }
+    if obj.get("todos").is_some_and(|value| !value.is_null()) {
+        bail!("send either a full `todos` list or `update`/`add`/`cancel` edits, not both");
+    }
+    let parse_list = |value: Option<Value>| -> Result<Vec<Value>> {
+        match value {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(Value::Array(items)) => Ok(items),
+            Some(Value::String(raw)) if raw.trim().is_empty() => Ok(Vec::new()),
+            Some(Value::String(raw)) => match serde_json::from_str::<Value>(raw.trim()) {
+                Ok(Value::Array(items)) => Ok(items),
+                Ok(single @ Value::Object(_)) => Ok(vec![single]),
+                _ => bail!("expected a list"),
+            },
+            Some(single @ Value::Object(_)) => Ok(vec![single]),
+            Some(other) => bail!("expected a list, got {other}"),
+        }
+    };
+    let cancels = parse_list(obj.remove("cancel"))?;
+    let updates = parse_list(obj.remove("update"))?;
+    let adds = parse_list(obj.remove("add"))?;
+    let removes: Vec<String> = parse_list(obj.remove("remove"))?
+        .into_iter()
+        .map(|value| match value {
+            Value::String(id) => Ok(id),
+            _ => bail!("each remove entry must be an id string"),
+        })
+        .collect::<Result<_>>()?;
+
+    let Value::Array(mut todos) = stored else {
+        bail!("stored todos are not a list");
+    };
+    let id_of = |todo: &Value| todo.get("id").and_then(Value::as_str).map(str::to_string);
+
+    let mut cancelled_ids = std::collections::HashSet::new();
+    for cancel in cancels {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Cancel {
+            name: String,
+            reason: String,
+        }
+        let Cancel { name, reason } = serde_json::from_value(cancel)?;
+        let reason = reason.trim();
+        if reason.is_empty() {
+            bail!("cancel requires a nonempty reason");
+        }
+        let id = names::resolve_name(&todos, &name)?;
+        if !cancelled_ids.insert(id.clone())
+            || removes.contains(&id)
+            || updates.iter().any(|u| u["id"].as_str() == Some(&id))
+        {
+            bail!("conflicting edits for cancelled todo {name:?}");
+        }
+        let original = todos
+            .iter()
+            .find(|t| t["id"].as_str() == Some(&id))
+            .ok_or_else(|| anyhow::anyhow!("resolved todo {name:?} no longer exists"))?;
+        cancellations.push(crate::todo::store::TodoCancellation::new(
+            serde_json::from_value(original.clone())?,
+            reason.to_owned(),
+        ));
+    }
+    for update in updates {
+        let Some(fields) = update.as_object() else {
+            bail!("each update must be an object with an id");
+        };
+        let Some(id) = fields.get("id").and_then(Value::as_str) else {
+            bail!("each update needs an `id`");
+        };
+        let Some(todo) = todos
+            .iter_mut()
+            .find(|todo| id_of(todo).as_deref() == Some(id))
+        else {
+            bail!("no todo with id {id:?}; use `add` for new todos");
+        };
+        let target = todo
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("stored todo {id:?} is not an object"))?;
+        validate_membership(fields)?;
+        // The update schema is open (see `parameters_schema`), so a misspelled
+        // field would otherwise be stored and silently ignored.
+        if let Some(unknown) = fields
+            .keys()
+            .find(|key| !UPDATE_FIELDS.contains(&key.as_str()))
+        {
+            bail!(
+                "unknown update field {unknown:?} on {id:?}; update takes the same fields as add, plus rename_to"
+            );
+        }
+        for (key, value) in fields {
+            if key != "id" {
+                // `phase`/`lane` are the card's words for `stage`/`group`;
+                // write the canonical key so an alias never sits beside it.
+                let key = match key.as_str() {
+                    "phase" | "wave" => "stage",
+                    "lane" => "group",
+                    other => other,
+                };
+                target.insert(key.to_string(), value.clone());
+            }
+        }
+        if let Some(value) = fields.get("lane_after") {
+            patch_lane_after(&mut todos, id, value.clone())?;
+        }
+        if let Some(value) = fields.get("lane_owner") {
+            patch_lane_field(&mut todos, id, "lane_owner", value.clone())?;
+        }
+        if let Some(value) = fields.get("lane_speed") {
+            patch_lane_field(&mut todos, id, "lane_speed", value.clone())?;
+        }
+        if let Some(value) = fields.get("lane_profile") {
+            patch_lane_field(&mut todos, id, "lane_profile", value.clone())?;
+        }
+    }
+
+    for mut add in adds {
+        let Some(fields) = add.as_object_mut() else {
+            bail!("each added todo must be an object");
+        };
+        let after = fields
+            .remove("after")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("after must be a nonempty todo id"))
+            })
+            .transpose()?;
+        validate_membership(fields)?;
+        let anchor = after
+            .as_ref()
+            .map(|id| {
+                todos
+                    .iter()
+                    .find(|todo| id_of(todo).as_ref() == Some(id))
+                    .ok_or_else(|| anyhow::anyhow!("unknown after todo {id:?}"))
+            })
+            .transpose()?;
+        for (alias, canonical) in [("phase", "stage"), ("wave", "stage"), ("lane", "group")] {
+            if let Some(value) = fields.remove(alias) {
+                fields.insert(canonical.into(), value);
+            }
+        }
+        let template = anchor.or_else(|| todos.last());
+        for (public, canonical, fallback) in [
+            ("phase", "stage", json!(1)),
+            ("lane", "group", json!("default")),
+        ] {
+            if !fields.contains_key(canonical) {
+                let value = template
+                    .and_then(|todo| todo.get(canonical).or_else(|| todo.get(public)))
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                    .or_else(|| after.is_none().then_some(fallback))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "added todo needs {public}, or an after todo with membership"
+                        )
+                    })?;
+                fields.insert(canonical.to_string(), value);
+            }
+        }
+        let lane_template = todos.iter().find(|todo| {
+            todo.get("stage") == fields.get("stage") && todo.get("group") == fields.get("group")
+        });
+        for field in ["lane_after", "lane_speed", "lane_profile"] {
+            if !fields.contains_key(field)
+                && let Some(value) = lane_template.and_then(|todo| todo.get(field))
+            {
+                fields.insert(field.into(), value.clone());
+            }
+        }
+        let lane_after = fields.get("lane_after").cloned();
+        let lane_speed = fields.get("lane_speed").cloned();
+        let lane_profile = fields.get("lane_profile").cloned();
+        let id = fields.get("id").and_then(Value::as_str).map(str::to_string);
+        if let Some(id) = &id
+            && todos.iter().any(|todo| id_of(todo).as_deref() == Some(id))
+        {
+            bail!("todo id {id:?} already exists; use `update` to change it");
+        }
+        match after.and_then(|after| {
+            todos
+                .iter()
+                .position(|t| id_of(t).as_deref() == Some(&after))
+        }) {
+            Some(index) => todos.insert(index + 1, add),
+            None => todos.push(add),
+        }
+        if let Some(id) = id {
+            if let Some(value) = lane_after {
+                patch_lane_after(&mut todos, &id, value)?;
+            }
+            if let Some(value) = lane_speed {
+                patch_lane_field(&mut todos, &id, "lane_speed", value)?;
+            }
+            if let Some(value) = lane_profile {
+                patch_lane_field(&mut todos, &id, "lane_profile", value)?;
+            }
+        }
+    }
+
+    if !removes.is_empty() {
+        todos.retain(|todo| !id_of(todo).is_some_and(|id| removes.contains(&id)));
+    }
+
+    if !cancelled_ids.is_empty() {
+        todos.retain(|todo| !id_of(todo).is_some_and(|id| cancelled_ids.contains(&id)));
+        for todo in &todos {
+            for (field, public_field) in [
+                ("lane_after", "lane_dependencies"),
+                ("blocked_by", "blocked_by"),
+            ] {
+                if todo[field].as_array().is_some_and(|deps| {
+                    deps.iter()
+                        .filter_map(Value::as_str)
+                        .any(|id| cancelled_ids.contains(id))
+                }) {
+                    bail!(
+                        "cannot cancel a prerequisite of {}; redirect or clear its {public_field} in the same edit",
+                        todo["content"]
+                    );
+                }
+            }
+        }
+    }
+    obj.insert("todos".to_string(), Value::Array(todos));
+    Ok(input)
+}
+
+#[derive(Deserialize)]
+struct TodoInput {
+    todos: Option<Vec<TodoItem>>,
+    goals: Option<Vec<TodoGoal>>,
+    plan: Option<TodoPlan>,
+}
+
+fn parse_todo_input(input: Value) -> Result<TodoInput> {
+    let mut input = input;
+    names::normalize_public_input(&mut input, &[])?;
+    flatten_phases(&mut input)?;
+    normalize_item_pauses(&mut input)?;
+    let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
+    if let Some(todos) = &params.todos {
+        let mut ids = std::collections::HashSet::new();
+        for todo in todos {
+            if !ids.insert(&todo.id) {
+                bail!("duplicate todo id {:?}", todo.id);
+            }
+        }
+    }
+    if let Some(todo) = params.todos.as_ref().and_then(|todos| {
+        todos
+            .iter()
+            .find(|todo| crate::todo::canonical_todo_status(&todo.status).is_none())
+    }) {
+        bail!(
+            "invalid todo status {:?}; expected one of: pending, in_progress, completed; use cancel to withdraw work",
+            todo.status
+        );
+    }
+    Ok(params)
+}
+
+/// Validate aliases before serde can silently select or duplicate membership.
+fn validate_membership(fields: &serde_json::Map<String, Value>) -> Result<()> {
+    if ["phases", "lanes", "items"]
+        .iter()
+        .any(|key| fields.contains_key(*key))
+    {
+        bail!("incremental items must not contain hierarchy containers");
+    }
+    for keys in [
+        ["phase", "stage", "wave"].as_slice(),
+        ["lane", "group"].as_slice(),
+    ] {
+        let values: Vec<_> = keys.iter().filter_map(|key| fields.get(*key)).collect();
+        if values.windows(2).any(|pair| pair[0] != pair[1]) {
+            bail!("conflicting membership fields: {keys:?}");
+        }
+        for value in values {
+            if keys[0] == "phase" {
+                if !value
+                    .as_u64()
+                    .is_some_and(|phase| phase > 0 && phase <= u32::MAX as u64)
+                {
+                    bail!("phase must be a positive integer");
+                }
+            } else if value.as_str().is_none_or(|lane| lane.trim().is_empty()) {
+                bail!("lane must be a nonempty string");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Only the public boundary is hierarchical. Storage and swarm retain stage/group.
+fn flatten_phases(input: &mut Value) -> Result<()> {
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(phases) = obj.get("phases").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    if ["todos", "update", "add", "remove", "cancel"]
+        .iter()
+        .any(|key| obj.get(*key).is_some_and(|v| !v.is_null()))
+    {
+        bail!("send phases or legacy todos or incremental edits, not both");
+    }
+    let phases = phases
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("phases must be an array"))?;
+    let mut phase_ids = std::collections::HashSet::new();
+    let mut item_ids = std::collections::HashSet::new();
+    let mut todos = Vec::new();
+    for phase in phases {
+        let phase = phase
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("phase must be an object"))?;
+        if phase
+            .keys()
+            .any(|key| !["phase", "lanes"].contains(&key.as_str()))
+        {
+            bail!("unexpected phase field");
+        }
+        let number = phase
+            .get("phase")
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+            .ok_or_else(|| anyhow::anyhow!("phase must be a positive integer"))?;
+        if !phase_ids.insert(number) {
+            bail!("duplicate phase {number}");
+        }
+        let lanes = phase
+            .get("lanes")
+            .and_then(Value::as_array)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("phase needs nonempty lanes"))?;
+        let mut lane_ids = std::collections::HashSet::new();
+        for lane in lanes {
+            let lane = lane
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("lane must be an object"))?;
+            if lane.keys().any(|key| {
+                !["lane", "items", "after", "owner", "speed", "profile"].contains(&key.as_str())
+            }) {
+                bail!("unexpected lane field");
+            }
+            let name = lane
+                .get("lane")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("lane must be a nonempty string"))?;
+            if !lane_ids.insert(name) {
+                bail!("duplicate lane {name:?}");
+            }
+            let items = lane
+                .get("items")
+                .and_then(Value::as_array)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("lane needs nonempty items"))?;
+            for item in items {
+                let mut item = item
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("item must be an object"))?;
+                if [
+                    "phase",
+                    "lane",
+                    "stage",
+                    "group",
+                    "wave",
+                    "lane_after",
+                    "lane_dependencies",
+                    "lane_owner",
+                    "lane_speed",
+                    "lane_profile",
+                ]
+                .iter()
+                .any(|key| item.contains_key(*key))
+                {
+                    bail!("hierarchical items must not own phase/lane/stage/group membership");
+                }
+                for key in item.keys() {
+                    // Pause normalization below still handles legacy null
+                    // blocker keys and supplies their migration guidance.
+                    if !UPDATE_FIELDS.contains(&key.as_str())
+                        && !["external_blocker", "completely_blocked"].contains(&key.as_str())
+                    {
+                        bail!("unexpected phase item field {key:?}");
+                    }
+                }
+                let id = item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("item needs id"))?;
+                if id.trim().is_empty() {
+                    bail!("item needs a nonempty id");
+                }
+                if !item_ids.insert(id.to_string()) {
+                    bail!("duplicate todo id {id:?}");
+                }
+                item.insert("stage".into(), json!(number));
+                item.insert("group".into(), json!(name));
+                if let Some(after) = lane.get("after") {
+                    item.insert("lane_after".into(), after.clone());
+                }
+                if let Some(owner) = lane.get("owner").filter(|owner| !owner.is_null()) {
+                    item.insert("lane_owner".into(), owner.clone());
+                }
+                if let Some(speed) = lane.get("speed") {
+                    item.insert("lane_speed".into(), speed.clone());
+                }
+                if let Some(profile) = lane.get("profile").filter(|profile| !profile.is_null()) {
+                    item.insert("lane_profile".into(), profile.clone());
+                }
+                todos.push(Value::Object(item));
+            }
+        }
+    }
+    obj.remove("phases");
+    obj.insert("todos".into(), Value::Array(todos));
+    Ok(())
+}
+
+/// Normalize a goal's group label: trimmed, with empty/whitespace collapsed
+/// to `None` (the implicit goal of an ungrouped list).
+#[path = "todo_telemetry.rs"]
+mod todo_telemetry;
+use todo_telemetry::*;
+
+/// Merge incoming goal assessments with the stored ones.
+///
+/// Incoming goals win per group key; stored goals for groups the write does
+/// not mention are retained (a todo update should not silently discard goal
+/// assessments). Score histories are tool-maintained: whatever the model sends
+/// for them is discarded in favor of the stored trail plus this write's
+/// observation.
+fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<TodoGoal> {
+    let Some(incoming) = incoming else {
+        return stored.to_vec();
+    };
+    let mut merged: Vec<TodoGoal> = Vec::new();
+    for mut goal in incoming {
+        goal.group = goal_group_key(goal.group.as_deref());
+        let previous = stored
+            .iter()
+            .find(|prev| goal_group_key(prev.group.as_deref()) == goal.group);
+        goal.closed_feedback_loop_history = previous
+            .map(|prev| prev.closed_feedback_loop_history.clone())
+            .unwrap_or_default();
+        goal.feedback_loop_relevance_history = previous
+            .map(|prev| prev.feedback_loop_relevance_history.clone())
+            .unwrap_or_default();
+        goal.feedback_loop_coverage_history = previous
+            .map(|prev| prev.feedback_loop_coverage_history.clone())
+            .unwrap_or_default();
+        goal.feedback_loop_traceability_history = previous
+            .map(|prev| prev.feedback_loop_traceability_history.clone())
+            .unwrap_or_default();
+        goal.delivery_state_history = previous
+            .map(|prev| prev.delivery_state_history.clone())
+            .unwrap_or_default();
+        // Field-level merge, matching `merge_plan`: a write that revises one
+        // assessment must not silently erase the others. Without this the
+        // turn-end digest would read a stale `None` and re-raise a point the
+        // agent had already resolved.
+        if let Some(prev) = previous {
+            if goal.closed_feedback_loop.is_none() {
+                goal.closed_feedback_loop = prev.closed_feedback_loop;
+            }
+            if goal.delivery_state.is_none() {
+                goal.delivery_state = prev.delivery_state;
+            }
+            if goal.feedback_loop_relevance.is_none() {
+                goal.feedback_loop_relevance = prev.feedback_loop_relevance;
+            }
+            if goal.feedback_loop_coverage.is_none() {
+                goal.feedback_loop_coverage = prev.feedback_loop_coverage;
+            }
+            if goal.feedback_loop_traceability.is_none() {
+                goal.feedback_loop_traceability = prev.feedback_loop_traceability;
+            }
+            if goal.difficulty.is_none() {
+                goal.difficulty = prev.difficulty;
+            }
+            if goal.autonomy.is_none() {
+                goal.autonomy = prev.autonomy;
+            }
+            if goal.iteration_maturity.is_none() {
+                goal.iteration_maturity = prev.iteration_maturity;
+            }
+            if goal.feedback_loop.is_none() {
+                goal.feedback_loop = prev.feedback_loop.clone();
+            }
+            if goal.stopping_evidence.is_none() {
+                goal.stopping_evidence = prev.stopping_evidence.clone();
+            }
+            if goal.cannot_complete.is_none() {
+                goal.cannot_complete = prev.cannot_complete.clone();
+            }
+        }
+        // An empty reason is the documented way to resume a goal.
+        goal.cannot_complete = goal
+            .cannot_complete
+            .take()
+            .map(|reason| reason.trim().to_string())
+            .filter(|reason| !reason.is_empty());
+        record_score_observation(
+            &mut goal.closed_feedback_loop_history,
+            goal.closed_feedback_loop,
+        );
+        record_score_observation(
+            &mut goal.feedback_loop_relevance_history,
+            goal.feedback_loop_relevance,
+        );
+        record_score_observation(
+            &mut goal.feedback_loop_coverage_history,
+            goal.feedback_loop_coverage,
+        );
+        record_score_observation(
+            &mut goal.feedback_loop_traceability_history,
+            goal.feedback_loop_traceability,
+        );
+        record_score_observation(&mut goal.delivery_state_history, goal.delivery_state);
+        if let Some(slot) = merged
+            .iter_mut()
+            .find(|existing| existing.group == goal.group)
+        {
+            *slot = goal;
+        } else {
+            merged.push(goal);
+        }
+    }
+    for prev in stored {
+        let key = goal_group_key(prev.group.as_deref());
+        if !merged.iter().any(|goal| goal.group == key) {
+            merged.push(prev.clone());
+        }
+    }
+    merged
+}
+
+/// Drop retained goals whose todo group no longer exists in `todos`.
+///
+/// `merge_goals` deliberately keeps goals a write does not mention, so a
+/// goals-only or partial update cannot erase assessments. But when the agent
+/// moves on to a new task and replaces the todo list wholesale, goals from the
+/// finished task have no todos left to describe and were shown indefinitely in
+/// the todos panel (issue #695). Goals whose group still has a todo, and the
+/// ungrouped goal for a flat list, are always kept.
+fn prune_orphaned_goals(goals: Vec<TodoGoal>, todos: &[TodoItem]) -> Vec<TodoGoal> {
+    if todos.is_empty() {
+        return goals;
+    }
+    let live_groups: std::collections::HashSet<Option<String>> = todos
+        .iter()
+        .map(|todo| goal_group_key(todo.group.as_deref()))
+        .collect();
+    goals
+        .into_iter()
+        .filter(|goal| live_groups.contains(&goal_group_key(goal.group.as_deref())))
+        .collect()
+}
+
+/// Explain a goal assessment that this write sent but `prune_orphaned_goals`
+/// discards because no todo carries its group any more.
+///
+/// Without this the write returned normally, the assessment vanished, and the
+/// agent kept resending it (field report: goals-only updates for a finished
+/// group were "silently dropped").
+fn ignored_goal_groups_note(incoming: &[TodoGoal], todos: &[TodoItem]) -> Option<String> {
+    if todos.is_empty() {
+        return None;
+    }
+    let live_groups: std::collections::HashSet<Option<String>> = todos
+        .iter()
+        .map(|todo| goal_group_key(todo.group.as_deref()))
+        .collect();
+    let mut ignored: Vec<String> = Vec::new();
+    for goal in incoming {
+        let key = goal_group_key(goal.group.as_deref());
+        if live_groups.contains(&key) {
+            continue;
+        }
+        let label = match key {
+            Some(group) => format!("\"{group}\""),
+            None => "(ungrouped)".to_string(),
+        };
+        if !ignored.contains(&label) {
+            ignored.push(label);
+        }
+    }
+    if ignored.is_empty() {
+        return None;
+    }
+    let mut live: Vec<String> = live_groups
+        .into_iter()
+        .map(|group| match group {
+            Some(group) => format!("\"{group}\""),
+            None => "(ungrouped)".to_string(),
+        })
+        .collect();
+    live.sort();
+    Some(format!(
+        "Note: goal assessment ignored for {}: no todo is in that group, so it was not saved. Current groups: {}.",
+        ignored.join(", "),
+        live.join(", ")
+    ))
+}
+
+fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> Vec<TodoGoalField> {
+    let mut fields = Vec::new();
+    if before.and_then(|goal| goal.closed_feedback_loop)
+        != after.and_then(|goal| goal.closed_feedback_loop)
+    {
+        fields.push(TodoGoalField::ClosedFeedbackLoop);
+    }
+    if before.and_then(|goal| goal.feedback_loop.as_ref())
+        != after.and_then(|goal| goal.feedback_loop.as_ref())
+    {
+        fields.push(TodoGoalField::FeedbackLoop);
+    }
+    if before.and_then(|goal| goal.feedback_loop_relevance)
+        != after.and_then(|goal| goal.feedback_loop_relevance)
+    {
+        fields.push(TodoGoalField::FeedbackLoopRelevance);
+    }
+    if before.and_then(|goal| goal.feedback_loop_coverage)
+        != after.and_then(|goal| goal.feedback_loop_coverage)
+    {
+        fields.push(TodoGoalField::FeedbackLoopCoverage);
+    }
+    if before.and_then(|goal| goal.feedback_loop_traceability)
+        != after.and_then(|goal| goal.feedback_loop_traceability)
+    {
+        fields.push(TodoGoalField::FeedbackLoopTraceability);
+    }
+    if before.and_then(|goal| goal.delivery_state) != after.and_then(|goal| goal.delivery_state) {
+        fields.push(TodoGoalField::DeliveryState);
+    }
+    if before.and_then(|goal| goal.autonomy) != after.and_then(|goal| goal.autonomy) {
+        fields.push(TodoGoalField::Autonomy);
+    }
+    if before.and_then(|goal| goal.iteration_maturity)
+        != after.and_then(|goal| goal.iteration_maturity)
+    {
+        fields.push(TodoGoalField::IterationMaturity);
+    }
+    if before.and_then(|goal| goal.stopping_evidence.as_ref())
+        != after.and_then(|goal| goal.stopping_evidence.as_ref())
+    {
+        fields.push(TodoGoalField::StoppingEvidence);
+    }
+    if before.and_then(|goal| goal.cannot_complete.as_ref())
+        != after.and_then(|goal| goal.cannot_complete.as_ref())
+    {
+        fields.push(TodoGoalField::CannotComplete);
+    }
+    fields
+}
+
+/// Merge the incoming plan-level intent assessment with the stored one.
+///
+/// User intention describes why the user asked for the work and should remain
+/// stable while the agent revises its steps or scores, so an omitted intention
+/// inherits the stored value. Sending an empty string clears it. The intent
+/// score's history is tool-maintained, so a model-supplied trail is discarded.
+fn merge_plan(stored: &TodoPlan, incoming: Option<TodoPlan>) -> TodoPlan {
+    let Some(mut plan) = incoming else {
+        return stored.clone();
+    };
+    if plan.title.is_none() {
+        plan.title = stored.title.clone();
+    }
+    if plan.user_intention.is_none() {
+        plan.user_intention = stored.user_intention.clone();
+    }
+    if plan.understands_user_intent.is_none() {
+        plan.understands_user_intent = stored.understands_user_intent;
+    }
+    plan.understands_user_intent_history = stored.understands_user_intent_history.clone();
+    record_score_observation(
+        &mut plan.understands_user_intent_history,
+        plan.understands_user_intent,
+    );
+    plan
+}
+
+fn plan_change(before: &TodoPlan, after: &TodoPlan) -> Option<TodoPlanChange> {
+    let mut fields = Vec::new();
+    if before.title != after.title {
+        fields.push(TodoPlanField::Title);
+    }
+    if before.user_intention != after.user_intention {
+        fields.push(TodoPlanField::UserIntention);
+    }
+    if before.understands_user_intent != after.understands_user_intent {
+        fields.push(TodoPlanField::UnderstandsUserIntent);
+    }
+    (!fields.is_empty()).then(|| TodoPlanChange {
+        before: Some(before.clone()),
+        after: Some(after.clone()),
+        fields,
+    })
+}
+
+fn goal_changes(before: &[TodoGoal], after: &[TodoGoal]) -> Vec<TodoGoalChange> {
+    let mut changes = Vec::new();
+    for current in after {
+        let key = goal_group_key(current.group.as_deref());
+        let previous = before
+            .iter()
+            .find(|goal| goal_group_key(goal.group.as_deref()) == key);
+        let fields = changed_goal_fields(previous, Some(current));
+        if !fields.is_empty() {
+            changes.push(TodoGoalChange {
+                before: previous.cloned(),
+                after: Some(current.clone()),
+                fields,
+            });
+        }
+    }
+    for previous in before {
+        let key = goal_group_key(previous.group.as_deref());
+        if after
+            .iter()
+            .any(|goal| goal_group_key(goal.group.as_deref()) == key)
+        {
+            continue;
+        }
+        let fields = changed_goal_fields(Some(previous), None);
+        if !fields.is_empty() {
+            changes.push(TodoGoalChange {
+                before: Some(previous.clone()),
+                after: None,
+                fields,
+            });
+        }
+    }
+    changes
+}
+
+/// Record the points this write would previously have interrupted on, and
+/// return the rare continuation that is still worth sending immediately.
+///
+/// Previously both checks emitted a continuation on every applicable write for
+/// as long as the score stayed low. That punished the common healthy case:
+/// understanding of a request starts low and rises as the agent explores, so an
+/// agent already resolving the ambiguity was repeatedly told to stop and go
+/// resolve the ambiguity. On long iterative turns the same text reattached to
+/// every todo call, spending reasoning on re-justifying the plan instead of on
+/// the work.
+///
+/// So the checks are deferred: observations accumulate and are replayed once at
+/// turn end by `build_gate_digest`. Deferred, not forgiven. A score that climbs
+/// late is still raised, because the work done while it was low was never
+/// governed by the better loop that arrived afterwards. The one exception is a
+/// first plan write that scores severely low, where the agent is admitting it
+/// does not know the task at all and a whole turn of wrong work cannot be undone
+/// at turn end.
+fn record_reframe_observations(
+    plan: &TodoPlan,
+    goals: &[TodoGoal],
+    todos: &[TodoItem],
+    previous: &[TodoItem],
+) -> (Vec<GateObservation>, Vec<String>) {
+    let mut observations = Vec::new();
+    let mut immediate = Vec::new();
+    let any_open = todos
+        .iter()
+        .any(|todo| todo.status != "completed" && todo.status != "cancelled");
+    if any_open && !intent_understanding_passes(plan.understands_user_intent) {
+        observations.push(GateObservation {
+            kind: GateObservationKind::IntentUnderstanding,
+            group: None,
+            state: plan
+                .understands_user_intent
+                .map(|state| state.as_str().to_string()),
+        });
+        // Only on the first observation of the plan, so a persistently low
+        // assessment is reported once at turn end rather than on every write.
+        let first_assessment = plan.understands_user_intent_history.len() <= 1;
+        if first_assessment
+            && plan
+                .understands_user_intent
+                .is_some_and(|state| state <= SEVERE_INTENT_MISUNDERSTANDING)
+        {
+            immediate.push(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.to_string());
+        }
+    }
+    let closed_now = crate::todo::groups_closed_by_update(previous, todos);
+    for goal in goals {
+        let group_open = todos.iter().any(|todo| {
+            goal_group_key(todo.group.as_deref()) == goal.group
+                && todo.status != "completed"
+                && todo.status != "cancelled"
+        });
+        // A group this write closes counts too: a goal created and finished in
+        // one step is otherwise never observed, and one-step completions are
+        // where a weak feedback loop hides best.
+        if !group_open && !closed_now.contains(&goal.group) {
+            continue;
+        }
+        if !feedback_loop_passes(goal.closed_feedback_loop) {
+            observations.push(GateObservation {
+                kind: GateObservationKind::ClosedFeedbackLoop,
+                group: goal.group.clone(),
+                state: goal
+                    .closed_feedback_loop
+                    .map(|state| state.as_str().to_string()),
+            });
+        }
+        if !crate::todo::feedback_loop_relevance_passes(goal) {
+            observations.push(GateObservation {
+                kind: GateObservationKind::FeedbackLoopRelevance,
+                group: goal.group.clone(),
+                state: goal
+                    .feedback_loop_relevance
+                    .map(|state| state.as_str().to_string()),
+            });
+        }
+        if !crate::todo::feedback_loop_coverage_passes(goal) {
+            observations.push(GateObservation {
+                kind: GateObservationKind::FeedbackLoopCoverage,
+                group: goal.group.clone(),
+                state: goal
+                    .feedback_loop_coverage
+                    .map(|state| state.as_str().to_string()),
+            });
+        }
+        if !crate::todo::feedback_loop_traceability_passes(goal) {
+            observations.push(GateObservation {
+                kind: GateObservationKind::FeedbackLoopTraceability,
+                group: goal.group.clone(),
+                state: goal
+                    .feedback_loop_traceability
+                    .map(|state| state.as_str().to_string()),
+            });
+        }
+    }
+    (observations, immediate)
+}
+
+/// How much of the todo state a result echoes back to the model.
+///
+/// A write echoes a compact view: the model authored every description and
+/// every confidence transition it just sent, and field data showed
+/// descriptions alone were 80% of all todo result characters. A read is the
+/// model explicitly asking for the state, so it still gets every field. Both
+/// keep the JSON-then-labelled-sections shape the TUI todo card parses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TodoEcho {
+    Full,
+    Compact,
+}
+
+/// Fields a compact echo drops from each serialized todo, plan and goal.
+const COMPACT_ECHO_DROPPED_TODO_FIELDS: &[&str] = &["description", "confidence_history"];
+
+fn strip_history_fields(value: &mut Value) {
+    if let Some(fields) = value.as_object_mut() {
+        fields.retain(|key, _| !key.ends_with("_history"));
+    }
+}
+
+/// One JSON object per line: valid JSON for the card parser, without the
+/// indentation that pretty printing spends on every field.
+fn json_lines(items: &[Value]) -> Result<String> {
+    if items.is_empty() {
+        return Ok("[]".to_string());
+    }
+    let lines = items
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(format!("[\n{}\n]", lines.join(",\n")))
+}
+
+fn render_todos(todos: &[TodoItem], echo: TodoEcho) -> Result<(String, bool)> {
+    let public = names::public_todos(todos)?;
+    let mut items = public.as_array().cloned().unwrap_or_default();
+    let mut omitted_descriptions = false;
+    if echo == TodoEcho::Compact {
+        for item in &mut items {
+            if let Some(fields) = item.as_object_mut() {
+                omitted_descriptions |= fields.contains_key("description");
+                for field in COMPACT_ECHO_DROPPED_TODO_FIELDS {
+                    fields.remove(*field);
+                }
+            }
+        }
+    }
+    Ok((json_lines(&items)?, omitted_descriptions))
+}
+
+fn render_section<T: serde::Serialize>(value: &T, echo: TodoEcho) -> Result<String> {
+    let mut value = serde_json::to_value(value)?;
+    match echo {
+        TodoEcho::Full => Ok(serde_json::to_string_pretty(&value)?),
+        TodoEcho::Compact => {
+            if let Some(items) = value.as_array_mut() {
+                items.iter_mut().for_each(strip_history_fields);
+                json_lines(items)
+            } else {
+                strip_history_fields(&mut value);
+                Ok(serde_json::to_string(&value)?)
+            }
+        }
+    }
+}
+
+fn build_todo_output(
+    todos: Vec<TodoItem>,
+    plan: TodoPlan,
+    goals: Vec<TodoGoal>,
+    plan_change: Option<TodoPlanChange>,
+    goal_changes: Option<Vec<TodoGoalChange>>,
+    continuations: impl IntoIterator<Item = String>,
+    echo: TodoEcho,
+) -> Result<ToolOutput> {
+    let remaining = todos
+        .iter()
+        .filter(|todo| todo.status != "completed")
+        .count();
+    let (mut text, omitted_descriptions) = render_todos(&todos, echo)?;
+    if plan != TodoPlan::default() {
+        text.push_str("\n\nPlan:\n");
+        text.push_str(&render_section(&plan, echo)?);
+    }
+    if !goals.is_empty() {
+        text.push_str("\n\nGoals:\n");
+        text.push_str(&render_section(&goals, echo)?);
+    }
+    if let Some(plan_change) = plan_change.as_ref() {
+        text.push_str("\n\nPlan updates:\n");
+        text.push_str(&render_section(plan_change, echo)?);
+    }
+    if let Some(goal_changes) = goal_changes.as_ref().filter(|changes| !changes.is_empty()) {
+        text.push_str("\n\nGoal updates:\n");
+        text.push_str(&render_section(goal_changes, echo)?);
+    }
+    if omitted_descriptions {
+        text.push_str(
+            "\n\n(Descriptions and history omitted; call todo with no changes to read them.)",
+        );
+    }
+    for continuation in continuations {
+        text.push_str("\n\n");
+        text.push_str(&continuation);
+    }
+    let mut metadata = json!({"todos": todos, "plan": plan, "goals": goals});
+    if let Some(plan_change) = plan_change {
+        metadata["plan_update"] = serde_json::to_value(plan_change)?;
+    }
+    if let Some(goal_changes) = goal_changes.filter(|changes| !changes.is_empty()) {
+        metadata["goal_updates"] = serde_json::to_value(goal_changes)?;
+    }
+    Ok(ToolOutput::new(text)
+        .with_title(format!("{} todos", remaining))
+        .with_metadata(metadata))
+}
+
+#[path = "todo_normalize.rs"]
+mod normalize;
+use normalize::normalize_todo_input;
+
+#[async_trait]
+impl Tool for TodoTool {
+    fn name(&self) -> &str {
+        "todo"
+    }
+
+    fn description(&self) -> &str {
+        // SECURITY/EVAL: This is model-visible calibration text. Keep it
+        // deliberately handwritten. Never generate it from gate constants or
+        // interpolate private thresholds, because that would teach the model
+        // how to target the evaluator instead of reporting an honest assessment.
+        "Track this session's work as a phased todo plan with goal assessments; \
+         use it very frequently and keep status current."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "intent": super::intent_schema_property(),
+                "update": {
+                    "type": "array",
+                    "description": "Patch by name with fields as in add; omitted fields stay unchanged.",
+                    "items": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {"name": {"type": "string", "minLength": 1}},
+                        "additionalProperties": true
+                    }
+                },
+                "add": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "status", "priority", "confidence"],
+                        "additionalProperties": true
+                    }
+                },
+                "cancel": {
+                    "type": "array", "description": "Withdraw and archive why.",
+                    "items": {"type": "object", "additionalProperties": false, "required": ["name", "reason"], "properties": {"name": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}}
+                },
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "status", "priority", "confidence"],
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "Unique task name, ideally under 40 characters."
+                            },
+                            "description": {
+                                "type": "string"
+                            },
+                            "waiting_on": {
+                                "type": ["object", "null"],
+                                "description": "Pause for own background/await_members tasks. Completion wakes. Null clears.",
+                                "required": ["ids", "reason"],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "ids": {"type": "array", "items": {"type": "string"}},
+                                    "reason": {"type": "string"}
+                                }
+                            },
+                            "requires_user_auth": {
+                                "type": ["object", "null"],
+                                "description": "Pause only for user login, 2FA or credentials. Not for approvals, decisions, retries or worker waits. Without a pause, keep working. Null clears.",
+                                "required": ["reason"],
+                                "additionalProperties": false,
+                                "properties": {
+                                    "reason": {"type": "string", "minLength": 1}
+                                }
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"]
+                            },
+                            "priority": {
+                                "type": "string"
+                            },
+                            "lane": {
+                                "type": "string"
+                            },
+                            "phase": {
+                                "type": "integer",
+                                "minimum": 1
+                            },
+                            "confidence": {
+                                "type": "string",
+                                "enum": ["speculative", "plausible", "validated", "verified"],
+                                "description": "Evidence that the task can be completed correctly."
+                            },
+                            "completion_confidence": {
+                                "type": "string",
+                                "enum": ["speculative", "plausible", "validated", "verified"],
+                                "description": "Evidence of completion; completed items only."
+                            },
+                        }
+                    }
+                },
+                "plan": {
+                    "type": "object",
+                    "description": "Send initially and when understanding changes.",
+                    "required": ["user_intention", "understands_user_intent"],
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Session name, 2-5 specific words. Set when creating the plan."
+                        },
+                        "user_intention": {
+                            "type": "string"
+                        },
+                        "understands_user_intent": {
+                            "type": "string",
+                            "enum": ["uncertain", "partial", "clear"]
+                        }
+                    }
+                },
+                "goals": {
+                    "type": "array",
+                    "description": "Assess honestly by group; omitted groups are retained.",
+                    "items": {
+                        "type": "object",
+                        "required": ["closed_feedback_loop", "feedback_loop", "feedback_loop_relevance", "feedback_loop_coverage", "feedback_loop_traceability"],
+                        "properties": {
+                            "group": {
+                                "type": "string",
+                                "description": "Omit/null for ungrouped."
+                            },
+                            "closed_feedback_loop": {
+                                "type": "string",
+                                "enum": ["absent", "weak", "usable", "strong", "closed"],
+                                "description": "How much correctness the feedback loop can verify itself."
+                            },
+                            "feedback_loop": {
+                                "type": "string",
+                                "description": "Concrete check for each requirement."
+                            },
+                            "feedback_loop_relevance": {
+                                "type": "string",
+                                "enum": ["indirect", "synthetic", "representative", "acceptance_blocked", "acceptance_aligned"],
+                                "description": "indirect: inspection/proxy; synthetic: mocks/custom harness; representative: real interfaces, partial workflow; acceptance_blocked: real workflow attempted but externally blocked; acceptance_aligned: real build/test/user workflow passed, never substitutes only."
+                            },
+                            "feedback_loop_coverage": {
+                                "type": "string",
+                                "enum": ["narrow", "main_paths", "edge_and_integration_paths"]
+                            },
+                            "feedback_loop_traceability": {
+                                "type": "string",
+                                "enum": ["unmapped", "partial", "complete"],
+                                "description": "Requirements/outputs mapped to checks and observed results."
+                            },
+                            "delivery_state": {
+                                "type": "string",
+                                "enum": ["change_made", "integrated", "workflow_validated", "outcome_delivered"]
+                            },
+                            "difficulty": {
+                                "type": "string",
+                                "enum": ["trivial", "routine", "involved", "complex", "hard", "expert", "research", "open_ended"]
+                            },
+                            "autonomy": {
+                                "type": "string",
+                                "enum": ["requested_only", "necessary_followthrough", "proactive", "stewardship"]
+                            },
+                            "iteration_maturity": {
+                                "type": "string",
+                                "enum": ["not_started", "exploring", "improving", "plateau_unproven", "outcome_reached", "constraints_exhausted", "plateau_confirmed", "budget_exhausted"]
+                            },
+                            "stopping_evidence": {
+                                "type": "string",
+                                "description": "Observed evidence supporting iteration_maturity."
+                            },
+                            "cannot_complete": {
+                                "type": "string",
+                                "description": "Why this goal is genuinely impossible; stops work on its todos. Not for failures you can retry or work around. Empty string clears."
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        // Patch additions accept the same fields as full todos, plus an
+        // insertion position. Keep their declarations in sync for providers
+        // that require every `required` entry to appear in `properties`.
+        schema["properties"]["todos"]["items"]["properties"]["lane_dependencies"] = json!({
+            "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1},
+            "description": "Earlier-phase task names for whole lane. Null restores phase barrier."
+        });
+        schema["properties"]["todos"]["items"]["properties"]["lane_owner"] = json!({
+            "type": "string", "enum": ["self", "worker"],
+            "description": "Whole-lane owner. worker auto-spawns when ready."
+        });
+        schema["properties"]["todos"]["items"]["properties"]["lane_speed"] = json!({
+            "type": ["string", "null"], "enum": ["standard", "fast", "ultrafast", null],
+            "description": "Lane speed. Null inherits config. Faster modes require owner approval."
+        });
+        schema["properties"]["todos"]["items"]["properties"]["lane_profile"] = json!({
+            "type": ["string", "null"],
+            "description": "Lane worker profile."
+        });
+        let mut add_properties = schema["properties"]["todos"]["items"]["properties"].clone();
+        add_properties["after"] = json!({
+            "type": "string",
+            "description": "Insert after this task name."
+        });
+        // update repeats no item fields: it takes the same ones as add, and
+        // listing them a third time cost ~230 tokens on every request. The
+        // price is that an open item makes this tool ineligible for OpenAI
+        // strict mode, so field names and types are checked here instead.
+        schema["properties"]["update"]["items"]["properties"]["rename_to"] = json!({
+            "type": "string",
+            "description": "New unique name; preserves identity and dependencies."
+        });
+        schema["properties"]["add"]["items"]["properties"] = add_properties;
+        schema["properties"]["add"]["items"]["additionalProperties"] = json!(false);
+        // Like update, phase items refer to add rather than repeating its
+        // fields. Runtime validation rejects unknown fields and membership.
+        let item = json!({
+            "type": "object",
+            "required": ["name", "status", "priority", "confidence"],
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "status": {"type": "string"},
+                "priority": {"type": "string"},
+                "confidence": {"type": "string"}
+            },
+            "additionalProperties": true
+        });
+        if let Some(properties) = schema["properties"].as_object_mut() {
+            properties.remove("todos");
+        }
+        schema["properties"]["phases"] = json!({
+            "type": "array",
+            "description": "Replace plan ([] clears). Then update/add/cancel. Sequential phases, parallel lanes, ordered items.",
+            "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
+                "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
+                    "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
+                        "properties": {"lane": {"type": "string", "minLength": 1, "description": "Specific workstream name, e.g. parser."}, "dependencies": {
+                            "type": ["array", "null"], "minItems": 1, "uniqueItems": true,
+                            "items": {"type": "string", "minLength": 1},
+                            "description": "Earlier-phase task names. Omit/null for phase barrier."
+                        }, "owner": {
+                            "type": "string", "enum": ["self", "worker"],
+                            "description": "Default self. worker auto-spawns when ready."
+                        }, "speed": {
+                            "type": ["string", "null"], "enum": ["standard", "fast", "ultrafast", null],
+                            "description": "As lane_speed in add."
+                        }, "profile": {"type": "string"}, "items": {"type": "array", "minItems": 1, "items": item}}
+                    }
+                }}}
+        });
+        schema["properties"]["add"]["description"] =
+            json!("Phase/lane: after, last todo, or 1/default.");
+        // Item fields repeat across phases, add, and update, and every word is
+        // paid on every request. Describe them once, on add (the superset),
+        // and point the other two routes at it.
+        let phase_items = &mut schema["properties"]["phases"]["items"]["properties"]["lanes"]["items"]
+            ["properties"]["items"];
+        phase_items["description"] = json!("Fields as in add except after and phase/lane fields.");
+        schema
+    }
+
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let write_mode_input = input.clone();
+        let previous = load_todos(&ctx.session_id)?;
+        let stored_goals = load_goals(&ctx.session_id)?;
+        let stored_plan = load_plan(&ctx.session_id)?;
+        let stored = serde_json::to_value(&previous)?;
+        let mut cancellations = Vec::new();
+        let input = prepare_todo_patch(input, || stored, &mut cancellations)?;
+        let params = parse_todo_input(input)?;
+        let is_write = params.todos.is_some() || params.goals.is_some() || params.plan.is_some();
+        let operation = if is_write { "write" } else { "read" };
+        let result = if is_write {
+            // Goals/plan-only writes keep the stored todo list.
+            let mut todos = params.todos.unwrap_or_else(|| previous.clone());
+            if let Some(todo) = todos.iter().find(|todo| {
+                crate::todo::todo_status_is_cancelled(&todo.status)
+                    && !previous.iter().any(|old| {
+                        old.id == todo.id && crate::todo::todo_status_is_cancelled(&old.status)
+                    })
+            }) {
+                bail!(
+                    "use cancel with a name and reason to withdraw {:?}, not a cancelled status",
+                    todo.content
+                );
+            }
+            crate::todo::stages::normalize_lane_owners(&mut todos);
+            crate::todo::store::validate_session_lane_dependencies(
+                &crate::storage::jcode_dir()?,
+                &ctx.session_id,
+                &todos,
+            )
+            .map_err(anyhow::Error::msg)?;
+            for todo in &mut todos {
+                // Finished work needs no authorization, and a reason only
+                // describes the dependencies it was written for.
+                if !crate::todo::is_incomplete_todo(todo) {
+                    todo.requires_user_auth = None;
+                }
+                if todo.waiting_on.is_empty() {
+                    todo.waiting_reason = None;
+                }
+            }
+            prepare_background_dependencies(
+                crate::background::global(),
+                &ctx.session_id,
+                &previous,
+                &todos,
+            )
+            .await?;
+            record_todo_write_mode(&write_mode_input);
+            merge_confidence_history(&previous, &mut todos);
+            (|| {
+                let ignored_goals =
+                    ignored_goal_groups_note(params.goals.as_deref().unwrap_or_default(), &todos);
+                let goals = prune_orphaned_goals(merge_goals(&stored_goals, params.goals), &todos);
+                let plan = merge_plan(&stored_plan, params.plan);
+                let (observations, mut nudges) =
+                    record_reframe_observations(&plan, &goals, &todos, &previous);
+                nudges.extend(ignored_goals);
+                for observation in &observations {
+                    let kind = match observation.kind {
+                        GateObservationKind::IntentUnderstanding => {
+                            crate::telemetry::TodoGateKind::IntentUnderstanding
+                        }
+                        GateObservationKind::ClosedFeedbackLoop => {
+                            crate::telemetry::TodoGateKind::ClosedFeedbackLoop
+                        }
+                        GateObservationKind::FeedbackLoopRelevance => {
+                            crate::telemetry::TodoGateKind::FeedbackLoopRelevance
+                        }
+                        GateObservationKind::FeedbackLoopCoverage => {
+                            crate::telemetry::TodoGateKind::FeedbackLoopCoverage
+                        }
+                        GateObservationKind::FeedbackLoopTraceability => {
+                            crate::telemetry::TodoGateKind::FeedbackLoopTraceability
+                        }
+                    };
+                    crate::telemetry::record_todo_gate(kind);
+                }
+                // Best-effort: a failure to persist the observation log must not
+                // fail the todo write itself. The cost is a missing reminder.
+                if let Err(err) = append_gate_observations(&ctx.session_id, &observations) {
+                    crate::logging::warn(&format!(
+                        "[tool:todo] failed to record gate observations session_id={} error={}",
+                        ctx.session_id, err
+                    ));
+                }
+                // Assessment-only writes, especially quality-gate retries,
+                // should render the fields that changed instead of repeating an
+                // otherwise identical todo plan.
+                let assessment_only = todos == previous;
+                let concise_goal_changes = (assessment_only && !stored_goals.is_empty())
+                    .then(|| goal_changes(&stored_goals, &goals));
+                let concise_plan_change = assessment_only
+                    .then(|| plan_change(&stored_plan, &plan))
+                    .flatten();
+                if !cancellations.is_empty() {
+                    crate::todo::store::append_cancellations(
+                        &crate::storage::jcode_dir()?,
+                        &ctx.session_id,
+                        &cancellations,
+                    )?;
+                }
+                save_todos(&ctx.session_id, &todos)?;
+                save_goals(&ctx.session_id, &goals)?;
+                save_plan(&ctx.session_id, &plan)?;
+                if let Err(err) = update_todo_review_cycle(&ctx.session_id, &previous, &todos) {
+                    crate::logging::warn(&format!(
+                        "[tool:todo] failed to update review cycle session_id={} error={}",
+                        ctx.session_id, err
+                    ));
+                }
+                record_todo_telemetry(&previous, &todos, &goals, &plan);
+
+                Bus::global().publish(BusEvent::TodoUpdated(TodoEvent {
+                    session_id: ctx.session_id.clone(),
+                    todos: todos.clone(),
+                }));
+
+                build_todo_output(
+                    todos,
+                    plan,
+                    goals,
+                    concise_plan_change,
+                    concise_goal_changes,
+                    nudges,
+                    TodoEcho::Compact,
+                )
+            })()
+        } else {
+            record_todo_write_mode(&write_mode_input);
+            record_todo_telemetry(&previous, &previous, &stored_goals, &stored_plan);
+            build_todo_output(
+                previous,
+                stored_plan,
+                stored_goals,
+                None,
+                None,
+                Vec::new(),
+                TodoEcho::Full,
+            )
+        };
+        result.map_err(|err| {
+            crate::logging::warn(&format!(
+                "[tool:todo] operation failed operation={} session_id={} error={}",
+                operation, ctx.session_id, err
+            ));
+            err
+        })
+    }
+}
+
+#[cfg(test)]
+#[path = "todo_tests.rs"]
+mod tests;

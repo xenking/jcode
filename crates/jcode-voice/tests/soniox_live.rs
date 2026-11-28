@@ -19,8 +19,10 @@ async fn live_realtime_session_transcribes_wav() {
         .expect("WAV data chunk")
         + 8;
     let samples: Vec<i16> = bytes[data..]
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| i16::from_le_bytes(*b))
         .collect();
     let session = SonioxSession::connect(&key, Arc::new(AtomicBool::new(false)))
         .await

@@ -275,6 +275,22 @@ fn decide_mode_probes_orca_case_insensitively() {
 }
 
 #[test]
+fn decide_mode_probes_rex_outside_multiplexers() {
+    for term_program in ["rex", "Rex", "REX"] {
+        assert_eq!(
+            decide_picker_init_mode(None, None, Multiplexer::None, Some(term_program)),
+            PickerInitMode::Probe,
+            "{term_program}"
+        );
+        assert_eq!(
+            decide_picker_init_mode(Some(false), None, Multiplexer::None, Some(term_program)),
+            PickerInitMode::Fast,
+            "{term_program} explicit opt-out"
+        );
+    }
+}
+
+#[test]
 fn decide_mode_defaults_to_fast_path() {
     // Env already identified a graphics terminal: stay fast.
     assert_eq!(

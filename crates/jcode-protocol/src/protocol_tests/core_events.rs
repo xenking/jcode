@@ -1,4 +1,18 @@
 #[test]
+fn message_attachments_survive_roundtrip_and_future_variants() -> Result<()> {
+    let wire = serde_json::json!({"type":"message", "id":1, "content":"hi", "attachments":[
+        {"type":"file", "name":"a.txt", "mime":"text/plain", "size":3, "data":"YWJj"},
+        {"type":"pasted_text", "text":"one\ntwo"},
+        {"type":"future_type", "extra":true}
+    ]});
+    let request: Request = serde_json::from_value(wire)?;
+    let encoded = serde_json::to_value(request)?;
+    assert_eq!(encoded["attachments"][0]["name"], "a.txt");
+    assert_eq!(encoded["attachments"][1]["text"], "one\ntwo");
+    Ok(())
+}
+
+#[test]
 fn provider_oauth_account_label_defaults_and_roundtrips() -> Result<()> {
     for legacy in [
         r#"{"type":"history","id":1,"session_id":"test","messages":[]}"#,
@@ -130,8 +144,10 @@ fn test_model_changed_oauth_identity_legacy_and_redaction() -> Result<()> {
 fn test_request_roundtrip() -> Result<()> {
     let req = Request::Message {
         id: 1,
+        jarvis_voice: false,
         content: "hello".to_string(),
         images: vec![],
+        attachments: vec![],
         system_reminder: None,
         active_skill: Some("verification".to_string()),
         no_reply: false,
@@ -146,6 +162,7 @@ fn test_request_roundtrip() -> Result<()> {
 fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
     let req = Request::SoftInterrupt {
         id: 2,
+        jarvis_voice: false,
         content: "look at this".to_string(),
         images: vec![("image/png".to_string(), "ZmFrZQ==".to_string())],
         urgent: true,
@@ -182,6 +199,7 @@ fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
 fn test_soft_interrupt_ids_wire_shape_and_legacy_defaults() -> Result<()> {
     let req = Request::SoftInterrupt {
         id: 4,
+        jarvis_voice: false,
         content: "steer".to_string(),
         images: Vec::new(),
         urgent: false,
@@ -606,6 +624,7 @@ fn test_side_pane_images_event_roundtrip() -> Result<()> {
     let event = ServerEvent::SidePaneImages {
         session_id: "session_active".to_string(),
         images: vec![jcode_session_types::RenderedImage {
+            session_image: None,
             history_message_index: None,
             media_type: "image/png".to_string(),
             data: "base64-data".to_string(),
@@ -746,7 +765,12 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         id: 101,
         session_id: "ses_test_456".to_string(),
         messages: vec![HistoryMessage {
+            codemode: None,
+            ask: None,
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: "hello".to_string(),
             tool_calls: None,
@@ -758,6 +782,8 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         available_models: vec!["gpt-5.4".to_string()],
         available_model_routes: Vec::new(),
         available_service_tiers: None,
+        speed_mode: Default::default(),
+        speed_options: Vec::new(),
         mcp_servers: Vec::new(),
         skills: Vec::new(),
         total_tokens: Some((123, 45)),
@@ -788,6 +814,8 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
+        pinned_skill: None,
+        pinned_skills: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -846,7 +874,12 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         id: 77,
         session_id: "ses_compact_123".to_string(),
         messages: vec![HistoryMessage {
+            codemode: None,
+            ask: None,
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             response_stats: None,
+            timestamp_ms: None,
             role: "assistant".to_string(),
             content: "older response".to_string(),
             tool_calls: None,
@@ -1005,13 +1038,18 @@ fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
 #[test]
 fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
     let message = |role: &str, content: &str| HistoryMessage {
+        codemode: None,
+        ask: None,
+        tool_duration_ms: None,
+        attachments: Vec::new(),
         response_stats: None,
+        timestamp_ms: None,
         role: role.to_string(),
         content: content.to_string(),
         tool_calls: None,
         tool_data: None,
     };
-    let messages = vec![message("user", "hi"), message("assistant", "hello")];
+    let messages = [message("user", "hi"), message("assistant", "hello")];
     let whole =
         crate::history_prefix_fingerprint(messages.iter().map(crate::HistoryMessageRef::from));
     // Pinned value: client and server may run different builds, so the
@@ -1025,7 +1063,7 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
     assert_eq!(streaming.base().count, 2);
     assert_ne!(first, whole);
     // Field boundaries must not alias.
-    let shifted = vec![message("user", "hia"), message("ssistant", "hello")];
+    let shifted = [message("user", "hia"), message("ssistant", "hello")];
     assert_ne!(
         crate::history_prefix_fingerprint(shifted.iter().map(crate::HistoryMessageRef::from)),
         whole
@@ -1034,10 +1072,9 @@ fn history_prefix_fingerprint_is_stable_and_streaming_consistent() {
 
 #[test]
 fn history_delta_fields_are_backward_compatible() {
-    let event: ServerEvent = serde_json::from_str(
-        r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#,
-    )
-    .expect("legacy History without messages_base_count");
+    let event: ServerEvent =
+        serde_json::from_str(r#"{"type":"history","id":1,"session_id":"s","messages":[]}"#)
+            .expect("legacy History without messages_base_count");
     let ServerEvent::History {
         messages_base_count,
         ..
@@ -1046,4 +1083,43 @@ fn history_delta_fields_are_backward_compatible() {
         panic!("expected history");
     };
     assert_eq!(messages_base_count, None);
+}
+
+/// The bridge to the harness API reads these exact keys, so a rename here
+/// would turn a queued switch back into a silent timeout.
+#[test]
+fn queued_model_switch_events_keep_their_wire_shape() -> Result<()> {
+    let pending = encode_event(&ServerEvent::ModelChangePending {
+        id: 7,
+        model: "gpt-6.2-sol".to_string(),
+    });
+    let value: serde_json::Value = serde_json::from_str(pending.trim())?;
+    assert_eq!(
+        value,
+        serde_json::json!({"type":"model_change_pending","id":7,"model":"gpt-6.2-sol"})
+    );
+    let cancelled = encode_event(&ServerEvent::ModelChangeCancelled {
+        id: 8,
+        pending_id: Some(7),
+        model: Some("gpt-6.2-sol".to_string()),
+    });
+    let value: serde_json::Value = serde_json::from_str(cancelled.trim())?;
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "type":"model_change_cancelled","id":8,"pending_id":7,"model":"gpt-6.2-sol"
+        })
+    );
+    let nothing = parse_event_json(r#"{"type":"model_change_cancelled","id":9}"#)?;
+    assert!(matches!(
+        nothing,
+        ServerEvent::ModelChangeCancelled {
+            id: 9,
+            pending_id: None,
+            model: None
+        }
+    ));
+    let request: Request = serde_json::from_str(r#"{"type":"cancel_pending_model_change","id":4}"#)?;
+    assert!(matches!(request, Request::CancelPendingModelChange { id: 4 }));
+    Ok(())
 }

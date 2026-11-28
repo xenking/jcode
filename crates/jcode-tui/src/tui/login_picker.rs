@@ -39,6 +39,20 @@ impl LoginPickerItem {
         }
     }
 
+    /// Heap bytes held by this row, for the memory profile.
+    fn estimated_bytes(&self) -> usize {
+        self.method_detail.capacity()
+            + self.provider.id.len()
+            + self.provider.display_name.len()
+            + self
+                .provider
+                .aliases
+                .iter()
+                .map(|value| value.len())
+                .sum::<usize>()
+            + self.provider.menu_detail.len()
+    }
+
     fn matches_filter(&self, filter: &str) -> bool {
         let trimmed = filter.trim();
         if trimmed.is_empty() {
@@ -145,7 +159,7 @@ impl LoginPicker {
     }
 
     pub fn debug_memory_profile(&self) -> serde_json::Value {
-        let items_estimate_bytes: usize = self.items.iter().map(estimate_item_bytes).sum();
+        let items_estimate_bytes: usize = self.items.iter().map(LoginPickerItem::estimated_bytes).sum();
         let filtered_estimate_bytes = self.filtered.capacity() * std::mem::size_of::<usize>();
         let filter_bytes = self.filter.capacity();
         let title_bytes = self.title.capacity();
@@ -493,10 +507,11 @@ impl LoginPicker {
             return;
         };
 
-        let aliases = if item.provider.aliases.is_empty() {
+        let provider = item.provider;
+        let aliases = if provider.aliases.is_empty() {
             "none".to_string()
         } else {
-            item.provider.aliases.join(", ")
+            provider.aliases.join(", ")
         };
         let mut lines = vec![
             Line::from(vec![
@@ -512,10 +527,10 @@ impl LoginPicker {
             Line::from(vec![
                 Span::styled("Provider ", Style::default().fg(MUTED_DARK)),
                 Span::styled(
-                    item.provider.display_name.to_string(),
-                    provider_style(item.provider.id),
+                    provider.display_name.to_string(),
+                    provider_style(provider.id),
                 ),
-                if item.provider.recommended {
+                if provider.recommended {
                     Span::styled(
                         "  recommended",
                         Style::default().fg(Color::Rgb(196, 170, 255)),
@@ -527,7 +542,7 @@ impl LoginPicker {
             Line::from(vec![
                 Span::styled("Login command ", Style::default().fg(MUTED_DARK)),
                 Span::styled(
-                    format!("/login {}", item.provider.id),
+                    format!("/login {}", provider.id),
                     Style::default().fg(Color::White),
                 ),
             ]),
@@ -536,9 +551,9 @@ impl LoginPicker {
                 Style::default().fg(MUTED_DARK).bold(),
             )]),
             Line::from(vec![Span::styled(
-                item.provider.auth_kind.label(),
+                provider.auth_kind.label(),
                 Style::default()
-                    .fg(auth_kind_color(item.provider.auth_kind.label()))
+                    .fg(auth_kind_color(provider.auth_kind.label()))
                     .bold(),
             )]),
             Line::from(""),
@@ -556,7 +571,7 @@ impl LoginPicker {
                 Style::default().fg(MUTED_DARK).bold(),
             )]),
             Line::from(vec![Span::styled(
-                item.provider.menu_detail.to_string(),
+                provider.menu_detail.to_string(),
                 Style::default().fg(Color::White),
             )]),
             Line::from(""),
@@ -567,7 +582,7 @@ impl LoginPicker {
             Line::from(vec![
                 Span::styled("Numbered accounts ", Style::default().fg(MUTED_DARK)),
                 Span::styled(
-                    if provider_supports_named_accounts(item.provider) {
+                    if provider_supports_named_accounts(provider) {
                         "supported"
                     } else {
                         "not used for this provider"
@@ -591,19 +606,6 @@ impl LoginPicker {
 
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
-}
-
-fn estimate_item_bytes(item: &LoginPickerItem) -> usize {
-    item.method_detail.capacity()
-        + item.provider.id.len()
-        + item.provider.display_name.len()
-        + item
-            .provider
-            .aliases
-            .iter()
-            .map(|value| value.len())
-            .sum::<usize>()
-        + item.provider.menu_detail.len()
 }
 
 fn hotkey(text: &'static str) -> Span<'static> {

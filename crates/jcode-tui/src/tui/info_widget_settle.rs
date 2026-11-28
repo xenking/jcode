@@ -11,7 +11,7 @@
 //! frame, keyed by absolute transcript line, and reports which rows have held
 //! the exact same free widths for [`SETTLE_AFTER_FRAMES`] consecutive
 //! observations. The layout engine docks fresh widgets only into settled rows
-//! (via the strict `reliable` channel in [`super::info_widget_layout::Margins`]),
+//! (via the strict `reliable` channel in [`super::layout::Margins`]),
 //! while already-placed widgets keep riding their transcript line untouched.
 //!
 //! Invalidation:
@@ -21,7 +21,7 @@
 //!   all keys are meaningless). The caller is expected to also flush widget
 //!   anchors in that case.
 
-use super::info_widget_layout::Margins;
+use super::layout::Margins;
 use std::collections::HashMap;
 
 /// How many consecutive identical observations a transcript line needs before

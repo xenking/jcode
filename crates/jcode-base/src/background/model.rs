@@ -33,6 +33,7 @@ pub enum BackgroundTaskEventKind {
     Checkpoint,
     Completed,
     Failed,
+    Interrupted,
     Superseded,
     Cancelled,
     DeliveryUpdated,
@@ -83,6 +84,10 @@ pub struct TaskStatusFile {
     pub owner_instance: Option<String>,
     #[serde(default)]
     pub detached: bool,
+    /// `Some(false)` is a durable completion that the owning daemon has not
+    /// yet delivered. Old statuses have no delivery bookkeeping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_delivered: Option<bool>,
     #[serde(default = "default_true")]
     pub notify: bool,
     #[serde(default)]
@@ -144,6 +149,7 @@ fn terminal_event_kind(
     match status {
         BackgroundTaskStatus::Completed => BackgroundTaskEventKind::Completed,
         BackgroundTaskStatus::Superseded => BackgroundTaskEventKind::Superseded,
+        BackgroundTaskStatus::Interrupted => BackgroundTaskEventKind::Interrupted,
         BackgroundTaskStatus::Failed if error == Some("Cancelled by user") => {
             BackgroundTaskEventKind::Cancelled
         }
@@ -248,10 +254,12 @@ pub(super) struct RunningTask {
     pub(super) started_at: Instant,
     pub(super) started_at_rfc3339: String,
     pub(super) delivery_flags: watch::Sender<(bool, bool)>,
+    pub(super) terminal_claimed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(super) handle: JoinHandle<Result<TaskResult>>,
 }
 
 /// Result from a background task execution
+#[derive(Serialize, Deserialize)]
 pub struct TaskResult {
     pub exit_code: Option<i32>,
     pub error: Option<String>,

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use std::time::Duration;
 
@@ -130,13 +130,47 @@ struct UsageBankedResetReport {
     provider: &'static str,
     /// Login label the reset is pinned to. `None` is the default login.
     account_label: Option<String>,
-    /// Resets that can be redeemed now.
+    /// Total unexpired saved resets.
     available_count: u64,
+    /// Currently usable saved resets when reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usable_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_reset_available: Option<bool>,
+    /// The line clients show above this login's bars, such as
+    /// `✦ 2 resets · 1 usable · expires 15d`. Absent when nothing is held.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    /// Claude: why nothing is spendable, from the server (`cooldown` while one runs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    /// Claude: RFC3339 end of a running cooldown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cooldown_until: Option<String>,
+    /// Claude: every saved-reset grant, soonest expiry first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    grants: Vec<UsageBankedGrantReport>,
     /// OpenAI: the limit is actually enforced, so redeeming is useful now.
     /// Claude: always true, since the offer only exists at the session wall.
     limit_reached: bool,
     /// RFC3339 time the next reset becomes available when none is available.
     next_available_at: Option<String>,
+}
+
+/// One saved-reset grant of a Claude login.
+#[derive(Debug, Serialize, PartialEq)]
+struct UsageBankedGrantReport {
+    label: Option<String>,
+    remaining: u64,
+    expires_at: Option<String>,
+    /// `available`, `unavailable`, `paused`, `redeemed` or `expired`.
+    status: crate::usage::BankedGrantStatus,
+    /// The grant the server spends next.
+    next: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,7 +180,33 @@ struct UsageProviderReport {
     extra_info: Vec<(String, String)>,
     #[serde(skip_serializing_if = "Option::is_none")]
     banked_reset: Option<UsageBankedResetReport>,
+    /// Dry-run auto-reset decision under current config. Never spends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_reset: Option<UsageAutoResetReport>,
+    /// Which saved login this section describes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<crate::usage::AccountIdentity>,
+    /// Credit balance and spend for accounts paid in credits or dollars.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credits: Option<UsageCreditsReport>,
     error: Option<String>,
+}
+
+/// A credits report with the one-line wording every client shows as is.
+#[derive(Debug, Serialize)]
+struct UsageCreditsReport {
+    #[serde(flatten)]
+    credits: crate::usage::CreditsReport,
+    summary: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UsageAutoResetReport {
+    enabled: bool,
+    trigger: &'static str,
+    min_wait_minutes: u64,
+    decision: &'static str,
+    reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -462,6 +522,65 @@ pub(super) fn run_version_command(emit_json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Durable per-route request totals: cached vs uncached prompt tokens and misses.
+pub(super) fn run_request_usage_command(emit_json: bool) -> Result<()> {
+    let routes = crate::request_usage::summarize()?;
+    if emit_json {
+        println!("{}", serde_json::to_string_pretty(&routes)?);
+        return Ok(());
+    }
+    if routes.is_empty() {
+        println!("No requests recorded yet");
+        return Ok(());
+    }
+    for route in routes {
+        let prompt = route.cached_input + route.uncached_input;
+        let hit = if prompt == 0 {
+            0.0
+        } else {
+            route.cached_input as f64 * 100.0 / prompt as f64
+        };
+        let method = if route.api_method.is_empty() {
+            String::new()
+        } else {
+            format!(" via {}", route.api_method)
+        };
+        println!("{} / {}{method}", route.provider, route.model);
+        println!(
+            "  {} requests, {} cached + {} uncached input tokens ({hit:.0}% cached), {} output",
+            route.requests, route.cached_input, route.uncached_input, route.output
+        );
+        if route.misses > 0 {
+            let reasons: Vec<_> = route
+                .miss_reasons
+                .iter()
+                .map(|(reason, count)| format!("{reason} x{count}"))
+                .collect();
+            println!(
+                "  {} cache misses ({} tokens missed): {}",
+                route.misses,
+                route.missed_tokens,
+                reasons.join(", ")
+            );
+        }
+        println!("  {} .. {}", route.first_request, route.last_request);
+    }
+    Ok(())
+}
+
+/// `jcode usage --dump-redacted PATH`: raw provider responses for a bug report.
+pub(super) async fn run_usage_dump(path: &std::path::Path) -> Result<()> {
+    let dump = crate::usage::dump_redacted_usage().await;
+    let accounts = dump["accounts"].as_array().map_or(0, Vec::len);
+    std::fs::write(path, serde_json::to_string_pretty(&dump)?)
+        .with_context(|| format!("Could not write {}", path.display()))?;
+    println!(
+        "Wrote {accounts} account(s) to {}. Emails, ids and tokens are removed; read the file before sharing it.",
+        path.display()
+    );
+    Ok(())
+}
+
 pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
     let providers = crate::usage::fetch_all_provider_usage().await;
 
@@ -483,6 +602,7 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
         return Ok(());
     }
 
+    let display_used = crate::config::config().display.usage_display_used();
     // One width for every provider section so bars align across them.
     let name_width = report
         .providers
@@ -497,32 +617,47 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
             println!();
         }
 
-        println!("{}", provider.provider_name);
-        println!("{}", "-".repeat(provider.provider_name.chars().count()));
+        let title = usage_title(provider);
+        println!("{title}");
+        println!(
+            "{}",
+            "-".repeat(unicode_width::UnicodeWidthStr::width(title.as_str()))
+        );
 
         if let Some(error) = &provider.error {
             println!("error: {}", error);
             continue;
         }
 
-        if provider.limits.is_empty() && provider.extra_info.is_empty() {
+        if provider.limits.is_empty()
+            && provider.extra_info.is_empty()
+            && provider.banked_reset.is_none()
+            && provider.credits.is_none()
+        {
             println!("No usage data available.");
             continue;
         }
 
+        if let Some(summary) = provider
+            .banked_reset
+            .as_ref()
+            .and_then(|reset| reset.summary.as_deref())
+        {
+            println!("{summary}");
+        }
         for limit in &provider.limits {
             match limit.reset_in.as_deref() {
                 Some(reset_in) => println!(
                     "{:<width$}: {} (resets in {})",
                     limit.name,
-                    crate::usage::format_usage_bar(limit.usage_percent, 15),
+                    crate::usage::format_usage_bar(limit.usage_percent, 15, display_used),
                     reset_in,
                     width = name_width
                 ),
                 None => println!(
                     "{:<width$}: {}",
                     limit.name,
-                    crate::usage::format_usage_bar(limit.usage_percent, 15),
+                    crate::usage::format_usage_bar(limit.usage_percent, 15, display_used),
                     width = name_width
                 ),
             }
@@ -536,9 +671,70 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
                 println!("{}: {}", key, value);
             }
         }
+        if let Some(account) = &provider.account {
+            println!(
+                "Account: {} ({})",
+                account.display_name,
+                account.kind.as_str()
+            );
+        }
+        if let Some(credits) = &provider.credits {
+            println!("Credits: {}", credits.summary);
+        }
+        if let Some(reset) = provider
+            .banked_reset
+            .as_ref()
+            .filter(|reset| reset.summary.is_none())
+        {
+            let name = if reset.provider == "claude" && reset.usable_count.is_none() {
+                "Session resets"
+            } else {
+                "Banked resets"
+            };
+            println!("{}: {}", name, banked_reset_text(reset));
+        }
+        if let Some(auto) = &provider.auto_reset {
+            println!(
+                "auto-reset ({}{}, >{}m): {} ({})",
+                auto.trigger,
+                if auto.enabled { "" } else { ", disabled" },
+                auto.min_wait_minutes,
+                auto.decision,
+                auto.reason
+            );
+        }
     }
 
     Ok(())
+}
+
+/// The section title: the account's icon leads wherever the account is named.
+fn usage_title(provider: &UsageProviderReport) -> String {
+    match provider
+        .account
+        .as_ref()
+        .and_then(|account| account.icon.as_deref())
+    {
+        Some(icon) => format!("{icon} {}", provider.provider_name),
+        None => provider.provider_name.clone(),
+    }
+}
+
+fn banked_reset_text(reset: &UsageBankedResetReport) -> String {
+    let mut text = match reset.usable_count {
+        Some(usable) => format!("{usable} usable / {}", reset.available_count),
+        None => format!("{} available", reset.available_count),
+    };
+    if let Some(at) = reset.expires_at.as_deref() {
+        text.push_str(&format!(
+            " · expires in {}",
+            crate::usage::format_reset_time(at)
+        ));
+    }
+    if reset.cached_source.is_some() {
+        text.push_str(" · imported");
+    }
+    text
 }
 
 fn select_auth_doctor_providers(
@@ -585,8 +781,47 @@ fn usage_provider_report(provider: &crate::usage::ProviderUsage) -> UsageProvide
             .collect(),
         extra_info: provider.extra_info.clone(),
         banked_reset: banked_reset_report(provider),
+        auto_reset: auto_reset_report(provider),
+        account: provider.account.clone(),
+        credits: provider.credits.clone().map(|credits| UsageCreditsReport {
+            summary: crate::usage::credits_line(&credits),
+            credits,
+        }),
         error: provider.error.clone(),
     }
+}
+
+fn auto_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageAutoResetReport> {
+    use crate::provider::auto_reset_trigger as trigger;
+    if provider.error.is_some() {
+        return None;
+    }
+    let config = crate::config::Config::load().provider;
+    let enabled = if provider.openai_reset_credits.is_some() {
+        config.openai_auto_banked_reset
+    } else if provider.anthropic_banked_resets.is_some() || provider.anthropic_limit_reset.is_some()
+    {
+        config.anthropic_auto_fable_reset
+    } else {
+        return None;
+    };
+    let decision = trigger::decide(
+        config.auto_reset_trigger,
+        config.auto_reset_min_wait_minutes,
+        &trigger::input_from_report(provider),
+        chrono::Utc::now(),
+    );
+    Some(UsageAutoResetReport {
+        enabled,
+        trigger: config.auto_reset_trigger.as_str(),
+        min_wait_minutes: config.auto_reset_min_wait_minutes,
+        decision: if decision.is_redeem() {
+            "redeem"
+        } else {
+            "wait"
+        },
+        reason: decision.reason().to_string(),
+    })
 }
 
 fn banked_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageBankedResetReport> {
@@ -608,23 +843,69 @@ fn banked_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageBa
             provider: "openai",
             account_label: credits.account_label.clone(),
             available_count: credits.available_count,
+            usable_count: None,
+            cached_source: None,
+            expires_at: crate::usage::AccountBankedResets::earliest_expiry(
+                &credits.available_expirations,
+            ),
+            session_reset_available: None,
+            summary: crate::usage::resets_summary(
+                credits.available_count,
+                None,
+                crate::usage::AccountBankedResets::earliest_expiry(&credits.available_expirations)
+                    .as_deref(),
+            ),
+            reason: None,
+            cooldown_until: None,
+            grants: Vec::new(),
             limit_reached,
             next_available_at: None,
         });
     }
-    provider
-        .anthropic_limit_reset
-        .as_ref()
-        .map(|offer| UsageBankedResetReport {
-            provider: "claude",
-            account_label: offer.account_label.clone(),
-            available_count: u64::from(offer.available),
-            limit_reached: provider
+    let offer = provider.anthropic_limit_reset.as_ref();
+    let banked = provider.anthropic_banked_resets.as_ref();
+    if offer.is_none() && banked.is_none() {
+        return None;
+    }
+    let session = offer.is_some_and(|offer| offer.available);
+    let available_count = banked.map_or(u64::from(session), |b| b.available_count);
+    Some(UsageBankedResetReport {
+        provider: "claude",
+        account_label: banked
+            .and_then(|b| b.account_label.clone())
+            .or_else(|| offer.and_then(|offer| offer.account_label.clone())),
+        available_count,
+        usable_count: banked.map(|b| b.usable_count),
+        cached_source: banked.and_then(|b| b.cached_source.clone()),
+        expires_at: banked.and_then(|b| b.expires_at.clone()),
+        session_reset_available: Some(session),
+        summary: banked.and_then(crate::usage::anthropic_resets_line),
+        reason: banked.and_then(|b| b.reason.clone()),
+        cooldown_until: banked.and_then(|b| b.cooldown_until.clone()),
+        grants: banked
+            .map(|b| {
+                b.grants
+                    .iter()
+                    .map(|grant| UsageBankedGrantReport {
+                        label: grant.label.clone(),
+                        remaining: grant.remaining,
+                        expires_at: grant.expires_at.clone(),
+                        status: grant.status,
+                        next: grant.next,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        // Only the session offer is claimable from here, at the five-hour wall.
+        limit_reached: session
+            && provider
                 .limits
                 .iter()
                 .any(|limit| limit.name == "5-hour window" && limit.usage_percent >= 100.0),
-            next_available_at: offer.next_available_at.clone(),
-        })
+        next_available_at: (available_count == 0)
+            .then(|| offer.and_then(|offer| offer.next_available_at.clone()))
+            .flatten(),
+    })
 }
 
 pub(super) fn list_cli_providers() -> Vec<ProviderListEntry> {
@@ -702,6 +983,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn usage_sections_lead_with_the_account_icon() {
+        let mut usage = crate::usage::ProviderUsage {
+            provider_name: "Anthropic (claude-fox)".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            usage_title(&usage_provider_report(&usage)),
+            "Anthropic (claude-fox)"
+        );
+        usage.account = Some(crate::usage::AccountIdentity {
+            icon: Some("🦊".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            usage_title(&usage_provider_report(&usage)),
+            "🦊 Anthropic (claude-fox)"
+        );
+    }
+
+    #[test]
     fn usage_json_preserves_confirmed_zero_and_distinguishes_unknown_resets() {
         use crate::usage::{AnthropicLimitResetOffer, OpenAiResetCredits, ProviderUsage};
         let openai = |available_count, allowed| ProviderUsage {
@@ -759,6 +1060,27 @@ mod tests {
         let spent = banked_reset_report(&claude(false)).unwrap();
         assert_eq!(spent.available_count, 0);
         assert!(spent.next_available_at.is_some());
+        let mut saved = claude(false);
+        saved.anthropic_banked_resets = Some(crate::usage::AnthropicBankedResets {
+            account_label: Some("claude-otter".into()),
+            available_count: 2,
+            usable_count: 1,
+            expires_at: None,
+            cached_source: Some("imported".into()),
+            ..Default::default()
+        });
+        let saved = banked_reset_report(&saved).unwrap();
+        assert_eq!((saved.available_count, saved.limit_reached), (2, false));
+        let saved_json = serde_json::to_value(&saved).unwrap();
+        assert_eq!(saved_json["usable_count"], 1);
+        assert_eq!(
+            saved.summary.as_deref(),
+            Some("✦ 2 resets · 1 usable · imported")
+        );
+        assert!(banked_reset_text(&saved).contains("1 usable / 2"));
+        assert_eq!(saved_json["cached_source"], "imported");
+        assert!(banked_reset_text(&saved).contains("imported"));
+        assert!(saved.next_available_at.is_none());
         let json = serde_json::to_value(usage_provider_report(&claude(true))).unwrap();
         assert_eq!(json["banked_reset"]["provider"], "claude");
         let plain = serde_json::to_value(usage_provider_report(&ProviderUsage::default())).unwrap();

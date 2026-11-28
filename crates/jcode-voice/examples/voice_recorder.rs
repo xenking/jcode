@@ -38,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match event {
                 NariEvent::Transcript(t) => eprintln!("partial: {t}"),
                 NariEvent::Finished(r) => early = Some(r),
+                NariEvent::Interrupted(e) => eprintln!("interrupted (text kept): {e}"),
                 NariEvent::Started => {}
             }
         }

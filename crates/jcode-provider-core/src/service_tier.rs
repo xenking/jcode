@@ -91,7 +91,7 @@ pub fn speed_tier_ladder(
         || provider.contains("anthropic")
         || (provider.is_empty() && model.starts_with("claude"));
     if is_anthropic {
-        return if model.contains("claude-opus-4-8") {
+        return if model == "claude-opus-5-5" || model.contains("claude-opus-4-8") {
             STANDARD_FAST.to_vec()
         } else {
             Vec::new()
@@ -121,6 +121,13 @@ pub fn speed_tier_ladder_with_capabilities(
 ) -> Vec<&'static str> {
     let mut ladder = speed_tier_ladder(provider_name, model_name);
     if let Some(available) = available {
+        let native_openai = provider_name.is_some_and(|provider| {
+            let provider = provider.to_ascii_lowercase();
+            provider.contains("openai") && !provider.contains("compatible")
+        });
+        if native_openai && !ladder.is_empty() {
+            ladder = STANDARD_FAST_ULTRAFAST.to_vec();
+        }
         ladder.retain(|tier| {
             *tier == SPEED_TIER_STANDARD
                 || available
@@ -292,4 +299,139 @@ mod tests {
             Some((0, "off", false))
         );
     }
+
+    #[test]
+    fn codex_ultrafast_requires_that_routes_advertisement() {
+        use SpeedAvailability::{Available, Unavailable, Unknown};
+
+        let with_ultrafast = ["priority".into(), "ultrafast".into()];
+        let fast_only = ["priority".into()];
+        for (tiers, expected) in [
+            (Some(with_ultrafast.as_slice()), Available),
+            (Some(fast_only.as_slice()), Unavailable),
+            (Some(&[][..]), Unavailable),
+            (None, Unknown),
+        ] {
+            let options = openai_speed_options("gpt-6.2-sol", true, tiers);
+            let ultrafast = options
+                .iter()
+                .find(|o| o.mode == SpeedMode::Ultrafast)
+                .unwrap();
+            assert_eq!(ultrafast.availability, expected);
+            assert_eq!(ultrafast.reason.is_some(), expected != Available);
+        }
+    }
+}
+use crate::{SpeedAvailability, SpeedMode, SpeedOption};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnthropicFastMode {
+    Stable,
+    Beta,
+}
+
+pub fn anthropic_fast_mode(
+    model: &str,
+    oauth: bool,
+    date: (i32, u32, u32),
+) -> Option<AnthropicFastMode> {
+    use AnthropicFastMode::{Beta, Stable};
+    match base_model(model).as_str() {
+        "claude-opus-5-5" | "claude-fable-5-2" => Some(Stable),
+        "claude-mythos-5-2" if !oauth => Some(Stable),
+        "claude-opus-5" => Some(Beta),
+        "claude-opus-4-8" if date < (2026, 11, 30) => Some(Beta),
+        _ => None,
+    }
+}
+
+/// OAuth support comes from the specific account's Codex catalog, never from
+/// the platform API model list. A catalog advertises models, not rate limits.
+pub fn openai_speed_options(
+    model: &str,
+    oauth: bool,
+    advertised: Option<&[String]>,
+) -> Vec<SpeedOption> {
+    let model = crate::model_id::canonical(model);
+    let model = model.strip_suffix("[1m]").unwrap_or(&model);
+    let model = crate::model_id::slash_base(model);
+    let public_fast_models = [
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+        "gpt-6.1-terra",
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.3-codex",
+    ];
+    let matches_model = |family: &str| {
+        model == family
+            || model.strip_prefix(family).is_some_and(|suffix| {
+                suffix.len() == 11 && suffix.bytes().all(|c| c == b'-' || c.is_ascii_digit())
+            })
+    };
+    let public_ultrafast = ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol"];
+    let mut options = vec![SpeedOption::standard()];
+    for (mode, ids, api_support) in [
+        (
+            SpeedMode::Fast,
+            &["priority", "fast"][..],
+            public_fast_models.into_iter().any(matches_model),
+        ),
+        (
+            SpeedMode::Ultrafast,
+            &["ultrafast"][..],
+            public_ultrafast.into_iter().any(matches_model),
+        ),
+    ] {
+        let (availability, reason) = if oauth {
+            match advertised {
+                Some(tiers) if tiers.iter().any(|tier| ids.contains(&tier.as_str())) => {
+                    (SpeedAvailability::Available, None)
+                }
+                Some(_) => (
+                    SpeedAvailability::Unavailable,
+                    Some(
+                        "The Codex catalog for this account does not advertise this speed for the model",
+                    ),
+                ),
+                None => (
+                    SpeedAvailability::Unknown,
+                    Some(
+                        "This account's Codex catalog did not report speeds for this model. Refresh the model list to check",
+                    ),
+                ),
+            }
+        } else if !api_support {
+            (
+                SpeedAvailability::Unavailable,
+                Some("The OpenAI API does not document this speed for the model"),
+            )
+        } else if mode == SpeedMode::Ultrafast
+            && ["gpt-6-astra", "gpt-6.1-sol"]
+                .into_iter()
+                .any(matches_model)
+        {
+            (SpeedAvailability::Available, None)
+        } else {
+            (
+                SpeedAvailability::Unknown,
+                Some(
+                    "Uses premium OpenAI API rates. Project access and quota have not been verified",
+                ),
+            )
+        };
+        options.push(SpeedOption {
+            mode,
+            availability,
+            reason: reason.map(str::to_owned),
+        });
+    }
+    options
 }

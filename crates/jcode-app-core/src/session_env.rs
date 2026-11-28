@@ -6,10 +6,31 @@
 
 use anyhow::{Result, bail};
 use std::collections::HashMap;
-use std::sync::{LazyLock, RwLock};
+use std::sync::{LazyLock, Mutex, RwLock};
 
-static SESSION_ENV: LazyLock<RwLock<HashMap<String, HashMap<String, String>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+type Entries = HashMap<String, HashMap<String, String>>;
+
+static SESSION_ENV: LazyLock<RwLock<Entries>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Caches derived from these overrides register here so they are pruned in the
+/// same critical section that changes the overrides.
+static OBSERVERS: Mutex<Vec<fn(&Entries)>> = Mutex::new(Vec::new());
+
+/// Call `observer` with the full registry after every change, while the
+/// registry's write lock is held. Registering the same function twice is a no-op.
+pub(crate) fn observe_changes(observer: fn(&Entries)) {
+    let mut observers = OBSERVERS.lock().unwrap_or_else(|e| e.into_inner());
+    if !observers.contains(&observer) {
+        observers.push(observer);
+    }
+}
+
+fn notify_changed(entries: &Entries) {
+    let observers = OBSERVERS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for observer in observers {
+        observer(entries);
+    }
+}
 
 /// Replace all overrides atomically. An empty map clears the entry.
 /// Invalid updates leave the previous values untouched. Errors never include
@@ -31,7 +52,7 @@ pub fn set_session_env(session_id: &str, env: HashMap<String, String>) -> Result
     } else {
         entries.insert(session_id.to_owned(), env);
     }
-    crate::tool::session_http::prune(&entries);
+    notify_changed(&entries);
     Ok(())
 }
 
@@ -62,14 +83,14 @@ pub fn inherit_session_env(parent: &str, child: &str) {
     } else {
         entries.remove(child);
     }
-    crate::tool::session_http::prune(&entries);
+    notify_changed(&entries);
 }
 
 /// Forget a destroyed session. Already-launched jobs retain their snapshots.
 pub fn remove_session_env(session_id: &str) {
     let mut entries = SESSION_ENV.write().unwrap_or_else(|e| e.into_inner());
     entries.remove(session_id);
-    crate::tool::session_http::prune(&entries);
+    notify_changed(&entries);
 }
 
 #[cfg(test)]

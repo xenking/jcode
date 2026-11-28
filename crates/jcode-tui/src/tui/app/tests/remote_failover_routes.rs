@@ -1,94 +1,7 @@
-#[test]
-fn test_remote_background_shortcut_during_connection_phase() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    for modifiers in [KeyModifiers::ALT, KeyModifiers::CONTROL] {
-        let mut app = create_test_app();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        let mut peer = remote.take_dummy_peer().unwrap();
-        app.is_remote = true;
-        app.is_processing = true;
-        app.status =
-            ProcessingStatus::Connecting(crate::message::ConnectionPhase::WaitingForResponse);
-        app.input = "keep draft".into();
-        app.cursor_pos = app.input.len();
-        rt.block_on(async {
-            remote::handle_remote_key_event(
-                &mut app,
-                crossterm::event::KeyEvent::new(KeyCode::Char('b'), modifiers),
-                &mut remote,
-            )
-            .await
-            .unwrap();
-            use tokio::io::AsyncBufReadExt;
-            let mut line = String::new();
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                tokio::io::BufReader::new(&mut peer).read_line(&mut line),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            assert!(matches!(
-                serde_json::from_str::<crate::protocol::Request>(&line).unwrap(),
-                crate::protocol::Request::BackgroundTool { .. }
-            ));
-        });
-        assert_eq!(app.input, "keep draft");
-        assert_eq!(app.cursor_pos, app.input.len());
-    }
-}
-
-#[test]
-fn test_remote_background_result_notice() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut app = create_test_app();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    for (moved, expected) in [
-        (true, "Tool signalled to move to background"),
-        (false, "No running tool to move to background"),
-    ] {
-        app.handle_server_event(
-            crate::protocol::ServerEvent::BackgroundToolResult {
-                id: 1,
-                moved,
-                tool_call_id: None,
-                tool_name: None,
-            },
-            &mut remote,
-        );
-        assert_eq!(app.status_notice().as_deref(), Some(expected));
-    }
-}
-
-#[test]
-fn test_remote_background_shortcut_idle_keeps_word_navigation() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    for modifiers in [KeyModifiers::ALT, KeyModifiers::CONTROL] {
-        let mut app = create_test_app();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        app.is_remote = true;
-        app.is_processing = false;
-        app.status = ProcessingStatus::Idle;
-        app.input = "keep draft".into();
-        app.cursor_pos = app.input.len();
-        let request_id = remote.next_request_id_for_test();
-        rt.block_on(remote::handle_remote_key_event(
-            &mut app,
-            crossterm::event::KeyEvent::new(KeyCode::Char('b'), modifiers),
-            &mut remote,
-        ))
-        .unwrap();
-        assert_eq!(remote.next_request_id_for_test(), request_id);
-        assert_eq!(app.input, "keep draft");
-        assert_eq!(app.cursor_pos, 5);
-    }
-}
-
 fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model.to_string(),
         provider: "OpenAI".to_string(),
         api_method: "openai-oauth".to_string(),
@@ -96,11 +9,20 @@ fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     }
 }
 
+/// A spent allowance may move to another model. An auth error may not: it can
+/// only rotate credentials for the selected model, so these routing tests use a
+/// quota error to exercise cross-provider selection.
+const USAGE_EXHAUSTED_ERROR: &str = "429 usage limit reached; quota exhausted";
+
 fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: model.to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),
@@ -108,108 +30,44 @@ fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
         detail: String::new(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     }
 }
 
-#[test]
-fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    app.is_remote = true;
-    app.auto_poke_incomplete_todos = true;
-    app.auto_poke_default_on = true;
-    app.queued_messages
-        .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
-    app.pending_queued_dispatch = true;
-    app.remote_provider_name = Some("Anthropic".to_string());
-    app.remote_provider_model = Some("claude-sonnet-4".to_string());
-    app.remote_model_options = vec![
-        claude_oauth_route("claude-sonnet-4"),
-        claude_oauth_route("claude-opus-4"),
-        openai_oauth_route("gpt-5.5"),
-    ];
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "hi".to_string(),
-        images: vec![],
-        is_system: false,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: 0,
-        retry_at: None,
-    });
-    app.last_submitted_input = Some("hi".to_string());
-    app.is_processing = true;
-    app.status = ProcessingStatus::Streaming;
-    let prompt = jcode_provider_core::ProviderFailoverPrompt {
-        from_provider: "claude".into(),
-        from_label: "Anthropic".into(),
-        to_provider: "openai".into(),
-        to_label: "OpenAI".into(),
-        target_route: None,
-        reason: "429 rate limit exceeded; retry in 60 seconds".into(),
-        estimated_input_chars: 400,
-        estimated_input_tokens: 100,
-    };
-
-    app.handle_server_event(
-        crate::protocol::ServerEvent::Error {
-            id: 21,
-            message: prompt.to_error_message(),
-            retry_after_secs: Some(60),
-        },
-        &mut remote,
-    );
-
-    assert!(app.rate_limit_reset.is_none());
-    assert!(app.rate_limit_pending_message.is_none());
-    assert!(!app.auto_poke_incomplete_todos);
-    assert!(!app.auto_poke_default_on);
-    assert!(app.queued_messages.is_empty());
-    assert!(!app.pending_queued_dispatch);
-    assert!(!app.schedule_turn_end_followups());
-    assert_eq!(app.input, "hi");
-    assert!(app.pending_provider_failover.is_none());
-    let offer = app
-        .pending_fallback_offer
-        .as_ref()
-        .expect("manual fallback offer");
-    assert_eq!(offer.selection.provider_label, "OpenAI");
-    let resend = offer
-        .remote_resend
-        .as_ref()
-        .expect("preserved failed payload");
-    assert_eq!(resend.content, "hi");
-    assert_eq!(resend.raw_input.as_deref(), Some("hi"));
-    assert!(app.display_messages().iter().any(|message| {
-        message.role == "system"
-            && message.content.contains("Anthropic unavailable:")
-            && message.content.contains("/model")
-    }));
-    assert!(
-        !app.display_messages()
-            .iter()
-            .any(|message| { message.content.contains("[jcode-provider-failover]") })
-    );
-    assert!(!app.display_messages().iter().any(|message| {
-        message.role == "system"
-            && (message.content.contains("queued retry")
-                || message.content.contains("Rate limited"))
-    }));
+fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnection) {
+    remote_exact_failover_for("claude-sonnet-4", "OAuth usage exhausted")
 }
 
-fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnection) {
-    let mut app = create_test_app();
+fn remote_exact_failover_for(
+    model: &str,
+    reason: &str,
+) -> (App, crate::tui::backend::RemoteConnection) {
+    remote_exact_failover_on(create_test_app(), model, reason)
+}
+
+fn remote_exact_failover_with(app: App) -> (App, crate::tui::backend::RemoteConnection) {
+    remote_exact_failover_on(app, "claude-sonnet-4", "OAuth usage exhausted")
+}
+
+fn remote_exact_failover_on(
+    mut app: App,
+    model: &str,
+    reason: &str,
+) -> (App, crate::tui::backend::RemoteConnection) {
     app.is_remote = true;
     app.remote_provider_name = Some("Anthropic".into());
-    app.remote_provider_model = Some("claude-sonnet-4".into());
-    app.session.route_api_method = Some("claude-oauth@claude-otter".into());
+    app.remote_provider_model = Some(model.into());
+    app.session.apply_route(crate::session::Route {
+        route_api_method: Some("claude-oauth@claude-otter".into()),
+        ..app.session.route()
+    });
     app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
     let mut target = openai_oauth_route("gpt-5.4");
     target.api_method = "openai-oauth@openai-fox".into();
     app.remote_model_options = vec![target];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".into(),
         images: vec![],
         is_system: false,
@@ -226,7 +84,7 @@ fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnectio
         to_provider: "openai".into(),
         to_label: "OpenAI fox".into(),
         target_route: Some("openai-oauth@openai-fox:gpt-5.4".into()),
-        reason: "OAuth usage exhausted".into(),
+        reason: reason.into(),
         estimated_input_chars: 400,
         estimated_input_tokens: 100,
     };
@@ -239,6 +97,32 @@ fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnectio
         &mut remote,
     );
     (app, remote)
+}
+
+#[test]
+fn remote_oauth_rejection_requires_manual_model_change_even_with_countdown_enabled() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (app, _) = remote_exact_failover_for(
+            "claude-opus-5-5",
+            "Claude OAuth refresh token was previously rejected by Anthropic; run /login",
+        );
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_automatic_failover_route.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        assert_eq!(
+            app.remote_provider_model.as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(app.input, "hi");
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.content.contains("Use /model to switch"))
+        );
+    });
 }
 
 #[test]
@@ -343,7 +227,10 @@ fn test_remote_failover_first_generic_failure_is_instant_then_countdown_and_boun
         for index in 2..=3 {
             prompt.target_route = Some(format!("openai-oauth@account-{index}:gpt-5.4"));
             app.handle_provider_failover_prompt_with_payload(prompt.clone(), payload.clone());
-            let pending = app.pending_provider_failover.take().expect("later countdown");
+            let pending = app
+                .pending_provider_failover
+                .take()
+                .expect("later countdown");
             assert!(pending.deadline > Instant::now() + Duration::from_secs(2));
         }
         prompt.target_route = Some("openai-oauth@account-4:gpt-5.4".into());
@@ -439,7 +326,7 @@ fn test_remote_immediate_failover_dispatches_once_and_suppresses_exhaustion_spam
 }
 
 #[test]
-fn test_remote_generic_auth_error_arms_countdown_for_exact_pool_route() {
+fn test_remote_generic_quota_error_arms_countdown_for_exact_pool_route() {
     with_temp_jcode_home(|| {
         write_test_config(
             "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
@@ -451,7 +338,7 @@ fn test_remote_generic_auth_error_arms_countdown_for_exact_pool_route() {
         let payload = app.pending_provider_failover.take().unwrap().remote_resend;
         // Discard the fixture's staged switch before testing a fresh error.
         app.automatic_failover_targets.clear();
-        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert!(app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload));
         assert!(app.pending_fallback_offer.is_none());
         let pending = app.pending_provider_failover.as_ref().unwrap();
         assert_eq!(
@@ -502,6 +389,7 @@ fn test_remote_failover_stops_when_cross_route_retry_budget_is_spent() {
         let payload = app.pending_fallback_resend.take().unwrap();
         app.pending_automatic_failover_route = None;
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: payload.content,
             images: payload.images,
             is_system: payload.is_system,
@@ -552,7 +440,7 @@ fn test_remote_manual_fallback_waits_for_request_dispatch() {
         assert!(app.apply_pending_fallback_offer());
         assert!(app.pending_route_selection.is_some());
         assert_eq!(
-            app.session.route_api_method.as_deref(),
+            app.session.route_api_method(),
             Some("claude-oauth@claude-otter")
         );
         rt.block_on(remote::process_remote_followups(&mut app, &mut connection));
@@ -714,6 +602,143 @@ fn test_remote_failover_confirmation_timeout_restores_prompt_once() {
 }
 
 #[test]
+fn test_automatic_failover_refuses_opus_target_and_skips_ranked_opus() {
+    with_temp_jcode_home(|| {
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
+        seed_failover_openai_fox();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        app.automatic_failover_targets.clear();
+        let prompt = crate::provider::ProviderFailoverPrompt {
+            from_provider: "openai".into(),
+            from_label: "OpenAI".into(),
+            to_provider: "claude".into(),
+            to_label: "Opus".into(),
+            target_route: Some("claude-oauth@claude-otter:claude-opus-5-5".into()),
+            reason: "usage limit".into(),
+            estimated_input_chars: 0,
+            estimated_input_tokens: 0,
+        };
+        app.handle_provider_failover_prompt_with_payload(prompt, payload.clone());
+        assert!(app.pending_provider_failover.is_none());
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|message| message.content.contains("failover_excluded_models"))
+        );
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("claude-api".into()),
+            ..app.session.route()
+        });
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
+        let mut opus = claude_oauth_route("claude-opus-5-5");
+        opus.api_method = "claude-oauth@claude-otter".into();
+        app.remote_model_options.insert(0, opus);
+        crate::auth::account_pool::AccountPool {
+            members: vec![
+                "anthropic-api".into(),
+                "claude:claude-otter".into(),
+                "openai:openai-fox".into(),
+            ],
+            ..Default::default()
+        }
+        .save()
+        .unwrap();
+        assert!(app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload));
+        let target = app
+            .pending_provider_failover
+            .as_ref()
+            .unwrap()
+            .prompt
+            .target_route
+            .as_deref()
+            .unwrap();
+        assert!(
+            !target.contains("opus"),
+            "excluded model selected: {target}"
+        );
+    });
+}
+
+#[test]
+fn test_generic_auto_fallback_skips_opus_even_if_ranked_first() {
+    with_temp_jcode_home(|| {
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
+        seed_failover_openai_fox();
+        crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            label: "claude-otter".into(),
+            access: "test-access".into(),
+            refresh: "test-refresh".into(),
+            expires: chrono::Utc::now().timestamp_millis() + 600_000,
+            email: None,
+            subscription_type: Some("max".into()),
+            scopes: Vec::new(),
+        })
+        .unwrap();
+        crate::provider::populate_anthropic_models_for_scope(
+            "oauth::claude-otter",
+            vec!["claude-opus-5-5".into()],
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let (mut app, _remote) = remote_exact_failover_fixture();
+        let payload = app.pending_provider_failover.take().unwrap().remote_resend;
+        app.automatic_failover_targets.clear();
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("claude-api".into()),
+            ..app.session.route()
+        });
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
+        let mut opus = claude_oauth_route("claude-opus-5-5");
+        opus.api_method = "claude-oauth@claude-otter".into();
+        app.remote_model_options.insert(0, opus);
+        crate::auth::account_pool::AccountPool {
+            members: vec![
+                "anthropic-api".into(),
+                "claude:claude-otter".into(),
+                "openai:openai-fox".into(),
+            ],
+            ..Default::default()
+        }
+        .save()
+        .unwrap();
+        assert!(
+            app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload.clone())
+        );
+        assert_eq!(
+            app.pending_provider_failover
+                .as_ref()
+                .unwrap()
+                .prompt
+                .target_route
+                .as_deref(),
+            Some("openai-oauth@openai-fox:gpt-5.4")
+        );
+        app.pending_provider_failover = None;
+        app.automatic_failover_targets.clear();
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\nfailover_excluded_models = []\n",
+        );
+        assert!(app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload));
+        assert_eq!(
+            app.pending_provider_failover
+                .as_ref()
+                .unwrap()
+                .prompt
+                .target_route
+                .as_deref(),
+            Some("claude-oauth@claude-otter:claude-opus-5-5")
+        );
+    });
+}
+
+#[test]
 fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() {
     with_temp_jcode_home(|| {
         write_test_config(
@@ -726,7 +751,10 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         let payload = app.pending_provider_failover.take().unwrap().remote_resend;
         // Discard the fixture's staged switch before testing a fresh error.
         app.automatic_failover_targets.clear();
-        app.session.route_api_method = Some("claude-api".into());
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("claude-api".into()),
+            ..app.session.route()
+        });
         app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
         let mut preferred = claude_oauth_route("claude-sonnet-4");
         preferred.api_method = "claude-oauth@claude-otter".into();
@@ -738,7 +766,7 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         };
         pool.save().unwrap();
         assert!(
-            app.offer_fallback_after_error_with_payload("401 invalid API key", payload.clone())
+            app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload.clone())
         );
         assert_eq!(
             app.pending_provider_failover
@@ -753,7 +781,7 @@ fn test_generic_auto_fallback_skips_excluded_preferred_and_checks_source_pool() 
         pool.members.retain(|key| key != "anthropic-api");
         pool.excluded.push("anthropic-api".into());
         pool.save().unwrap();
-        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert!(app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload));
         assert!(app.pending_provider_failover.is_none());
         // Unified router: pooled accounts outrank excluded ones even for
         // the manual offer; the excluded route stays reachable only when no
@@ -792,7 +820,7 @@ fn test_generic_auto_fallback_respects_explicit_pool_account_order() {
         }
         .save()
         .unwrap();
-        assert!(app.offer_fallback_after_error_with_payload("401 invalid API key", payload));
+        assert!(app.offer_fallback_after_error_with_payload(USAGE_EXHAUSTED_ERROR, payload));
         assert_eq!(
             app.pending_provider_failover
                 .as_ref()
@@ -820,7 +848,10 @@ fn test_generic_quota_fallback_skips_exhausted_account_sibling_model() {
         app.automatic_failover_targets.clear();
         app.remote_provider_name = Some("OpenAI".into());
         app.remote_provider_model = Some("gpt-5.4".into());
-        app.session.route_api_method = Some("openai-oauth@openai-otter".into());
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("openai-oauth@openai-otter".into()),
+            ..app.session.route()
+        });
         let mut exhausted_sibling = openai_oauth_route("gpt-5.2");
         exhausted_sibling.api_method = "openai-oauth@openai-otter".into();
         app.remote_model_options.insert(0, exhausted_sibling);
@@ -856,12 +887,15 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let (mut app, mut remote) = remote_exact_failover_fixture();
-        app.session.route_api_method = Some("claude-oauth@claude-otter".into());
+        app.session.apply_route(crate::session::Route {
+            route_api_method: Some("claude-oauth@claude-otter".into()),
+            ..app.session.route()
+        });
         app.pending_provider_failover.as_mut().unwrap().deadline =
             Instant::now() - Duration::from_secs(1);
         app.maybe_progress_provider_failover_countdown();
         assert_eq!(
-            app.session.route_api_method.as_deref(),
+            app.session.route_api_method(),
             Some("claude-oauth@claude-otter")
         );
         app.remote_model_switch_in_flight = true;
@@ -904,7 +938,7 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
             &mut remote,
         );
         assert_eq!(
-            app.session.route_api_method.as_deref(),
+            app.session.route_api_method(),
             Some("claude-oauth@claude-otter")
         );
         assert_eq!(
@@ -914,7 +948,8 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
         assert!(app.pending_automatic_failover_route.is_none());
         assert!(app.pending_fallback_resend.is_none());
         assert!(!app.remote_model_switch_in_flight);
-        assert_eq!(app.input, "hi");
+        assert_eq!(app.input, "hi [image 1]");
+        app.sync_model_picker_preview_from_input();
         assert_eq!(
             app.pending_images,
             vec![("image/png".into(), "image-data".into())]
@@ -999,7 +1034,10 @@ fn test_cancel_image_only_failover_restores_attachments() {
         payload.raw_input = Some(String::new());
         payload.images = vec![("image/png".into(), "image-data".into())];
         app.cancel_pending_provider_failover("Canceled");
-        assert!(app.input.is_empty());
+        assert_eq!(app.input, "[image 1]");
+        // Recovered image-only prompts need a composer marker, otherwise the
+        // next input synchronization would silently discard the attachment.
+        app.sync_input_image_attachments();
         assert_eq!(
             app.pending_images,
             vec![("image/png".into(), "image-data".into())]
@@ -1047,6 +1085,7 @@ fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -1107,6 +1146,7 @@ fn test_remote_usage_limit_shows_error_and_single_switch_line() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -1183,9 +1223,13 @@ fn test_remote_usage_limit_failover_collapses_into_one_line_with_account() {
         let added: Vec<_> = app.display_messages()[before..].to_vec();
         assert_eq!(added.len(), 1, "{added:?}");
         assert_eq!(added[0].role, "system");
-        assert_eq!(
-            added[0].content,
-            "✓ Usage limit reached. Switched to model: gpt-5.4 (via OAuth · j***y@gmail.com). Retrying."
+        assert!(
+            added[0].content.contains("Anthropic")
+                && added[0].content.contains("claude-sonnet-4")
+                && added[0].content.contains("reset unknown")
+                && added[0].content.contains("gpt-5.4"),
+            "{}",
+            added[0].content
         );
     });
 }
@@ -1209,6 +1253,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -1318,4 +1363,302 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
 
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
     assert!(!app.is_processing, "no resend should fire");
+}
+
+#[test]
+fn test_antigravity_individual_quota_429_immediately_auto_fails_over_without_rate_limit_hold() {
+    let antigravity_429 = r#"Antigravity generateContent failed (HTTP 429 Too Many Requests): {
+  "error": {
+    "code": 429,
+    "message": "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h16m14s.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "QUOTA_EXHAUSTED",
+        "metadata": {
+          "model": "gemini-4-neon-low",
+          "quotaResetDelay": "2h16m14.39368445s"
+        }
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+        "retryDelay": "8174.393684450s"
+      }
+    ]
+  }
+}"#;
+
+    for initial_route_api_method in [Some("https".to_string()), None] {
+        with_temp_jcode_home(|| {
+            write_test_config(
+                "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = true\n",
+            );
+            seed_failover_openai_fox();
+            crate::auth::account_pool::AccountPool {
+                members: vec!["antigravity".into(), "openai:openai-fox".into()],
+                excluded: vec![],
+                ..Default::default()
+            }
+            .save()
+            .unwrap();
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let _guard = rt.enter();
+            let mut app = create_test_app();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            app.is_remote = true;
+            app.remote_provider_name = Some("Antigravity".into());
+            app.remote_provider_model = Some("gemini-4-neon-low".into());
+            app.session.apply_route(crate::session::Route {
+                route_api_method: initial_route_api_method.clone(),
+                ..app.session.route()
+            });
+            app.remote_model_options = vec![
+                crate::provider::ModelRoute {
+                    reasoning_efforts: None,
+                    speed_options: Vec::new(),
+                    model: "gemini-4-neon-high".into(),
+                    provider: "Antigravity".into(),
+                    api_method: "https".into(),
+                    available: true,
+                    detail: String::new(),
+                    usage: None,
+                    cheapness: None,
+                    account: None,
+                    icon: None,
+                },
+                crate::provider::ModelRoute {
+                    reasoning_efforts: None,
+                    speed_options: Vec::new(),
+                    model: "gpt-5.4".into(),
+                    provider: "OpenAI".into(),
+                    api_method: "openai-oauth@openai-fox".into(),
+                    available: true,
+                    detail: String::new(),
+                    usage: None,
+                    cheapness: None,
+                    account: None,
+                    icon: None,
+                },
+            ];
+            app.is_processing = true;
+            app.status = ProcessingStatus::Streaming;
+            app.current_message_id = Some(42);
+            app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                jarvis_voice: false,
+                content: "keep going".into(),
+                images: vec![],
+                is_system: false,
+                system_reminder: None,
+                auto_retry: false,
+                retry_attempts: 0,
+                retry_at: None,
+            });
+
+            app.handle_server_event(
+                crate::protocol::ServerEvent::Error {
+                    id: 42,
+                    message: antigravity_429.to_string(),
+                    retry_after_secs: None,
+                },
+                &mut remote,
+            );
+
+            assert!(
+                app.rate_limit_reset.is_none(),
+                "exhausted Antigravity quota must not park on rate_limit_reset (route_api_method={initial_route_api_method:?})"
+            );
+            assert!(
+                app.pending_fallback_offer.is_none(),
+                "pooled Antigravity failover must be automatic, not a manual Ctrl+Y offer (route_api_method={initial_route_api_method:?})"
+            );
+            assert_eq!(
+                app.pending_automatic_failover_route
+                    .as_ref()
+                    .map(|route| (route.api_method.as_str(), route.model.as_str())),
+                Some(("openai-oauth@openai-fox", "gpt-5.4")),
+                "must immediately stage failover to next pooled account (route_api_method={initial_route_api_method:?})"
+            );
+            assert_eq!(
+                app.pending_fallback_resend
+                    .as_ref()
+                    .map(|payload| payload.content.as_str()),
+                Some("keep going"),
+                "must retain failed turn payload for automatic resend"
+            );
+        });
+    }
+}
+
+#[path = "remote_failover_routes_additional_tests.rs"]
+mod additional_test_remote_background_shortcut_during_connection_phase;
+
+fn routing_decision() -> crate::protocol::ServerEvent {
+    crate::protocol::ServerEvent::RoutingDecision {
+        account: "claude:work".into(),
+        reason: "priority".into(),
+        warnings: Vec::new(),
+        pending: None,
+    }
+}
+
+#[test]
+fn remote_failover_countdown_stays_off_while_the_daemon_routes_the_session() {
+    with_temp_jcode_home(|| {
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.handle_server_event(routing_decision(), &mut remote);
+        let (app, _) = remote_exact_failover_with(app);
+        assert!(
+            app.pending_provider_failover.is_none(),
+            "the daemon owns failover, the client must not count down"
+        );
+        assert!(app.pending_automatic_failover_route.is_none());
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.content.contains("Use /model to switch")),
+            "the user is still told how to switch by hand"
+        );
+        assert_eq!(app.input, "hi", "the held message returns to the input box");
+    });
+}
+
+#[test]
+fn remote_failover_countdown_resumes_after_a_manual_model_change_or_reconnect() {
+    with_temp_jcode_home(|| {
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.handle_server_event(routing_decision(), &mut remote);
+        assert!(app.routing_owns_failover);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChanged {
+                id: 77,
+                model: "claude-sonnet-4".into(),
+                provider_name: Some("Anthropic".into()),
+                context_window: None,
+                error: None,
+                resolved_credential: None,
+                provider_oauth_email: None,
+                provider_oauth_account_label: None,
+                reasoning_effort: None,
+            },
+            &mut remote,
+        );
+        assert!(
+            !app.routing_owns_failover,
+            "a user's model switch may leave the routed provider"
+        );
+        let (app, _) = remote_exact_failover_with(app);
+        assert!(app.pending_provider_failover.is_some());
+    });
+}
+
+/// A switch the daemon holds until the turn ends is shown as queued. The
+/// session keeps its model, and the line that says it switched comes only when
+/// the daemon confirms it.
+#[test]
+fn remote_queued_model_switch_waits_for_the_turn_then_announces_the_switch() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_model = Some("claude-opus-5-5".into());
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChangePending {
+                id: 7,
+                model: "gpt-6.2-sol".into(),
+            },
+            &mut remote,
+        );
+        assert_eq!(
+            app.queued_model_switch,
+            Some((7, "gpt-6.2-sol".to_string()))
+        );
+        assert_eq!(
+            app.remote_provider_model.as_deref(),
+            Some("claude-opus-5-5")
+        );
+        let queued = app.display_messages().last().unwrap().content.clone();
+        assert!(
+            queued.contains("queued") && queued.contains("claude-opus-5-5"),
+            "{queued}"
+        );
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChanged {
+                id: 7,
+                model: "gpt-6.2-sol".into(),
+                provider_name: Some("openai".into()),
+                error: None,
+                provider_oauth_email: None,
+                provider_oauth_account_label: None,
+                resolved_credential: None,
+                reasoning_effort: None,
+                context_window: None,
+            },
+            &mut remote,
+        );
+        assert_eq!(app.queued_model_switch, None);
+        assert_eq!(app.remote_provider_model.as_deref(), Some("gpt-6.2-sol"));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.content.contains("Switched to model: gpt-6.2-sol"))
+        );
+    });
+}
+
+#[test]
+fn remote_queued_model_switch_can_be_cancelled() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_model = Some("claude-opus-5-5".into());
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChangePending {
+                id: 7,
+                model: "gpt-6.2-sol".into(),
+            },
+            &mut remote,
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ModelChangeCancelled {
+                id: 8,
+                pending_id: Some(7),
+                model: Some("gpt-6.2-sol".into()),
+            },
+            &mut remote,
+        );
+        assert_eq!(app.queued_model_switch, None);
+        assert_eq!(
+            app.remote_provider_model.as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert!(
+            app.display_messages()
+                .last()
+                .unwrap()
+                .content
+                .contains("cancelled")
+        );
+    });
 }

@@ -302,14 +302,14 @@ async fn run_provider_tool_smoke_for_choice(
         // The smoke test checks for an exact reply. Memory recall (and any
         // plan-limit notice it raises) would add unrelated text to it.
         agent.set_memory_enabled(false);
-        let transcript_start = agent.messages().len();
+        let transcript_start = agent.message_count();
         let output = agent.run_once_capture(prompt).await.with_context(|| {
             format!(
                 "{} tool-enabled smoke prompt failed during agent turn execution",
                 choice.as_arg_value()
             )
         })?;
-        validate_auth_test_tool_smoke_transcript(&agent.messages()[transcript_start..], &output)
+        validate_auth_test_tool_smoke_transcript(agent.iter_messages_from(transcript_start), &output)
             .with_context(|| {
                 format!(
                     "{} tool-enabled smoke prompt did not complete a valid real Jcode tool loop",
@@ -322,8 +322,8 @@ async fn run_provider_tool_smoke_for_choice(
     .await
 }
 
-fn validate_auth_test_tool_smoke_transcript(
-    messages: &[crate::session::StoredMessage],
+fn validate_auth_test_tool_smoke_transcript<'a>(
+    messages: impl IntoIterator<Item = &'a crate::session::StoredMessage>,
     output: &str,
 ) -> Result<()> {
     if output.trim() != "AUTH_TEST_OK" {
@@ -598,9 +598,12 @@ mod auth_tool_smoke_tests {
         content: Vec<crate::message::ContentBlock>,
     ) -> crate::session::StoredMessage {
         crate::session::StoredMessage {
+            codemode: None,
+            ask: None,
+            attachment_data: None,
             id: "msg_test".to_string(),
             role,
-            content,
+            content: content.into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

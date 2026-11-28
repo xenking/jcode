@@ -107,11 +107,27 @@ impl McpHandle {
 
     /// Call a tool
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<ToolCallResult> {
-        let arguments = if arguments.is_null() {
+        let mut arguments = if arguments.is_null() {
             Value::Object(serde_json::Map::new())
         } else {
             arguments
         };
+        // `intent` is a jcode display note unless declared by the MCP tool.
+        // Use the live schema, which is available even on connect-on-first-call.
+        if let Some(object) = arguments.as_object_mut()
+            && object.contains_key("intent")
+        {
+            let tools = self.tools.read().unwrap_or_else(|error| error.into_inner());
+            let declares_intent = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.input_schema.get("properties"))
+                .and_then(Value::as_object)
+                .is_some_and(|properties| properties.contains_key("intent"));
+            if !declares_intent {
+                object.remove("intent");
+            }
+        }
         let params = ToolCallParams {
             name: name.to_string(),
             arguments,
@@ -222,11 +238,9 @@ impl McpClient {
         }
 
         let mut command = Command::new(&config.command);
-        if !interactive {
-            command.env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY");
-        }
         command
             .args(&config.args)
+            .env_clear()
             .envs(&env)
             .env(crate::inherited_children::MCP_CHILD_MARKER_ENV, "1")
             .stdin(Stdio::piped())
@@ -820,6 +834,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn connect_applies_filtered_environment_to_child() {
+        const PROBE: &str = "JCODE_TEST_MCP_CHILD_ENV_PROBE";
+        if std::env::var_os(PROBE).is_none() {
+            // Re-run this exact test in a process whose inherited environment
+            // contains only synthetic values. Never mutate the test runner's env.
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    concat!(
+                        module_path!(),
+                        "::connect_applies_filtered_environment_to_child"
+                    )
+                    .split_once("::")
+                    .unwrap()
+                    .1,
+                ])
+                .env_clear()
+                .env(PROBE, "1")
+                .env("JCODE_HOME", home.path())
+                .env("JCODE_TEST_SESSION", "1")
+                .env("OPENAI_API_KEY", "unconfigured-fixture")
+                .env("ANTHROPIC_API_KEY", "inherited-fixture")
+                .env("MCP_TEST_PLAIN_VALUE", "preserved")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("running 1 test"), "{stdout}");
+            assert!(output.status.success(), "{stdout}");
+            return;
+        }
+
+        let script = r#"
+while IFS= read -r line; do
+    case "$line" in
+        *'"initialize"'*)
+            state="${OPENAI_API_KEY+present}:${ANTHROPIC_API_KEY-absent}:${MCP_TEST_PLAIN_VALUE-absent}"
+            printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"%s","version":"1"}}}\n' "$state"
+            ;;
+        *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}\n';;
+    esac
+done
+"#;
+        let config = McpServerConfig {
+            args: vec!["-c".into(), script.into()],
+            env: HashMap::from([("ANTHROPIC_API_KEY".into(), "configured-fixture".into())]),
+            timeout_secs: Some(3),
+            ..fake_server_config()
+        };
+        let client = McpClient::connect("env-probe".to_string(), &config)
+            .await
+            .unwrap();
+        assert_eq!(
+            client.server_info().unwrap().name,
+            ":configured-fixture:preserved"
+        );
+    }
+
     /// A minimal fake stdio MCP server (shell script) that reports its own
     /// process cwd as the serverInfo name.
     fn fake_server_config() -> McpServerConfig {
@@ -846,6 +919,8 @@ done
             enabled: None,
             disabled: None,
             timeout_secs: None,
+            approval: Default::default(),
+            approve_free: Vec::new(),
         }
     }
 

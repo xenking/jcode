@@ -2,8 +2,23 @@ use super::*;
 use crate::auth::{AuthState, ProviderAuth};
 
 #[test]
+fn names_only_catalog_keeps_future_openai_models_on_direct_routes() {
+    let _guard = EnvGuard::new();
+    let model = "gpt-99.7-future";
+    assert!(!ALL_OPENAI_MODELS.contains(&model));
+    let routes = remote_model_routes_fallback(Some("OpenAI"), &[model.into()]);
+    assert!(
+        routes.iter().any(|route| route.model == model
+            && route.provider == "OpenAI"
+            && route.api_method == "openai-oauth"),
+        "a live catalog discovery must not require a compiled allowlist: {routes:?}"
+    );
+}
+
+#[test]
 fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
     let _guard = EnvGuard::new();
+    super::super::models::reset_model_catalog_services_for_tests();
     let home = crate::storage::jcode_dir().unwrap();
     std::fs::create_dir_all(&home).unwrap();
     let accounts: Vec<_> = ["work", "personal", "research"].into_iter().map(|label| {
@@ -37,6 +52,8 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
     let routes = expand_saved_account_routes(vec![
         build_anthropic_oauth_route("claude-sonnet-4-6", true, ""),
         ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "claude-sonnet-4-6".into(),
             provider: "Anthropic".into(),
             api_method: "claude-api".into(),
@@ -44,9 +61,15 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         },
     ]);
-    assert!(routes.iter().any(|r| r.api_method == "claude-api"));
+    assert!(
+        routes
+            .iter()
+            .any(|r| r.api_method == "claude-api" && r.account.is_none())
+    );
     assert!(!routes.iter().any(|r| r.api_method == "claude-oauth"));
     for label in ["work", "personal", "research"] {
         let route = routes
@@ -56,16 +79,17 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
             })
             .unwrap();
         assert!(route.detail.contains(&format!("account {label}")));
+        assert_eq!(route.account.as_deref(), Some(&*format!("claude:{label}")));
+        assert!(route.icon.as_deref().is_some_and(|icon| !icon.is_empty()));
         assert_eq!(
             super::super::RouteSelection::from_model_route(route).account_label(),
             Some(label)
         );
     }
     for label in ["work", "personal", "research"] {
-        assert!(
-            routes.iter().any(|route| route.model == "gpt-5.5"
-                && route.api_method == format!("openai-oauth@{label}"))
-        );
+        assert!(routes.iter().any(|route| route.model == "gpt-5.5"
+            && route.api_method == format!("openai-oauth@{label}")
+            && route.account.as_deref() == Some(&*format!("openai:{label}"))));
         assert!(
             !routes
                 .iter()
@@ -130,6 +154,74 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
     super::super::models::reset_model_catalog_services_for_tests();
 }
 
+/// An icon tells accounts of one provider apart: a provider's only saved login
+/// names its route without one.
+#[test]
+fn a_provider_with_one_saved_login_has_no_route_icon() {
+    let _guard = EnvGuard::new();
+    super::super::models::reset_model_catalog_services_for_tests();
+    let home = crate::storage::jcode_dir().unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("auth.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "anthropic_accounts": [{"label": "work", "access": "test-access", "refresh": "test-refresh",
+                "expires": i64::MAX, "email": "work@example.test", "subscription_type": "max"}],
+            "active_anthropic_account": "work"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let routes = expand_saved_account_routes(vec![build_anthropic_oauth_route(
+        "claude-sonnet-4-6",
+        true,
+        "",
+    )]);
+    let route = routes
+        .iter()
+        .find(|route| route.api_method == "claude-oauth@work")
+        .expect("the saved login's route");
+    assert_eq!(route.account.as_deref(), Some("claude:work"));
+    assert_eq!(route.icon, None);
+}
+
+/// Route details reach every client, so a saved login's e-mail is masked in the
+/// daemon, as it is on the usage and account pages.
+#[test]
+fn a_saved_logins_route_detail_never_carries_its_full_email() {
+    let _guard = EnvGuard::new();
+    super::super::models::reset_model_catalog_services_for_tests();
+    let home = crate::storage::jcode_dir().unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("auth.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "anthropic_accounts": [{"label": "work", "access": "test-access", "refresh": "test-refresh",
+                "expires": i64::MAX, "email": "vladislav@example.test", "subscription_type": "max"}],
+            "active_anthropic_account": "work"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let routes = expand_saved_account_routes(vec![build_anthropic_oauth_route(
+        "claude-sonnet-4-6",
+        false,
+        "requires extra usage",
+    )]);
+    let route = routes
+        .iter()
+        .find(|route| route.api_method == "claude-oauth@work")
+        .expect("the saved login's route");
+    assert!(
+        route.detail.contains("v***v@example.test"),
+        "{}",
+        route.detail
+    );
+    assert!(!route.detail.contains("vladislav"), "{}", route.detail);
+    let identity = jcode_provider_core::parse_route_account_identity(&route.detail).unwrap();
+    assert_eq!(identity.email(), Some("v***v@example.test"));
+}
+
 #[test]
 fn saved_account_expiry_requires_login_only_without_refresh_credentials() {
     let _guard = EnvGuard::new();
@@ -144,6 +236,81 @@ fn saved_account_expiry_requires_login_only_without_refresh_credentials() {
     let mut missing = build_anthropic_oauth_route("claude-sonnet-4-6", true, "");
     apply_saved_account_status(&mut missing, "claude", "missing-test", false, false, false);
     assert!(!missing.available);
+}
+
+#[test]
+fn codex_route_capabilities_do_not_cross_accounts_or_mix_catalog_snapshots() {
+    use jcode_provider_core::{SpeedAvailability, SpeedMode};
+    let _guard = EnvGuard::new();
+    let catalog = |efforts: &[&str], tiers: &[&str]| {
+        let efforts = efforts
+            .iter()
+            .map(|effort| serde_json::json!({"effort":effort}))
+            .collect::<Vec<_>>();
+        let tiers = tiers
+            .iter()
+            .map(|id| serde_json::json!({"id":id}))
+            .collect::<Vec<_>>();
+        super::super::models::parse_openai_model_catalog(&serde_json::json!({
+            "models": [{"slug": "gpt-6.2-sol", "supported_reasoning_levels": efforts,
+                "service_tiers": tiers}]
+        }))
+    };
+    let persist = super::super::persist_openai_model_catalog_for_scope;
+    let old_catalog = catalog(&["none", "low"], &["priority", "ultrafast"]);
+    persist("work", &old_catalog);
+    persist("personal", &catalog(&[], &["priority"]));
+    let before = super::super::models::openai_oauth_route_capabilities();
+    // The UI can retain a rendered snapshot while a refresh completes. Each
+    // snapshot must continue to describe the account it was built for.
+    let older = std::time::Instant::now();
+    let newer = older + std::time::Duration::from_millis(1);
+    super::super::publish_openai_model_catalog_refresh(
+        "work",
+        newer,
+        catalog(&["medium"], &[]),
+        |_| {},
+    );
+    super::super::publish_openai_model_catalog_refresh("work", older, old_catalog, |_| {
+        panic!("A late catalog must not update the runtime")
+    });
+    let after = super::super::models::openai_oauth_route_capabilities();
+    for ((efforts, options), expected_efforts, expected_speed) in [
+        (
+            before("gpt-6.2-sol", "openai-oauth@work"),
+            &(["low"])[..],
+            SpeedAvailability::Available,
+        ),
+        (
+            before("gpt-6.2-sol", "openai-oauth@personal"),
+            &[][..],
+            SpeedAvailability::Unavailable,
+        ),
+        (
+            after("gpt-6.2-sol", "openai-oauth@work"),
+            &(["medium"])[..],
+            SpeedAvailability::Unavailable,
+        ),
+        (
+            after("gpt-6.2-sol", "openai-oauth@missing"),
+            &(["low", "medium", "high", "xhigh", "max"])[..],
+            SpeedAvailability::Unknown,
+        ),
+    ] {
+        assert_eq!(efforts.unwrap(), expected_efforts);
+        let speed = options
+            .iter()
+            .find(|o| o.mode == SpeedMode::Ultrafast)
+            .unwrap();
+        assert_eq!(speed.availability, expected_speed);
+        assert!(
+            !speed
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Anthropic")
+        );
+    }
 }
 
 struct EnvGuard {

@@ -6,50 +6,6 @@ mod account_onboarding;
 mod auto_recovery;
 
 #[test]
-fn parses_mobile_as_a_move_to_managed_cloud() {
-    for input in ["/mobile", "/mobile ", " /mobile\t"] {
-        assert_eq!(
-            parse_cloud_command(input),
-            Some(CloudCommand::Move {
-                host: Some("jcode-cloud".into()),
-            }),
-            "{input:?}"
-        );
-    }
-}
-
-#[test]
-fn parses_mobile_cancel() {
-    for input in ["/mobile cancel", "/mobile\tcancel "] {
-        assert_eq!(
-            parse_cloud_command(input),
-            Some(CloudCommand::Cancel),
-            "{input:?}"
-        );
-    }
-}
-
-#[test]
-fn mobile_rejects_unexpected_arguments() {
-    for input in [
-        "/mobile box",
-        "/mobile --host box",
-        "/mobile --session-only",
-        "/mobile --include-session other",
-        "/mobile --dry-run",
-        "/mobile status",
-        "/mobile cancel extra",
-        "/mobile cancel cancel",
-    ] {
-        assert_eq!(
-            parse_cloud_command(input),
-            Some(CloudCommand::MoveUsage),
-            "{input}"
-        );
-    }
-}
-
-#[test]
 fn mobile_does_not_match_command_prefixes() {
     for input in ["/mobilex", "/mobilex cancel", "/mobile-cancel"] {
         assert_eq!(parse_cloud_command(input), None, "{input}");
@@ -72,7 +28,7 @@ fn mobile_is_registered_once_and_visible_in_command_help() {
             .count(),
         1
     );
-    let (_, help) = crate::tui::app::registered_command_entries()
+    let (_, help) = crate::tui::command_registry::registered_command_entries()
         .find(|(name, _)| *name == "/mobile")
         .expect("/mobile should be discoverable in command help");
     assert!(!help.is_empty());
@@ -343,9 +299,9 @@ fn replacement_completion_stays_local_and_shows_backup() {
         assert!(app.poll_cloud_job());
         assert!(!app.should_quit);
         assert!(app.cloud_handoff_requested.is_none());
-        assert_eq!(app.cloud_recovery_context.is_some(), !dry_run);
-        if let Some((session, reminder)) = &app.cloud_recovery_context {
-            assert_eq!(session, "original-session");
+        let reminder = app.cloud_recovery.reminder("original-session");
+        assert_eq!(reminder.is_some(), !dry_run);
+        if let Some(reminder) = reminder {
             assert!(reminder.contains("box"));
             assert!(reminder.contains("environment"));
         }
@@ -388,8 +344,8 @@ fn replacement_notice_reaches_next_local_turn_once() {
     );
     app.input = "continue configuring cloud".into();
     app.submit_input();
-    assert!(app.cloud_recovery_context.is_none());
-    assert!(app.session.messages.iter().any(|message| {
+    assert!(app.cloud_recovery_reminder().is_none());
+    assert!(app.session.iter_messages().any(|message| {
         message.content.iter().any(|block| {
             matches!(block, crate::message::ContentBlock::Text { text, .. } if text.contains(&reminder))
         })
@@ -526,10 +482,11 @@ fn cloud_failure_context_is_session_scoped_and_consumed_once() {
             .unwrap()
             .contains("permission denied")
     );
-    let saved = app.cloud_recovery_context.clone();
-    app.cloud_recovery_context.as_mut().unwrap().0 = "another-session".into();
-    assert!(app.take_cloud_recovery_reminder().is_none());
-    app.cloud_recovery_context = saved;
+    assert!(
+        app.cloud_recovery
+            .take_reminder("another-session")
+            .is_none()
+    );
     assert!(app.take_cloud_recovery_reminder().is_some());
     assert!(app.take_cloud_recovery_reminder().is_none());
 }
@@ -547,8 +504,8 @@ fn cloud_failure_reaches_next_local_agent_turn() {
     );
     app.input = "fix that cloud error".into();
     app.submit_input();
-    assert!(app.cloud_recovery_context.is_none());
-    assert!(app.session.messages.iter().any(|message| {
+    assert!(app.cloud_recovery_reminder().is_none());
+    assert!(app.session.iter_messages().any(|message| {
         message.content.iter().any(|block| {
             matches!(block,
                 crate::message::ContentBlock::Text { text, .. }
@@ -1327,3 +1284,6 @@ fn prepared_handoff_interrupts_running_turn_once() {
     app.poll_cloud_job_interrupt_only_for_test();
     assert!(!app.take_cloud_remote_interrupt(), "interrupts only once");
 }
+
+#[path = "commands_cloud_tests_additional_tests.rs"]
+mod additional_parses_mobile_as_a_move_to_managed_cloud;

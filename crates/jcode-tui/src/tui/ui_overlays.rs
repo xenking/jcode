@@ -138,7 +138,7 @@ pub(super) fn draw_changelog_overlay(
 pub(super) fn draw_commit_log_overlay(
     frame: &mut Frame,
     area: Rect,
-    overlay: &crate::tui::app::CommitLogOverlay,
+    overlay: &crate::tui::commit_log::CommitLogOverlay,
 ) {
     clear_area(frame, area);
 
@@ -519,7 +519,7 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
                 .to_string()
         })
         .collect();
-    let uncovered: Vec<(&str, &str)> = crate::tui::app::registered_command_entries()
+    let uncovered: Vec<(&str, &str)> = crate::tui::command_registry::registered_command_entries()
         .filter(|(name, _)| !shown.contains(*name))
         .collect();
     if !uncovered.is_empty() {
@@ -672,7 +672,14 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Use opposite send mode while processing",
     ));
     lines.push(key_entry("Ctrl+Up", "Retrieve pending message for editing"));
-    lines.push(key_entry("Ctrl+Tab / Ctrl+T", "Toggle queue mode"));
+    lines.push(key_entry(
+        "Ctrl+Tab / Ctrl+T",
+        "Toggle default send mode (steer / after yield)",
+    ));
+    lines.push(key_entry(
+        "Alt+↑/↓",
+        "Select queued prompt; m switches mode, Enter interrupts, Esc exits",
+    ));
     lines.push(key_entry(
         "Ctrl+R",
         "Search prompt history (across sessions)",
@@ -686,6 +693,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Quick-copy visible chat viewport plus nearby context",
     ));
     lines.push(key_entry(&alt("Y"), "Toggle chat selection/copy mode"));
+    lines.push(key_entry(
+        "E (selection mode)",
+        "Expand/collapse swarm row under cursor",
+    ));
     lines.push(key_entry(&alt("S"), "Toggle typing scroll lock"));
     lines.push(key_entry("Ctrl+P", "Toggle auto-poke for incomplete todos"));
     lines.push(key_entry(&alt("X"), "Show/dismiss todo list card in chat"));
@@ -756,6 +767,7 @@ pub(super) fn draw_model_status_overlay(
     frame: &mut Frame,
     area: Rect,
     scroll: usize,
+    title: &str,
     content: &str,
 ) {
     clear_area(frame, area);
@@ -767,12 +779,14 @@ pub(super) fn draw_model_status_overlay(
     let dim_style = Style::default().fg(dim_color());
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::from(Span::styled("  Model Status", title_style)));
-    lines.push(Line::from(Span::styled(
-        "  Live verification evidence for provider/model behavior in jcode",
-        dim_style,
-    )));
-    lines.push(Line::from(""));
+    if title.is_empty() {
+        lines.push(Line::from(Span::styled("  Model Status", title_style)));
+        lines.push(Line::from(Span::styled(
+            "  Live verification evidence for provider/model behavior in jcode",
+            dim_style,
+        )));
+        lines.push(Line::from(""));
+    }
 
     for raw in content.lines() {
         if let Some(title) = raw.strip_prefix("# ") {
@@ -799,7 +813,11 @@ pub(super) fn draw_model_status_overlay(
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" /provider-test-coverage "),
+                .title(if title.is_empty() {
+                    " /provider-test-coverage ".to_string()
+                } else {
+                    format!(" {title} ")
+                }),
         )
         .scroll((scroll.min(u16::MAX as usize) as u16, 0));
     frame.render_widget(paragraph, area);

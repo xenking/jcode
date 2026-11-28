@@ -1,9 +1,14 @@
 //! Embedded QuickJS sandbox for Jcode's opt-in Codemode.
 //!
-//! Codemode lets the model write a short JavaScript program that orchestrates
-//! harness tool calls (built-in tools and MCP tools alike) instead of issuing
-//! them one model turn at a time. Intermediate results stay inside the
-//! sandbox, so only what the script returns reaches the transcript.
+//! Codemode lets the model write a short JavaScript or TypeScript program that
+//! orchestrates harness tool calls (built-in tools and MCP tools alike) instead
+//! of issuing them one model turn at a time. Intermediate results stay inside
+//! the sandbox, so only what the script returns reaches the transcript.
+//!
+//! TypeScript is accepted because [`ts`] hands the model TypeScript
+//! declarations for every tool. [`strip`] erases the types in-process before
+//! QuickJS sees the script, the way Deno and Bun do, and keeps a line map so
+//! errors still point at the line the model wrote.
 //!
 //! The sandbox runs where the harness runs, not where `bash` runs. It has no
 //! filesystem, network, timer, or process APIs. The only way to affect the
@@ -22,6 +27,7 @@ use std::time::Duration;
 
 #[cfg(not(target_os = "freebsd"))]
 mod engine;
+pub mod strip;
 pub mod ts;
 
 /// Host-recorded outcome of one nested tool call. Recorded by the host, not
@@ -65,15 +71,41 @@ impl CallStatus {
 pub const AVAILABLE: bool = cfg!(not(target_os = "freebsd"));
 
 /// A tool the script may call through `tools.<name>(args)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// Schema of the typed result. When set, `types()` declares
+    /// `Promise<XOutput>` and the host returns the matching structured value.
+    pub output_schema: Option<Value>,
+}
+
+/// Time a run spent waiting on a person (for example an approval prompt).
+/// The host adds to it and the wall-clock limit extends by the same amount, so
+/// a human's thinking time never counts as the script running long.
+#[derive(Debug, Default)]
+pub struct PauseClock(std::sync::atomic::AtomicU64);
+
+impl PauseClock {
+    pub fn add(&self, waited: Duration) {
+        let millis = waited.as_millis().min(u128::from(u64::MAX)) as u64;
+        self.0
+            .fetch_add(millis, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn paused(&self) -> Duration {
+        Duration::from_millis(self.0.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 /// Harness side of the sandbox.
 pub trait Host: Send + Sync + 'static {
+    /// Clock the host adds human wait time to. `None` keeps a hard limit.
+    fn pause_clock(&self) -> Option<Arc<PauseClock>> {
+        None
+    }
+
     /// Execute a tool. `Ok` carries the tool result (already decoded to JSON
     /// when the output was JSON, otherwise a string). `Err` becomes a thrown
     /// `Error` inside the script.

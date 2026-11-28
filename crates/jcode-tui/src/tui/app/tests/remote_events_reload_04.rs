@@ -1,59 +1,24 @@
-#[test]
-fn test_remote_fast_status_tracks_history_tier_including_explicit_off() {
-    with_temp_jcode_home(|| {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-        let mut app = create_test_app();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        app.is_remote = true;
-        app.remote_session_id = Some("session_fast_status".to_string());
-        remote.mark_history_loaded();
-
-        // Bootstrap, catalog refresh, explicit off, then on again. An absent
-        // tier is authoritative Standard, not an invitation to use the saved
-        // default or preserve a stale priority badge.
-        for tier in [Some("priority"), Some("priority"), None, Some("priority")] {
-            let history = serde_json::from_value(serde_json::json!({
-                "type": "history",
-                "id": 1,
-                "session_id": "session_fast_status",
-                "messages": [],
-                "provider_name": "OpenAI",
-                "provider_model": "gpt-future-model",
-                "service_tier": tier
-            }))
-            .expect("history fixture");
-            app.handle_server_event(history, &mut remote);
-            assert_eq!(app.remote_service_tier.as_deref(), tier);
-            // Until the provider reports the applied tier, the widget is honest
-            // that the requested tier is unconfirmed.
-            assert_eq!(
-                crate::tui::TuiState::info_widget_data(&app)
-                    .service_tier
-                    .as_deref(),
-                tier.map(|_| "Fast ?")
-            );
-
-            app.input = "/fast status".to_string();
-            rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
-                .expect("fast status");
-            let status = &app
-                .display_messages()
-                .last()
-                .expect("status message")
-                .content;
-            let expected = if tier.is_some() {
-                "Fast mode is on."
-            } else {
-                "Fast mode is off."
-            };
-            assert!(status.starts_with(expected), "{status}");
-        }
-    });
-}
-
 #[path = "remote_events_reload_04/debug_frames.rs"]
 mod debug_frames;
+
+fn test_pending_remote_message(
+    content: &str,
+    is_system: bool,
+    auto_retry: bool,
+    retry_attempts: u8,
+) -> PendingRemoteMessage {
+    PendingRemoteMessage {
+        jarvis_voice: false,
+        content: content.to_string(),
+        images: vec![],
+        is_system,
+        system_reminder: None,
+        auto_retry,
+        retry_attempts,
+        retry_at: None,
+    }
+}
+
 #[test]
 fn test_remote_error_without_retry_recovers_pending_followups() {
     let mut app = create_test_app();
@@ -62,15 +27,7 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     remote.mark_history_loaded();
 
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "retry me".to_string(),
-        images: vec![],
-        is_system: false,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message("retry me", false, false, 0));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(10);
@@ -122,21 +79,84 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
 }
 
 #[test]
+fn quota_stopped_notice_names_route_window_reset_and_action() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_provider_name = Some("OpenAI".into());
+    app.remote_provider_model = Some("future-model".into());
+    app.remote_model_options.clear();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 41,
+            message: "HTTP 429 weekly rate limit".into(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.content.contains("OpenAI")
+                && m.content.contains("future-model")
+                && m.content.contains("weekly")
+                && m.content.contains("reset unknown")
+                && m.content.contains("stopped")),
+        "{:?}",
+        app.display_messages()
+    );
+}
+
+#[test]
+fn quota_wait_notice_names_route_window_reset_and_action() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.remote_provider_name = Some("OpenAI".into());
+    app.remote_provider_model = Some("future-model".into());
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
+        content: "retry me".into(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 41,
+            message: "HTTP 429 weekly rate limit".into(),
+            retry_after_secs: Some(60),
+        },
+        &mut remote,
+    );
+    let notice = app
+        .display_messages()
+        .iter()
+        .find(|m| m.content.contains("weekly") && m.content.contains("OpenAI"))
+        .expect("quota notice");
+    assert!(
+        notice.content.contains("future-model")
+            && notice.content.contains("UTC")
+            && notice.content.contains("retry"),
+        "{}",
+        notice.content
+    );
+    assert!(!notice.content.contains('\n'));
+}
+
+#[test]
 fn test_remote_error_with_retryable_pending_schedules_retry() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "retry me".to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: 0,
-        retry_at: None,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message("retry me", true, true, 0));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -182,16 +202,12 @@ fn test_remote_non_retryable_error_gets_short_auto_poke_retry() {
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
         .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "You have 1 incomplete todo. Continue working, or update the todo tool."
-            .to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: 0,
-        retry_at: None,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message(
+        "You have 1 incomplete todo. Continue working, or update the todo tool.",
+        true,
+        true,
+        0,
+    ));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -249,16 +265,12 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
         .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "You have 1 incomplete todo. Continue working, or update the todo tool."
-            .to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: 2,
-        retry_at: None,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message(
+        "You have 1 incomplete todo. Continue working, or update the todo tool.",
+        true,
+        true,
+        2,
+    ));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -295,15 +307,7 @@ fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
         .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "continue".to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: 0,
-        retry_at: None,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message("continue", true, true, 0));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -349,16 +353,12 @@ fn test_remote_connectivity_error_waits_for_network_with_bounded_retry_budget() 
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
         .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "You have 1 incomplete todo. Continue working, or update the todo tool."
-            .to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: 0,
-        retry_at: None,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message(
+        "You have 1 incomplete todo. Continue working, or update the todo tool.",
+        true,
+        true,
+        0,
+    ));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -412,15 +412,12 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
         .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "Continue working on the task.".to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message(
+        "Continue working on the task.",
+        true,
+        false,
+        0,
+    ));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -461,15 +458,12 @@ include!("remote_failover_routes.rs");
 #[test]
 fn test_schedule_pending_remote_retry_respects_retry_limit() {
     let mut app = create_test_app();
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "retry me".to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
-        retry_at: None,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message(
+        "retry me",
+        true,
+        true,
+        App::AUTO_RETRY_MAX_ATTEMPTS,
+    ));
 
     assert!(!app.schedule_pending_remote_retry("⚠ failed."));
     assert!(app.rate_limit_pending_message.is_none());
@@ -499,15 +493,8 @@ fn test_provider_guardrail_event_offers_opus_reroute_with_resend_payload() {
         claude_oauth_route("claude-sonnet-4"),
         claude_oauth_route("claude-opus-4-8"),
     ];
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "please help".to_string(),
-        images: vec![],
-        is_system: false,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
-    });
+    app.rate_limit_pending_message =
+        Some(test_pending_remote_message("please help", false, false, 0));
     app.last_submitted_input = Some("please help".to_string());
 
     app.handle_server_event(
@@ -543,6 +530,35 @@ fn test_provider_guardrail_event_offers_opus_reroute_with_resend_payload() {
     );
 }
 
+#[test]
+fn provider_guardrail_retry_updates_one_system_line_without_ending_the_turn() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.is_processing = true;
+    for attempt in 1..=3 {
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ProviderGuardrailRetry {
+                turn_id: "turn-1".into(),
+                attempt,
+                max_attempts: 3,
+            },
+            &mut remote,
+        );
+    }
+    let rows: Vec<_> = app
+        .display_messages()
+        .iter()
+        .filter(|message| message.content.contains("Jcode retried the request"))
+        .collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].role, "system");
+    assert!(rows[0].content.contains("attempt 3 of 3"));
+    assert!(app.is_processing && !app.turn_guardrail_stopped);
+    assert!(app.pending_fallback_offer.is_none());
+}
+
 /// The reroute offer must prefer native Anthropic auth over aggregator routes
 /// that also expose claude-opus-4-8.
 #[test]
@@ -558,6 +574,8 @@ fn test_guardrail_reroute_prefers_native_anthropic_route() {
     app.remote_model_options = vec![
         openai_oauth_route("gpt-5.5"),
         crate::provider::ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "claude-opus-4-8".to_string(),
             provider: "OpenRouter".to_string(),
             api_method: "openrouter".to_string(),
@@ -565,6 +583,8 @@ fn test_guardrail_reroute_prefers_native_anthropic_route() {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         },
         claude_oauth_route("claude-opus-4-8"),
     ];
@@ -667,7 +687,10 @@ fn test_remote_tui_state_prefers_cached_model_during_brief_connecting_phase() {
         None,
         Some("remote cached model".to_string()),
     );
-    session.model = Some("gpt-5.4".to_string());
+    session.apply_route(crate::session::Route {
+        model: Some("gpt-5.4".to_string()),
+        ..session.route()
+    });
     session.save().expect("save remote session");
 
     let app = App::new_for_remote(Some(session_id.to_string()));
@@ -699,7 +722,10 @@ fn test_remote_tui_state_falls_back_to_cached_model_after_startup_phase_clears()
         None,
         Some("remote cached model".to_string()),
     );
-    session.model = Some("gpt-5.4".to_string());
+    session.apply_route(crate::session::Route {
+        model: Some("gpt-5.4".to_string()),
+        ..session.route()
+    });
     session.save().expect("save remote session");
 
     let mut app = App::new_for_remote(Some(session_id.to_string()));
@@ -728,14 +754,21 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
         None,
         Some("remote cached model".to_string()),
     );
-    session.model = Some("gpt-5.4".to_string());
+    session.apply_route(crate::session::Route {
+        model: Some("gpt-5.4".to_string()),
+        ..session.route()
+    });
     session.append_stored_message(crate::session::StoredMessage {
+        codemode: None,
+        ask: None,
+        attachment_data: None,
         id: "msg-startup-stub".to_string(),
         role: crate::message::Role::User,
         content: vec![crate::message::ContentBlock::Text {
             text: "hello from persisted history".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -754,7 +787,7 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
     // then calls `strip_transcript_for_remote_client()` to release the backing
     // transcript (the server is the source of truth for the live transcript).
     // So the stripped `session.messages` is expected to be empty here.
-    assert_eq!(app.session.messages.len(), 0);
+    assert_eq!(app.session.message_count(), 0);
     assert_eq!(app.remote_session_id.as_deref(), Some(session_id));
     assert_eq!(crate::tui::TuiState::provider_model(&app), "gpt-5.4");
 
@@ -936,7 +969,10 @@ fn test_remote_header_keeps_known_model_during_brief_loading_session_phase() {
     // hint), so a short LoadingSession phase must not flash "loading session…"
     // over it. That pre-settle churn is exactly what made spawns look unstable.
     let mut app = App::new_for_remote(None);
-    app.session.model = Some("claude-fable-5".to_string());
+    app.session.apply_route(crate::session::Route {
+        model: Some("claude-fable-5".to_string()),
+        ..app.session.route()
+    });
     app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
 
     assert_eq!(crate::tui::TuiState::provider_model(&app), "claude-fable-5");
@@ -957,7 +993,10 @@ fn test_remote_effort_identity_falls_back_to_session_model_before_history() {
     // None, but the session stub already knows the model. Effort cycling must
     // work off that hint instead of reporting "not available".
     let mut app = App::new_for_remote(None);
-    app.session.model = Some("claude-fable-5".to_string());
+    app.session.apply_route(crate::session::Route {
+        model: Some("claude-fable-5".to_string()),
+        ..app.session.route()
+    });
     assert!(app.remote_provider_name.is_none());
     assert!(app.remote_provider_model.is_none());
 
@@ -1046,8 +1085,8 @@ fn test_tui_grok_build_login_starts_managed_oauth_flow() {
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered.contains("xAI sign-in URL and device code"));
-    assert!(rendered.contains("You do not need to install the Grok CLI"));
+    assert!(rendered.contains("Grok Build login: requesting xAI device code"));
+    assert!(rendered.contains("Type /cancel to abort."));
     assert!(!rendered.contains("run `jcode login"));
 }
 
@@ -1235,7 +1274,10 @@ fn test_info_widget_remote_openai_billing_follows_resolved_credential() {
     );
 
     app.remote_resolved_credential = None;
-    app.session.route_api_method = None;
+    app.session.apply_route(crate::session::Route {
+        route_api_method: None,
+        ..app.session.route()
+    });
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
         data.auth_method,
@@ -1252,7 +1294,10 @@ fn test_info_widget_remote_openai_uses_explicit_route_when_credential_is_missing
     app.remote_provider_model = Some("gpt-5.4".to_string());
     app.remote_resolved_credential = None;
 
-    app.session.route_api_method = Some("openai-api-key".to_string());
+    app.session.apply_route(crate::session::Route {
+        route_api_method: Some("openai-api-key".to_string()),
+        ..app.session.route()
+    });
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
         data.auth_method,
@@ -1263,7 +1308,10 @@ fn test_info_widget_remote_openai_uses_explicit_route_when_credential_is_missing
         Some(crate::tui::info_widget::UsageProvider::CostBased)
     );
 
-    app.session.route_api_method = Some("openai-oauth".to_string());
+    app.session.apply_route(crate::session::Route {
+        route_api_method: Some("openai-oauth".to_string()),
+        ..app.session.route()
+    });
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
         data.auth_method,
@@ -1277,6 +1325,11 @@ fn test_info_widget_remote_openai_uses_explicit_route_when_credential_is_missing
 
 #[test]
 fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
+    if runs_in_isolated_process(
+        "tui::app::tests::test_info_widget_local_direct_api_runtime_shows_cost_based_usage",
+    ) {
+        return;
+    }
     let _guard = crate::storage::lock_test_env();
     // Restore on unwind, not only on the success path: a mid-test assertion
     // panic used to leave these vars cleared, poisoning concurrently running
@@ -1586,17 +1639,16 @@ fn test_resumed_session_seeds_cost_from_history_token_totals() {
 
 #[test]
 fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
-    // `/fast on` (priority tier) bills premium per-token rates on Opus 4.6
-    // ($30/$150 vs $5/$25). The pricing memo key includes the tier so toggling
-    // fast mode mid-session re-resolves prices instead of reusing stale ones.
+    // OpenAI priority changes per-token rates. Anthropic's auto/priority
+    // capacity selector does not represent Fast inference.
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     let mut app = create_test_app();
     app.is_remote = true;
-    app.remote_provider_name = Some("Claude".to_string());
-    app.remote_provider_model = Some("claude-opus-4-6".to_string());
+    app.remote_provider_name = Some("OpenAI".to_string());
+    app.remote_provider_model = Some("gpt-6-astra".to_string());
     app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
 
     // Each TokenUsage below simulates a separate completed API call, so reset
@@ -1610,7 +1662,8 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
         app.streaming.streaming_cache_creation_tokens = None;
     };
 
-    // Standard tier first: 1k in / 1k out = $0.005 + $0.025 = $0.030.
+    // Standard tier: 1k in / 1k out = $0.010 + $0.050 = $0.060.
+    let standard_call_cost = 0.060;
     app.remote_service_tier = None;
     reset_call_state(&mut app);
     app.handle_server_event(
@@ -1625,12 +1678,12 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
     );
     let standard_cost = app.cost.total_cost;
     assert!(
-        (standard_cost - 0.030).abs() < 1e-4,
-        "standard-tier cost should be ~$0.030, got ${standard_cost:.4}"
+        (standard_cost - standard_call_cost).abs() < 1e-4,
+        "standard-tier cost should be ${standard_call_cost:.4}, got ${standard_cost:.4}"
     );
 
-    // Fast mode on: same usage now bills $0.030 + $0.150 = $0.180.
-    app.remote_service_tier = Some("auto".to_string());
+    // Fast mode on: 1k in / 1k out = $0.020 + $0.100 = $0.120.
+    app.remote_service_tier = Some("priority".to_string());
     reset_call_state(&mut app);
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
@@ -1644,8 +1697,8 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
     );
     let fast_call_cost = app.cost.total_cost - standard_cost;
     assert!(
-        (fast_call_cost - 0.180).abs() < 1e-4,
-        "fast-mode call cost should be ~$0.180, got ${fast_call_cost:.4}"
+        (fast_call_cost - 0.120).abs() < 1e-4,
+        "fast-mode call cost should be ~$0.120, got ${fast_call_cost:.4}"
     );
 
     // Fast mode off again: pricing drops back to standard rates.
@@ -1664,8 +1717,8 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
     );
     let off_call_cost = app.cost.total_cost - before;
     assert!(
-        (off_call_cost - 0.030).abs() < 1e-4,
-        "post-toggle standard cost should be ~$0.030, got ${off_call_cost:.4}"
+        (off_call_cost - standard_call_cost).abs() < 1e-4,
+        "post-toggle standard cost should be ${standard_call_cost:.4}, got ${off_call_cost:.4}"
     );
 }
 
@@ -1713,7 +1766,7 @@ fn test_debug_command_message_respects_queue_mode() {
     let mut app = create_test_app();
 
     // Test 1: When not processing, should submit directly
-    let initial_session_messages = app.session.messages.len();
+    let initial_session_messages = app.session.message_count();
     app.is_processing = false;
     let result = app.handle_debug_command("message:hello");
     assert!(
@@ -1726,11 +1779,10 @@ fn test_debug_command_message_respects_queue_mode() {
     assert!(app.pending_turn);
     assert_eq!(app.messages.len(), 0);
     assert_eq!(app.display_messages.len(), 1);
-    assert_eq!(app.session.messages.len(), initial_session_messages + 1);
+    assert_eq!(app.session.message_count(), initial_session_messages + 1);
     let submitted_message = app
         .session
-        .messages
-        .last()
+        .last_message()
         .expect("submitted debug message should be stored");
     assert_eq!(submitted_message.role, crate::message::Role::User);
     assert_eq!(submitted_message.display_role, None);
@@ -1740,7 +1792,7 @@ fn test_debug_command_message_respects_queue_mode() {
     app.pending_turn = false;
     app.messages.clear();
     app.display_messages.clear();
-    app.session.messages.clear();
+    app.session.messages_mut_for_tests().clear();
 
     // Test 2: When processing with queue_mode=true, should queue
     app.is_processing = true;
@@ -2175,10 +2227,11 @@ fn test_remote_fork_with_prompt_stages_split_prompt() {
 }
 
 #[test]
-fn test_remote_btw_stages_question_in_forked_session() {
+fn test_remote_btw_opens_a_side_card_instead_of_forking_a_chat() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.is_remote = true;
+        app.remote_session_id = Some(app.session.id().to_owned());
         app.input = "/btw what are we doing?".to_string();
         app.cursor_pos = app.input.len();
 
@@ -2188,23 +2241,21 @@ fn test_remote_btw_stages_question_in_forked_session() {
         remote.mark_history_loaded();
 
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
-            .expect("/btw should launch split request");
+            .expect("/btw should open a side card");
 
-        assert!(app.pending_split_prompt.is_some());
-
-        app.handle_server_event(
-            crate::protocol::ServerEvent::SplitResponse {
-                id: 1,
-                new_session_id: "session_btw_child".to_string(),
-                new_session_name: "btw_child".to_string(),
-            },
-            &mut remote,
+        let card = app
+            .btw_card()
+            .expect("a daemon session still gets a side card");
+        assert_eq!(card.question, "what are we doing?");
+        assert!(
+            card.child.is_some(),
+            "the question runs in a hidden fork, not a new chat"
         );
-
-        let restored = App::restore_input_for_reload("session_btw_child")
-            .expect("btw fork should stage the question");
-        assert_eq!(restored.input, "what are we doing?");
-        assert!(restored.submit_on_restore);
+        assert!(
+            app.pending_split_prompt.is_none(),
+            "no fork window is staged"
+        );
+        assert!(app.pending_btw_turn, "the remote loop starts the request");
     });
 }
 
@@ -2245,15 +2296,7 @@ fn test_credential_failure_breaker_trips_after_consecutive_auth_errors() {
     app.auto_poke_incomplete_todos = true;
 
     for attempt in 0..App::CREDENTIAL_FAILURE_BREAKER_THRESHOLD {
-        app.rate_limit_pending_message = Some(PendingRemoteMessage {
-            content: "poke".to_string(),
-            images: vec![],
-            is_system: true,
-            system_reminder: None,
-            auto_retry: true,
-            retry_attempts: 0,
-            retry_at: None,
-        });
+        app.rate_limit_pending_message = Some(test_pending_remote_message("poke", true, true, 0));
         app.is_processing = true;
         app.status = ProcessingStatus::Streaming;
         app.handle_server_event(
@@ -2309,7 +2352,7 @@ fn test_rejected_refresh_token_stops_all_automatic_resends_immediately() {
                 // a terminal credential failure.
                 app.auto_poke_default_on = true;
                 crate::todo::save_todos(
-                    &app.session.id,
+                    app.session.id(),
                     &[crate::todo::TodoItem {
                         id: "todo-1".to_string(),
                         content: "Finish work".to_string(),
@@ -2323,6 +2366,7 @@ fn test_rejected_refresh_token_stops_all_automatic_resends_immediately() {
                 app.queued_messages
                     .push("Keep my queued prompt".to_string());
                 app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                    jarvis_voice: false,
                     content: "keep going".to_string(),
                     images: vec![],
                     is_system: false,
@@ -2396,7 +2440,7 @@ fn test_local_rejected_refresh_token_stops_pokes_and_preserves_input() {
         app.auto_poke_default_on = true;
         app.last_submitted_input = Some("keep going".to_string());
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Finish work".to_string(),
@@ -2618,5 +2662,165 @@ fn test_remote_model_changed_updates_reasoning_effort() {
         app.remote_reasoning_effort.as_deref(),
         Some("low"),
         "a failed switch keeps the running model's effort"
+    );
+}
+
+#[test]
+fn resumed_history_restores_last_provider_reported_context_usage() {
+    // A restarted TUI is a remote client: it keeps only rendered messages, not
+    // the stored transcript that carries token usage. Without the restored
+    // figure the context footer fell back to "context not reported" until the
+    // next turn finished.
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::History {
+            id: 1,
+            session_id: "ses_restore_context_tokens".to_string(),
+            messages: vec![
+                crate::protocol::HistoryMessage {
+                    codemode: None,
+                    ask: None,
+                    tool_duration_ms: None,
+                    timestamp_ms: Some(1),
+                    attachments: Vec::new(),
+                    response_stats: None,
+                    role: "user".to_string(),
+                    content: "first prompt".to_string(),
+                    tool_calls: None,
+                    tool_data: None,
+                },
+                crate::protocol::HistoryMessage {
+                    codemode: None,
+                    ask: None,
+                    tool_duration_ms: None,
+                    timestamp_ms: Some(2),
+                    attachments: Vec::new(),
+                    response_stats: Some(jcode_session_types::ResponseStats {
+                        duration_secs: None,
+                        prompt_tokens: Some(231_000),
+                        input_tokens: Some(1_000),
+                        output_tokens: Some(500),
+                        cache_read_tokens: Some(230_000),
+                        cache_creation_tokens: None,
+                        tool_calls: None,
+                    }),
+                    role: "assistant".to_string(),
+                    content: "answer".to_string(),
+                    tool_calls: None,
+                    tool_data: None,
+                },
+            ],
+            messages_base_count: None,
+            images_unchanged: false,
+            images: vec![],
+            provider_name: Some("claude".to_string()),
+            provider_model: Some("claude-sonnet-4-20250514".to_string()),
+            subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
+            agent_model_overrides: Default::default(),
+            autoreview_enabled: None,
+            autojudge_enabled: None,
+            available_models: vec![],
+            available_model_routes: vec![],
+            mcp_servers: vec![],
+            skills: vec![],
+            total_tokens: None,
+            token_usage_totals: None,
+            all_sessions: vec![],
+            client_count: Some(1),
+            is_canary: Some(false),
+            server_version: None,
+            server_name: None,
+            server_icon: None,
+            server_has_update: None,
+            was_interrupted: None,
+            reload_recovery: None,
+            connection_type: Some("websocket".to_string()),
+            status_detail: None,
+            upstream_provider: None,
+            provider_oauth_email: None,
+            provider_oauth_account_label: None,
+            resolved_credential: None,
+            reasoning_effort: None,
+            service_tier: None,
+            available_service_tiers: None,
+            speed_mode: Default::default(),
+            speed_options: Vec::new(),
+            compaction_mode: crate::config::CompactionMode::Reactive,
+            activity: None,
+            side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
+        },
+        &mut remote,
+    );
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(data.observed_context_tokens, None);
+    assert_eq!(
+        data.last_reported_context_tokens,
+        Some(231_000),
+        "restart must restore the provider-reported context size from history"
+    );
+}
+
+#[path = "remote_events_reload_04_additional_tests.rs"]
+mod additional_test_remote_fast_status_tracks_history_tier_including_explicit_off;
+
+#[test]
+fn test_server_waiting_for_network_connection_phase_sets_status_and_exempts_stall_guard() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    let waiting_phase =
+        crate::network_retry::waiting_for_network_connection_phase("listening via ip monitor");
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ConnectionPhase {
+            phase: waiting_phase,
+        },
+        &mut remote,
+    );
+
+    assert!(
+        app.is_processing,
+        "ConnectionPhase from a server-initiated turn should adopt processing state"
+    );
+    assert!(
+        matches!(
+            &app.status,
+            ProcessingStatus::WaitingForNetwork { listener } if listener == "listening via ip monitor"
+        ),
+        "expected ProcessingStatus::WaitingForNetwork, got {:?}",
+        app.status
+    );
+
+    // Simulate a long offline period exceeding the stream stall timeout.
+    app.last_stream_activity = Some(
+        Instant::now()
+            .checked_sub(Duration::from_secs(3600))
+            .unwrap_or_else(Instant::now),
+    );
+    rt.block_on(crate::tui::app::remote::detect_and_cancel_stall(
+        &mut app,
+        &mut remote,
+    ));
+
+    assert!(
+        app.is_processing,
+        "stall guard must NOT cancel a turn while WaitingForNetwork"
+    );
+    assert!(
+        matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }),
+        "status must remain WaitingForNetwork after stall guard tick, got {:?}",
+        app.status
     );
 }

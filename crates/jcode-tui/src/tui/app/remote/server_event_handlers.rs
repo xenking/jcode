@@ -1,5 +1,11 @@
 use super::*;
 
+/// Typed data a finished tool result carries next to its text.
+pub(super) struct ToolReceipts {
+    pub(super) codemode: Option<Box<jcode_session_types::CodemodeSummary>>,
+    pub(super) ask: Option<Box<jcode_session_types::AskRecord>>,
+}
+
 pub(super) fn handle_tool_done(
     app: &mut App,
     remote: &mut impl RemoteEventState,
@@ -7,11 +13,13 @@ pub(super) fn handle_tool_done(
     name: String,
     output: String,
     error: Option<String>,
+    receipts: ToolReceipts,
 ) -> bool {
-    // Read the raw output before client-side diff rendering replaces it.
-    let observed_duration = remote.take_tool_duration(&id);
-    let duration_secs = DisplayMessage::tool_duration_from_output(&output).or(observed_duration);
-    let display_output = remote.handle_tool_done(&id, &name, &output);
+    // Prefer protocol timing from the raw output, not the rendered diff.
+    let completion = remote.tool_events().complete_tool(&id, &name, &output);
+    let duration_secs =
+        DisplayMessage::tool_duration_from_output(&output).or(completion.observed_duration);
+    let display_output = completion.display_output;
     let display_output = if error.is_some()
         && !display_output.starts_with("Error:")
         && !display_output.starts_with("error:")
@@ -38,6 +46,19 @@ pub(super) fn handle_tool_done(
     let is_batch = tool_call.name == "batch";
     app.observe_tool_result(&tool_call, &output, error.is_some(), None);
     app.note_tool_completed(&tool_call, error.is_some());
+    app.note_tool_completed_for_subscribe_nudge(
+        &tool_call,
+        duration_secs,
+        &output,
+        error.is_some(),
+    );
+    // A daemon from before ask records sends only the result text.
+    let ask = receipts.ask.or_else(|| {
+        jcode_session_types::is_ask_tool(&name)
+            .then(|| jcode_session_types::AskRecord::from_legacy(&output))
+            .flatten()
+            .map(Box::new)
+    });
     app.push_display_message(DisplayMessage {
         role: "tool".to_string(),
         content: display_output,
@@ -45,6 +66,8 @@ pub(super) fn handle_tool_done(
         duration_secs,
         title: None,
         tool_data: Some(tool_call.clone()),
+        codemode: receipts.codemode,
+        ask,
     });
     app.note_todo_gate_result(&tool_call, &output, error.is_some());
     if is_batch {
@@ -55,6 +78,7 @@ pub(super) fn handle_tool_done(
     // input/intent are still waiting for their own ToolDone; clearing the
     // whole list here made their rows render with no intent or summary.
     app.streaming_tool_calls.retain(|tc| tc.id != id);
+    app.stream_message_ended = false;
     app.status = ProcessingStatus::Streaming;
     true
 }
@@ -95,7 +119,35 @@ pub(super) fn handle_generated_image(
         duration_secs: None,
         title: Some("Generated image".to_string()),
         tool_data: Some(tool_call),
+        codemode: None,
+        ask: None,
     });
     app.status = ProcessingStatus::Streaming;
     true
+}
+
+pub(super) fn handle_compact_result(app: &mut App, message: String, success: bool) -> bool {
+    if !success {
+        app.display_messages
+            .retain(|row| !row.compaction_is_running());
+    }
+    app.push_display_message(DisplayMessage::system(message));
+    if success {
+        app.set_status_notice("Context compaction queued");
+    } else {
+        app.set_status_notice("Compaction failed");
+    }
+    false
+}
+
+pub(super) fn handle_resume_all_result(app: &mut App, resumed: usize, message: String) -> bool {
+    app.push_display_message(DisplayMessage::system(message));
+    if resumed == 0 {
+        app.set_status_notice("No sessions to resume");
+    } else if resumed == 1 {
+        app.set_status_notice("Resuming 1 session");
+    } else {
+        app.set_status_notice(format!("Resuming {} sessions", resumed));
+    }
+    false
 }

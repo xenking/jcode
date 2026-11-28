@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class BashTestPlatformGuards(unittest.TestCase):
     def test_launch_gate_uses_the_test_modules_platform_guard(self):
-        source = (ROOT / "crates/jcode-app-core/src/tool/bash.rs").read_text()
+        source = (ROOT / "crates/jcode-app-core/src/tool/bash/bash.rs").read_text()
         module = re.search(
             r"#\[cfg\(([^\n]+)\)\]\s*"
             r'#\[path = "bash_tests.rs"\]\s*mod tests;', source

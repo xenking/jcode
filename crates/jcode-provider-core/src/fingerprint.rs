@@ -1,9 +1,14 @@
+use ring::digest::{Context, SHA256, digest};
 use serde::Serialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
+
+#[path = "fingerprint_incremental.rs"]
+mod incremental;
+pub use incremental::ResponsesFingerprintCache;
 
 #[derive(Debug, Clone)]
 struct ProviderInputSnapshot {
@@ -13,6 +18,149 @@ struct ProviderInputSnapshot {
     system_hash: Option<u64>,
     tools_hash: Option<u64>,
     captured_at: Instant,
+}
+
+/// Hash-only effective input of one completed request. Never compare a
+/// Responses websocket delta with a full input: the acknowledged prefix is
+/// part of the delta's effective input even though it isn't sent again.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalInput {
+    pub provider: String,
+    pub format: String,
+    pub model: String,
+    pub item_hashes: Vec<u64>,
+    /// Verified request-only suffix of Responses input. `None` also covers old
+    /// checkpoints that stored only the trimmed prefix. `Some([])` is complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responses_request_only_suffix: Option<Vec<u64>>,
+    pub system_hash: Option<u64>,
+    pub tools_hash: Option<u64>,
+    pub request_options_hash: Option<u64>,
+}
+
+tokio::task_local! {
+    static REQUEST_INPUT: RefCell<Option<CanonicalInput>>;
+}
+
+/// Scope capture to the request-building future rather than a session or
+/// thread. Background requests and competing sessions cannot overwrite it.
+pub async fn capture_canonical_input<F: Future>(future: F) -> (F::Output, Option<CanonicalInput>) {
+    REQUEST_INPUT
+        .scope(RefCell::new(None), async {
+            let result = future.await;
+            (result, REQUEST_INPUT.with(RefCell::take))
+        })
+        .await
+}
+
+/// Attach the independently hashed options to the effective captured input.
+pub fn note_canonical_request_options(hash: u64) {
+    let _ = REQUEST_INPUT.try_with(|slot| {
+        if let Some(input) = slot.borrow_mut().as_mut() {
+            input.request_options_hash = Some(hash);
+        }
+    });
+}
+
+pub fn note_responses_stable_item_count(count: usize) {
+    let _ = REQUEST_INPUT.try_with(|slot| {
+        if let Some(input) = slot.borrow_mut().as_mut()
+            && count <= input.item_hashes.len()
+        {
+            input.responses_request_only_suffix = Some(input.item_hashes.split_off(count));
+        }
+    });
+}
+
+/// The unmodified raw request still goes to the wire fingerprint log. For the
+/// cache-miss monitor ignore only the known one-shot suffix, including when it
+/// was merged into a durable user message, and unmarked deferred definitions.
+pub fn note_anthropic_cache_boundary(
+    items: &[Value],
+    boundary: (usize, usize),
+    tools: Option<&Value>,
+) {
+    let (item_count, last_block_count) = boundary;
+    let _ = REQUEST_INPUT.try_with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(input) = slot.as_mut() else { return };
+        input.item_hashes.truncate(item_count);
+        if let Some((item, hash)) = items
+            .get(..item_count)
+            .and_then(|items| items.last())
+            .zip(input.item_hashes.last_mut())
+            && let Some(blocks) = item["content"].as_array()
+            && blocks.len() > last_block_count
+        {
+            let mut item = item.clone();
+            if let Some(blocks) = item["content"].as_array_mut() {
+                blocks.truncate(last_block_count);
+            }
+            *hash = anthropic_message_hash(item);
+        }
+        if let Some(tools) = tools.and_then(Value::as_array)
+            && tools.iter().any(|tool| tool["defer_loading"] == true)
+        {
+            let eager: Vec<_> = tools
+                .iter()
+                .filter(|tool| tool["defer_loading"] != true)
+                .collect();
+            input.tools_hash = (!eager.is_empty()).then(|| stable_hash_json(&eager));
+        }
+    });
+}
+
+fn anthropic_message_hash(mut item: Value) -> u64 {
+    if let Some(blocks) = item["content"].as_array_mut() {
+        for block in blocks {
+            if let Some(object) = block.as_object_mut() {
+                object.remove("cache_control");
+            }
+        }
+    }
+    stable_hash_json(&item)
+}
+
+fn capture_request_input(
+    provider: &str,
+    model: &str,
+    format: &str,
+    fingerprints: &CanonicalFingerprints,
+    items: &[Value],
+) {
+    let (provider, format) = match (provider, format) {
+        ("openai", "openai_responses_full") => ("openai", "openai_responses_full"),
+        ("anthropic", "anthropic_messages_split") => ("anthropic", "anthropic_messages_split"),
+        ("anthropic", "anthropic_messages") => ("anthropic", "anthropic_messages"),
+        _ => return,
+    };
+    let _ = REQUEST_INPUT.try_with(|slot| {
+        let mut item_hashes = fingerprints.items.0.clone();
+        if provider == "anthropic" {
+            // Anthropic intentionally moves message breakpoints to the most
+            // recent turns. Compare content, excluding only that placement.
+            // The log retains the original hashes with markers included.
+            for (item, hash) in items.iter().zip(&mut item_hashes) {
+                if item["content"].as_array().is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|block| block.get("cache_control").is_some())
+                }) {
+                    *hash = anthropic_message_hash(item.clone());
+                }
+            }
+        }
+        slot.replace(Some(CanonicalInput {
+            provider: provider.to_owned(),
+            format: format.to_owned(),
+            model: model.to_string(),
+            item_hashes,
+            responses_request_only_suffix: None,
+            system_hash: fingerprints.system.map(|(hash, _)| hash),
+            tools_hash: fingerprints.tools.map(|(hash, _)| hash),
+            request_options_hash: None,
+        }));
+    });
 }
 
 static PROVIDER_INPUT_BASELINES: LazyLock<Mutex<HashMap<String, ProviderInputSnapshot>>> =
@@ -38,7 +186,9 @@ pub fn stable_hash_str(value: &str) -> u64 {
 }
 
 fn stable_hash_bytes(value: &[u8]) -> u64 {
-    hash_prefix(&Sha256::digest(value))
+    #[cfg(test)]
+    hash_work::record(value.len());
+    hash_prefix(digest(&SHA256, value).as_ref())
 }
 
 fn hash_prefix(digest: &[u8]) -> u64 {
@@ -65,7 +215,7 @@ fn stable_json_fingerprint<T: Serialize + ?Sized>(value: &T) -> (u64, usize) {
 fn item_fingerprints(items: &[Value]) -> (Vec<u64>, u64) {
     let mut hashes = Vec::with_capacity(items.len());
     let mut encoded = Vec::new();
-    let mut aggregate = Sha256::new();
+    let mut aggregate = Context::new(&SHA256);
     let mut valid = true;
     aggregate.update(b"[");
     for (index, item) in items.iter().enumerate() {
@@ -84,11 +234,117 @@ fn item_fingerprints(items: &[Value]) -> (Vec<u64>, u64) {
     }
     aggregate.update(b"]");
     let input_hash = if valid {
-        hash_prefix(&aggregate.finalize())
+        hash_prefix(aggregate.finish().as_ref())
     } else {
         stable_hash_str("")
     };
     (hashes, input_hash)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CanonicalFingerprints {
+    request: (u64, usize),
+    items: (Vec<u64>, u64),
+    system: Option<(u64, usize)>,
+    tools: Option<(u64, usize)>,
+}
+
+/// Provider payloads normally contain the supplied components as top-level
+/// fields. Encode those fields directly into the request buffer and fingerprint
+/// their byte ranges, instead of walking and escaping the same content again.
+/// Equality, rather than field names or pointer identity, also handles cloned
+/// components and providers with different request schemas. Nothing survives
+/// this call except hashes and lengths.
+fn canonical_fingerprints(
+    payload: &Value,
+    items: &[Value],
+    system: Option<&Value>,
+    tools: Option<&Value>,
+) -> CanonicalFingerprints {
+    payload
+        .as_object()
+        .and_then(|object| {
+            object_fingerprints(
+                object.iter().map(|(key, value)| (key.as_str(), value)),
+                items,
+                system,
+                tools,
+            )
+        })
+        .unwrap_or_else(|| CanonicalFingerprints {
+            request: stable_json_fingerprint(payload),
+            items: item_fingerprints(items),
+            system: system.map(stable_json_fingerprint),
+            tools: tools.map(stable_json_fingerprint),
+        })
+}
+
+fn object_fingerprints<'a>(
+    fields: impl IntoIterator<Item = (&'a str, &'a Value)>,
+    items: &[Value],
+    system: Option<&Value>,
+    tools: Option<&Value>,
+) -> Option<CanonicalFingerprints> {
+    let mut encoded = Vec::new();
+    let mut item_result = None;
+    let mut system_result = None;
+    let mut tools_result = None;
+    encoded.push(b'{');
+    for (index, (key, value)) in fields.into_iter().enumerate() {
+        if index > 0 {
+            encoded.push(b',');
+        }
+        if let Err(error) = serde_json::to_writer(&mut encoded, key) {
+            jcode_logging::debug(&format!("Cannot fingerprint request key: {error}"));
+            return None;
+        }
+        encoded.push(b':');
+        let start = encoded.len();
+        if item_result.is_none()
+            && value
+                .as_array()
+                .is_some_and(|array| std::ptr::eq(array.as_slice(), items) || array == items)
+        {
+            let mut hashes = Vec::with_capacity(items.len());
+            encoded.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    encoded.push(b',');
+                }
+                let item_start = encoded.len();
+                if let Err(error) = serde_json::to_writer(&mut encoded, item) {
+                    jcode_logging::debug(&format!("Cannot fingerprint request item: {error}"));
+                    return None;
+                }
+                hashes.push(stable_hash_bytes(&encoded[item_start..]));
+            }
+            encoded.push(b']');
+            item_result = Some((hashes, stable_hash_bytes(&encoded[start..])));
+        } else if let Err(error) = serde_json::to_writer(&mut encoded, value) {
+            jcode_logging::debug(&format!("Cannot fingerprint request field: {error}"));
+            return None;
+        }
+        let matches_system = system_result.is_none()
+            && system.is_some_and(|system| std::ptr::eq(system, value) || system == value);
+        let matches_tools = tools_result.is_none()
+            && tools.is_some_and(|tools| std::ptr::eq(tools, value) || tools == value);
+        if matches_system || matches_tools {
+            let fingerprint = (stable_hash_bytes(&encoded[start..]), encoded.len() - start);
+            if matches_system {
+                system_result = Some(fingerprint);
+            }
+            if matches_tools {
+                tools_result = Some(fingerprint);
+            }
+        }
+    }
+    encoded.push(b'}');
+    Some(CanonicalFingerprints {
+        request: (stable_hash_bytes(&encoded), encoded.len()),
+        items: item_result.unwrap_or_else(|| item_fingerprints(items)),
+        system: system_result.or_else(|| system.map(stable_json_fingerprint)),
+        tools: tools_result.or_else(|| tools.map(stable_json_fingerprint)),
+    })
 }
 
 fn prefix_matches(current: &[u64], previous: &[u64]) -> bool {
@@ -124,11 +380,40 @@ pub fn log_provider_canonical_input(
     tool_count: Option<usize>,
     extra_fields: &[(&str, String)],
 ) {
-    let (request_hash, request_json_chars) = stable_json_fingerprint(payload);
-    let (item_hashes, input_hash) = item_fingerprints(items);
-    let item_hashes_hash = stable_hash_json(&item_hashes);
-    let (system_hash, system_json_chars) = system.map(stable_json_fingerprint).unzip();
-    let (tools_hash, tools_json_chars) = tools.map(stable_json_fingerprint).unzip();
+    if !jcode_logging::LogLevel::Debug.is_enabled() && REQUEST_INPUT.try_with(|_| ()).is_err() {
+        return;
+    }
+    let fingerprints = canonical_fingerprints(payload, items, system, tools);
+    capture_request_input(provider, model, format, &fingerprints, items);
+    log_canonical_fingerprints(
+        provider,
+        model,
+        format,
+        &fingerprints,
+        items.len(),
+        tool_count,
+        extra_fields,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_canonical_fingerprints(
+    provider: &str,
+    model: &str,
+    format: &str,
+    fingerprints: &CanonicalFingerprints,
+    item_count: usize,
+    tool_count: Option<usize>,
+    extra_fields: &[(&str, String)],
+) {
+    if !jcode_logging::LogLevel::Debug.is_enabled() {
+        return;
+    }
+    let (request_hash, request_json_chars) = fingerprints.request;
+    let (item_hashes, input_hash) = &fingerprints.items;
+    let item_hashes_hash = stable_hash_json(item_hashes);
+    let (system_hash, system_json_chars) = fingerprints.system.unzip();
+    let (tools_hash, tools_json_chars) = fingerprints.tools.unzip();
     let first_item_hash = item_hashes.first().copied();
     let last_item_hash = item_hashes.last().copied();
 
@@ -168,10 +453,10 @@ pub fn log_provider_canonical_input(
         .map(|previous| previous.item_hashes_hash != item_hashes_hash);
     let prefix_matches = previous
         .as_ref()
-        .map(|previous| prefix_matches(&item_hashes, &previous.item_hashes));
+        .map(|previous| prefix_matches(item_hashes, &previous.item_hashes));
     let common_prefix_items = previous
         .as_ref()
-        .map(|previous| common_prefix_len(&item_hashes, &previous.item_hashes));
+        .map(|previous| common_prefix_len(item_hashes, &previous.item_hashes));
     let first_changed_item_index = common_prefix_items
         .zip(previous.as_ref().map(|previous| previous.item_hashes.len()))
         .and_then(|(common, previous_len)| (common < previous_len).then_some(common));
@@ -193,7 +478,7 @@ pub fn log_provider_canonical_input(
         }
     }
 
-    jcode_logging::info(&format!(
+    jcode_logging::debug(&format!(
         "PROVIDER_CANONICAL_INPUT: provider={} model={} format={} request_hash={} request_json_chars={} \
          input_hash={} item_count={} previous_item_count={:?} item_hashes_hash={} first_item_hash={:?} last_item_hash={:?} \
          previous_age_secs={:?} prefix_matches={:?} common_prefix_items={:?} first_changed_item_index={:?} \
@@ -205,7 +490,7 @@ pub fn log_provider_canonical_input(
         request_hash,
         request_json_chars,
         input_hash,
-        items.len(),
+        item_count,
         previous_item_count,
         item_hashes_hash,
         first_item_hash,
@@ -226,6 +511,14 @@ pub fn log_provider_canonical_input(
         extras,
     ));
 }
+
+#[cfg(test)]
+#[path = "fingerprint_borrowed_tests.rs"]
+mod borrowed_tests;
+
+#[cfg(test)]
+#[path = "fingerprint_hash_work.rs"]
+mod hash_work;
 
 #[cfg(test)]
 #[path = "fingerprint_tests.rs"]

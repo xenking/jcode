@@ -14,19 +14,23 @@ fn recent_history_test_app() -> App {
 fn recent_history_bootstrap_renders_latest_frame_without_older_transcript() {
     let _lock = scroll_render_test_lock();
     let mut app = recent_history_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.status = ProcessingStatus::Idle;
     let messages = std::iter::once(app.display_messages[0].clone())
         .chain((0..128).map(|i| {
             DisplayMessage::assistant(format!("RECENT{i:03} {}", "bounded history ".repeat(128)))
         }))
         .map(|message| crate::protocol::HistoryMessage {
+            codemode: None,
+            ask: None,
+            tool_duration_ms: None,
+            attachments: Vec::new(),
             role: message.role,
             content: message.content,
             tool_calls: None,
             tool_data: None,
-            response_stats: None,
+            response_stats: None, timestamp_ms: None,
         })
         .collect();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -144,4 +148,60 @@ fn recent_history_page_rejects_snapshot_missing_already_visible_rows() {
         DisplayMessage::assistant("even newer persisted response"),
     ];
     assert!(app.recent_history_page_contains_visible_tail(&mut newer, 192));
+}
+
+#[test]
+fn expanded_prompt_history_backfills_older_history_while_following_tail() {
+    let _lock = scroll_render_test_lock();
+    let mut app = recent_history_test_app();
+    // Only one prompt is loaded, so Alt+E would list a single row.
+    app.prompt_history_backfill = (None, 0);
+    assert!(!app.maybe_backfill_expanded_prompt_history());
+    crate::tui::ui::viewport::toggle_prompt_history_expanded();
+    let started = app.maybe_backfill_expanded_prompt_history();
+    crate::tui::ui::viewport::toggle_prompt_history_expanded();
+    assert!(started);
+    assert!(!app.auto_scroll_paused);
+    assert_eq!(app.take_pending_compacted_history_load(), Some(192));
+    app.recent_history_paging.request = Some((7, app.display_messages_version, 192));
+    assert!(app.accept_recent_history_response(7));
+    app.apply_compacted_history_window(
+        vec![
+            DisplayMessage::user("older prompt"),
+            DisplayMessage::user("latest prompt"),
+            DisplayMessage::assistant("latest answer"),
+        ],
+        Vec::new(),
+        1000,
+        192,
+        808,
+        98,
+    );
+    assert!(
+        !app.auto_scroll_paused,
+        "backfill must keep following the tail"
+    );
+}
+
+#[test]
+fn archived_history_backfill_also_preserves_tail_following() {
+    let mut app = create_test_app();
+    app.replace_display_messages(vec![DisplayMessage::assistant("current tail")]);
+    assert!(!app.recent_history_window_active());
+    app.auto_scroll_paused = false;
+    app.apply_compacted_history_window(
+        vec![
+            DisplayMessage::user("older archived prompt"),
+            DisplayMessage::assistant("current tail"),
+        ],
+        Vec::new(),
+        128,
+        64,
+        64,
+        0,
+    );
+    assert!(
+        !app.auto_scroll_paused,
+        "archived backfill must not pull the reader away from the tail"
+    );
 }

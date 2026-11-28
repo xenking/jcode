@@ -4,7 +4,7 @@
 //! so they can be resumed within jcode.
 
 use crate::message::{ContentBlock, Role};
-use crate::session::{Session, SessionStatus, StoredMessage};
+use crate::session::{Session, StoredMessage};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 pub use jcode_import_core::repo_ranking;
@@ -375,55 +375,9 @@ fn find_session_file(session_id: &str) -> Result<PathBuf> {
     anyhow::bail!("Session {} not found", session_id);
 }
 
-/// Convert Claude Code content blocks to jcode ContentBlocks
-fn convert_content_blocks(content: &ClaudeCodeContent) -> Vec<ContentBlock> {
-    match content {
-        ClaudeCodeContent::Empty => vec![],
-        ClaudeCodeContent::Text(text) => {
-            if text.is_empty() {
-                vec![]
-            } else {
-                vec![ContentBlock::Text {
-                    text: text.clone(),
-                    cache_control: None,
-                }]
-            }
-        }
-        ClaudeCodeContent::Blocks(blocks) => blocks
-            .iter()
-            .filter_map(|block| match block {
-                ClaudeCodeContentBlock::Text { text } => Some(ContentBlock::Text {
-                    text: text.clone(),
-                    cache_control: None,
-                }),
-                ClaudeCodeContentBlock::Thinking { thinking, .. } => {
-                    Some(ContentBlock::Reasoning {
-                        text: thinking.clone(),
-                    })
-                }
-                ClaudeCodeContentBlock::ToolUse { id, name, input } => {
-                    Some(ContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: input.clone(),
-                        thought_signature: None,
-                    })
-                }
-                ClaudeCodeContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                } => Some(ContentBlock::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    content: content.clone(),
-                    is_error: *is_error,
-                }),
-                ClaudeCodeContentBlock::Unknown => None,
-            })
-            .collect(),
-    }
-}
-
+#[path = "import/content_conversion.rs"]
+mod content_conversion;
+use content_conversion::convert_content_blocks;
 fn truncate_import_text(text: String, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text;
@@ -463,7 +417,8 @@ fn imported_message_text(blocks: &[ContentBlock], truncate_blocks: bool) -> (Str
             | ContentBlock::OpenAIReasoning { .. }
             | ContentBlock::OpenAICompaction { .. }
             | ContentBlock::ToolReference { .. }
-            | ContentBlock::ProviderNative { .. } => {
+            | ContentBlock::ProviderNative { .. }
+            | ContentBlock::Unknown => {
                 changed = true;
                 continue;
             }
@@ -516,11 +471,11 @@ fn imported_message_text(blocks: &[ContentBlock], truncate_blocks: bool) -> (Str
 }
 
 fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool {
-    let original_count = session.messages.len();
+    let original_count = session.message_count();
     let mut changed = false;
     let mut normalized = Vec::with_capacity(original_count);
 
-    for mut message in std::mem::take(&mut session.messages) {
+    for mut message in session.cloned_messages() {
         let (text, message_changed) = imported_message_text(&message.content, apply_limits);
         changed |= message_changed;
         if text.trim().is_empty() {
@@ -530,7 +485,8 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
         message.content = vec![ContentBlock::Text {
             text,
             cache_control: None,
-        }];
+        }]
+        .into();
         normalized.push(message);
     }
 
@@ -563,6 +519,9 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
             kept_reversed.insert(
                 0,
                 StoredMessage {
+                    codemode: None,
+                    ask: None,
+                    attachment_data: None,
                     id: crate::id::new_id("message"),
                     role: Role::User,
                     content: vec![ContentBlock::Text {
@@ -570,7 +529,7 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
                             "[Imported session: {omitted} older messages were omitted for a fast, provider-safe resume. Use session_search to inspect earlier external history.]"
                         ),
                         cache_control: None,
-                    }],
+                    }].into(),
                     display_role: None,
                     timestamp: None,
                     tool_duration_ms: None,
@@ -583,7 +542,7 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
         session.replace_messages(normalized);
     }
 
-    changed || session.messages.len() != original_count
+    changed || session.message_count() != original_count
 }
 
 fn reuse_existing_imported_session(session_id: &str) -> bool {
@@ -714,28 +673,28 @@ pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
 
     if let Ok(path) = find_codex_session_file(resume_id) {
         let session = import_codex_session_from_path(&path, Some(resume_id))?;
-        return Ok(Some(session.id));
+        return Ok(Some(session.id().to_owned()));
     }
 
     if let Ok(path) = find_session_file(resume_id) {
         let session = import_session_from_file(&path, resume_id)?;
-        return Ok(Some(session.id));
+        return Ok(Some(session.id().to_owned()));
     }
 
     if let Ok(path) = find_opencode_session_file(resume_id) {
         let session = import_opencode_session_from_path(&path, Some(resume_id))?;
-        return Ok(Some(session.id));
+        return Ok(Some(session.id().to_owned()));
     }
 
     if let Ok(path) = find_cursor_session_file(resume_id) {
         let session = import_cursor_session_from_path(&path, Some(resume_id))?;
-        return Ok(Some(session.id));
+        return Ok(Some(session.id().to_owned()));
     }
 
     let pi_path = Path::new(resume_id);
     if pi_path.exists() {
         let session = import_pi_session(resume_id)?;
-        return Ok(Some(session.id));
+        return Ok(Some(session.id().to_owned()));
     }
 
     Ok(None)
@@ -842,9 +801,12 @@ fn import_session_from_file_with_target(
                 .unwrap_or_else(|| crate::id::new_id("msg"));
 
             imported_messages.push(StoredMessage {
+                codemode: None,
+                ask: None,
+                attachment_data: None,
                 id: msg_id,
                 role,
-                content: content_blocks,
+                content: content_blocks.into(),
                 display_role: None,
                 timestamp: None,
                 tool_duration_ms: None,
@@ -854,11 +816,22 @@ fn import_session_from_file_with_target(
     }
 
     let mut session = Session::create_with_id(jcode_session_id, None, title);
-    session.provider_session_id = Some(session_id.to_string());
-    session.provider_key = Some("claude-code".to_string());
-    session.working_dir = working_dir;
-    session.model = model;
-    session.created_at = created_at;
+    session.apply_route(crate::session::Route {
+        provider_session_id: Some(session_id.to_string()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: Some("claude-code".to_string()),
+        ..session.route()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        working_dir,
+        ..session.workspace()
+    });
+    session.apply_route(crate::session::Route {
+        model,
+        ..session.route()
+    });
 
     for message in imported_messages {
         session.append_stored_message(message);
@@ -912,7 +885,7 @@ fn take_over_live_claude_session_with_timeout(
     // Use a normal memorable Jcode session ID so the handed-off conversation
     // remains visible and resumable later. Imported-prefixed IDs are hidden from
     // the native session list because their external source row represents them.
-    let takeover_id = Session::create(None, None).id;
+    let takeover_id = Session::create(None, None).id().to_owned();
     let path = Path::new(session_path);
 
     let prepared =
@@ -992,12 +965,16 @@ fn append_text_message(
         return;
     }
     session.append_stored_message(StoredMessage {
+        codemode: None,
+        ask: None,
+        attachment_data: None,
         id: crate::id::new_id("msg"),
         role,
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp,
         tool_duration_ms: None,
@@ -1012,9 +989,9 @@ fn finalize_imported_session(
 ) -> Result<Session> {
     // Never overwrite a jcode-side continuation with a shorter external
     // transcript. This protection applies to every importer, not only Claude.
-    if crate::session::session_exists(&session.id)
-        && let Ok(mut existing) = Session::load(&session.id)
-        && existing.messages.len() > session.messages.len()
+    if crate::session::session_exists(session.id())
+        && let Ok(mut existing) = Session::load(session.id())
+        && existing.message_count() > session.message_count()
     {
         if normalize_imported_history(&mut existing, false) {
             existing.save()?;
@@ -1022,16 +999,17 @@ fn finalize_imported_session(
         return Ok(existing);
     }
 
-    let original_messages = session.messages.len();
-    session.created_at = created_at;
-    session.updated_at = updated_at.unwrap_or(created_at);
-    session.last_active_at = updated_at.or(Some(created_at));
-    session.status = SessionStatus::Closed;
+    let original_messages = session.message_count();
+    session.restamp_imported(crate::session::ImportedStamps {
+        created_at,
+        updated_at,
+    });
+    session.mark_closed_unregistered();
     normalize_imported_history(&mut session, true);
     session.save()?;
     crate::logging::info(&format!(
         "Imported session prepared: source_messages={original_messages} kept_messages={}",
-        session.messages.len()
+        session.message_count()
     ));
     Ok(session)
 }
@@ -1101,8 +1079,14 @@ pub fn import_codex_session_from_path(
         .map(|s| s.to_string());
     let mut model: Option<String> = None;
     let mut session = Session::create_with_id(imported_codex_session_id(session_id), None, None);
-    session.provider_session_id = Some(session_id.to_string());
-    session.provider_key = Some("openai-codex".to_string());
+    session.apply_route(crate::session::Route {
+        provider_session_id: Some(session_id.to_string()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: Some("openai-codex".to_string()),
+        ..session.route()
+    });
 
     for line in lines {
         let line = line?;
@@ -1185,9 +1169,18 @@ pub fn import_codex_session_from_path(
         append_text_message(&mut session, role, text, timestamp);
     }
 
-    session.title = title.or_else(|| Some(format!("Codex session {}", session_id)));
-    session.working_dir = working_dir;
-    session.model = model;
+    session.apply_titles(crate::session::Titles {
+        title: title.or_else(|| Some(format!("Codex session {}", session_id))),
+        ..session.titles()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        working_dir,
+        ..session.workspace()
+    });
+    session.apply_route(crate::session::Route {
+        model,
+        ..session.route()
+    });
     finalize_imported_session(session, created_at, updated_at)
 }
 
@@ -1215,15 +1208,21 @@ pub fn import_pi_session(session_path: &str) -> Result<Session> {
     let mut model: Option<String> = None;
     let mut provider_key: Option<String> = Some("pi".to_string());
     let mut session = Session::create_with_id(imported_pi_session_id(session_path), None, None);
-    session.provider_session_id = if provider_session_id.is_empty() {
-        None
-    } else {
-        Some(provider_session_id)
-    };
-    session.working_dir = header
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    session.apply_route(crate::session::Route {
+        provider_session_id: if provider_session_id.is_empty() {
+            None
+        } else {
+            Some(provider_session_id)
+        },
+        ..session.route()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: header
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        ..session.workspace()
+    });
 
     for line in lines {
         let line = line?;
@@ -1278,13 +1277,22 @@ pub fn import_pi_session(session_path: &str) -> Result<Session> {
         }
     }
 
-    session.title = title.or_else(|| {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|stem| format!("Pi session {}", stem))
+    session.apply_titles(crate::session::Titles {
+        title: title.or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|stem| format!("Pi session {}", stem))
+        }),
+        ..session.titles()
     });
-    session.provider_key = provider_key;
-    session.model = model;
+    session.apply_route(crate::session::Route {
+        provider_key,
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        model,
+        ..session.route()
+    });
     finalize_imported_session(session, created_at, updated_at)
 }
 
@@ -1332,16 +1340,28 @@ pub fn import_opencode_session_from_path(
         .and_then(DateTime::<Utc>::from_timestamp_millis)
         .or(Some(created_at));
     let mut session = Session::create_with_id(imported_opencode_session_id(session_id), None, None);
-    session.provider_session_id = Some(session_id.to_string());
-    session.provider_key = Some("opencode".to_string());
-    session.working_dir = value
-        .get("directory")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    session.title = value
-        .get("title")
-        .and_then(|v| v.as_str())
-        .map(truncate_title);
+    session.apply_route(crate::session::Route {
+        provider_session_id: Some(session_id.to_string()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: Some("opencode".to_string()),
+        ..session.route()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: value
+            .get("directory")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        ..session.workspace()
+    });
+    session.apply_titles(crate::session::Titles {
+        title: value
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(truncate_title),
+        ..session.titles()
+    });
 
     let messages_root = crate::storage::user_home_path(format!(
         ".local/share/opencode/storage/message/{}",
@@ -1350,7 +1370,7 @@ pub fn import_opencode_session_from_path(
     let parts_base = crate::storage::user_home_path(".local/share/opencode/storage/part")?;
     let mut messages: Vec<(Option<DateTime<Utc>>, Role, String)> = Vec::new();
     let mut model: Option<String> = None;
-    let mut provider_key = session.provider_key.clone();
+    let mut provider_key = session.provider_key().map(str::to_owned);
 
     if messages_root.exists() {
         for msg_path in collect_files_recursive(&messages_root, "json") {
@@ -1412,11 +1432,20 @@ pub fn import_opencode_session_from_path(
         append_text_message(&mut session, role, text, timestamp);
     }
 
-    if session.title.is_none() {
-        session.title = Some(format!("OpenCode session {}", session_id));
+    if session.title().is_none() {
+        session.apply_titles(crate::session::Titles {
+            title: Some(format!("OpenCode session {}", session_id)),
+            ..session.titles()
+        });
     }
-    session.provider_key = provider_key;
-    session.model = model;
+    session.apply_route(crate::session::Route {
+        provider_key,
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        model,
+        ..session.route()
+    });
     finalize_imported_session(session, created_at, updated_at)
 }
 
@@ -1452,9 +1481,18 @@ pub fn import_cursor_session_from_path(
         jcode_import_core::file_modified_datetime(session_path).unwrap_or_else(Utc::now);
 
     let mut session = Session::create_with_id(imported_cursor_session_id(&session_id), None, None);
-    session.provider_session_id = Some(session_id.clone());
-    session.provider_key = Some("cursor".to_string());
-    session.working_dir = cursor_cwd_from_transcript_path(session_path);
+    session.apply_route(crate::session::Route {
+        provider_session_id: Some(session_id.clone()),
+        ..session.route()
+    });
+    session.apply_route(crate::session::Route {
+        provider_key: Some("cursor".to_string()),
+        ..session.route()
+    });
+    session.apply_workspace(crate::session::Workspace {
+        working_dir: cursor_cwd_from_transcript_path(session_path),
+        ..session.workspace()
+    });
 
     let file = File::open(session_path)?;
     let reader = BufReader::new(file);
@@ -1493,7 +1531,10 @@ pub fn import_cursor_session_from_path(
         append_text_message(&mut session, role, text, None);
     }
 
-    session.title = title.or_else(|| Some(format!("Cursor session {}", session_id)));
+    session.apply_titles(crate::session::Titles {
+        title: title.or_else(|| Some(format!("Cursor session {}", session_id))),
+        ..session.titles()
+    });
     finalize_imported_session(session, created_at, Some(created_at))
 }
 

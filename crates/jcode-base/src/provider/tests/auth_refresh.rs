@@ -624,6 +624,8 @@ fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes(
         vec!["anthropic/claude-sonnet-4".to_string()],
         vec!["anthropic/claude-sonnet-4".to_string()],
         vec![ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "Fireworks".to_string(),
             api_method: "openrouter".to_string(),
@@ -631,8 +633,12 @@ fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes(
             detail: "fast, 5m ago".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }],
         vec![ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "Fireworks".to_string(),
             api_method: "openrouter".to_string(),
@@ -640,6 +646,8 @@ fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes(
             detail: "fast, 6m ago".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }],
     );
 
@@ -655,6 +663,8 @@ fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes()
         vec!["anthropic/claude-sonnet-4".to_string()],
         vec!["anthropic/claude-sonnet-4".to_string()],
         vec![ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "Fireworks".to_string(),
             api_method: "openrouter".to_string(),
@@ -662,8 +672,12 @@ fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes()
             detail: "fast, 5m ago".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }],
         vec![ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "anthropic/claude-sonnet-4".to_string(),
             provider: "Fireworks".to_string(),
             api_method: "openrouter".to_string(),
@@ -671,6 +685,8 @@ fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes()
             detail: "cached, 6m ago".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }],
     );
 

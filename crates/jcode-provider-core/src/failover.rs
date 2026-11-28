@@ -82,6 +82,8 @@ pub fn is_definitive_usage_exhaustion(message: &str) -> bool {
         "usage exhausted",
         "quota exhausted",
         "quota has been exhausted",
+        "quota_exhausted",
+        "individual quota reached",
         "credits have run out",
         "credit balance is too low",
         "insufficient_quota",
@@ -92,6 +94,151 @@ pub fn is_definitive_usage_exhaustion(message: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+/// Details explicitly present in a provider's usage-limit error. A retry hint
+/// is not a window reset and must not be reported as one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct UsageLimitDetails {
+    pub window: &'static str,
+    pub reset: Option<String>,
+}
+
+pub fn usage_limit_details(message: &str) -> Option<UsageLimitDetails> {
+    let prompt = parse_failover_prompt_message(message);
+    let message = prompt.as_ref().map_or(message, |p| p.reason.as_str());
+    let lower = message.to_ascii_lowercase();
+    let is_limit = is_definitive_usage_exhaustion(message)
+        || contains_independent_status_code(&lower, "429")
+        || [
+            "rate limit",
+            "rate-limit",
+            "rate_limit",
+            "too many requests",
+            "usage limit",
+            "usage_limit",
+            "quota",
+            "exhausted window",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle));
+    if !is_limit {
+        return None;
+    }
+    let window = if lower.contains("weekly") {
+        "weekly"
+    } else if lower.contains("daily") {
+        "daily"
+    } else if lower.contains("hourly") {
+        "hourly"
+    } else {
+        "unknown"
+    };
+    let utc_timestamp = |value: &str| -> Option<String> {
+        let candidate = value.get(..20)?;
+        let bytes = candidate.as_bytes();
+        if bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes[10] == b' '
+            && bytes[13] == b':'
+            && &bytes[16..] == b" UTC"
+            && [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15]
+                .iter()
+                .all(|&i| bytes[i].is_ascii_digit())
+        {
+            Some(candidate.to_string())
+        } else {
+            None
+        }
+    };
+    let reset = ["resets at ", "reset at "]
+        .iter()
+        .find_map(|marker| {
+            let pos = lower.find(marker)? + marker.len();
+            let rest = &message[pos..];
+            if let Some(timestamp) = utc_timestamp(rest) {
+                return Some(timestamp);
+            }
+            let value = rest
+                .split_whitespace()
+                .next()?
+                .trim_end_matches([',', '.', ';']);
+            // Copy only timestamp-like values, never the remainder of a provider error.
+            (value.len() <= 40
+                && value.contains('-')
+                && value.chars().all(|c| {
+                    c.is_ascii_digit() || matches!(c, '-' | ':' | 'T' | 't' | 'Z' | 'z' | '+' | '.')
+                }))
+            .then(|| value.to_string())
+        })
+        .or_else(|| {
+            // OpenAI formats a known reset as `Resets in 30d (2026-08-21 04:31 UTC)`.
+            let pos = lower.find("resets in ")?;
+            let rest = &message[pos..];
+            let (_, timestamp) = rest.split_once('(')?;
+            utc_timestamp(timestamp)
+        });
+    Some(UsageLimitDetails { window, reset })
+}
+
+/// A limit that clears within this long is a throttle (per-minute or
+/// concurrency), not an exhausted allowance. The provider's own retry on the
+/// same account serves it and keeps the prompt cache.
+pub const TRANSIENT_LIMIT_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether `message` reports an account that cannot serve for a while, so a
+/// retry on the same account is wasted: an exhausted usage allowance or
+/// window (weekly, daily, hourly, 5h), a reset further out than
+/// [`TRANSIENT_LIMIT_MAX_WAIT`] (by `retry_after` or a stated reset time), or
+/// a rejected credential. A plain rate limit or 429 that asks for a short wait
+/// is not exhausted: the same account serves it after the provider's retry.
+pub fn is_exhausted_account_limit(message: &str, retry_after: Option<std::time::Duration>) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if is_definitive_usage_exhaustion(message) || is_auth_or_access_failure(&lower) {
+        return true;
+    }
+    let Some(details) = usage_limit_details(message) else {
+        return false;
+    };
+    retry_after.is_some_and(|wait| wait > TRANSIENT_LIMIT_MAX_WAIT)
+        || details.window != "unknown"
+        || details.reset.is_some()
+        || ["5h", "5-hour", "5 hour", "five hour", "five-hour"]
+            .iter()
+            .any(|needle| lower.contains(needle))
+}
+
+fn is_auth_or_access_failure(lower: &str) -> bool {
+    [
+        "access denied",
+        "not accessible by integration",
+        "provider not configured",
+        "credentials are not configured",
+        "no credentials",
+        "token exchange failed",
+        "refresh token was previously rejected",
+        "authentication failed",
+        "unauthorized",
+        "forbidden",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        || contains_independent_status_code(lower, "401")
+        || contains_independent_status_code(lower, "403")
+}
+
+/// An auth failure can justify rotating credentials, not silently choosing a different model.
+/// `target` may be a bare model ID or a route spec such as `claude-oauth@work:claude-opus-5-5`.
+pub fn automatic_failover_model_allowed(reason: &str, current_model: &str, target: &str) -> bool {
+    if current_model.eq_ignore_ascii_case(target)
+        || target
+            .split_once(':')
+            .is_some_and(|(_, model)| current_model.eq_ignore_ascii_case(model))
+    {
+        return true;
+    }
+    !crate::error_looks_like_credential_failure(reason)
+        && !is_auth_or_access_failure(&reason.to_ascii_lowercase())
 }
 
 pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
@@ -142,29 +289,15 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
         return FailoverDecision::RetryAndMarkUnavailable;
     }
 
-    let auth_or_access = [
-        "access denied",
-        "not accessible by integration",
+    let provider_unavailable = [
         "provider unavailable",
         "provider not available",
         "provider is unavailable",
         "provider currently unavailable",
-        "provider not configured",
-        "credentials are not configured",
-        "no credentials",
-        "token exchange failed",
-        // Cached permanent refresh rejection no longer carries the original
-        // OAuth error code or HTTP status, but still needs account failover.
-        "refresh token was previously rejected",
-        "authentication failed",
-        "unauthorized",
-        "forbidden",
     ]
     .iter()
-    .any(|needle| lower.contains(needle))
-        || contains_independent_status_code(&lower, "401")
-        || contains_independent_status_code(&lower, "403");
-    if auth_or_access {
+    .any(|needle| lower.contains(needle));
+    if provider_unavailable || is_auth_or_access_failure(&lower) {
         return FailoverDecision::RetryAndMarkUnavailable;
     }
 
@@ -174,6 +307,56 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_recovery_requires_confirmation_only_for_a_different_model() {
+        let model = "claude-opus-5-5";
+        for reason in [
+            "Claude OAuth refresh token was previously rejected by Anthropic",
+            "Claude token refresh failed: 503 Service Unavailable",
+            "HTTP 401",
+        ] {
+            assert!(automatic_failover_model_allowed(
+                reason,
+                model,
+                "claude-oauth@backup:claude-opus-5-5"
+            ));
+            assert!(!automatic_failover_model_allowed(
+                reason,
+                model,
+                "claude-sonnet-4-6"
+            ));
+            assert!(!automatic_failover_model_allowed(
+                reason,
+                model,
+                "openai-oauth@backup:gpt-6.1-sol"
+            ));
+        }
+        assert!(automatic_failover_model_allowed(
+            "HTTP 429: usage_limit_reached",
+            model,
+            "openai-oauth@backup:gpt-6.1-sol"
+        ));
+    }
+
+    #[test]
+    fn usage_limit_details_do_not_confuse_retry_hint_with_reset() {
+        let details = usage_limit_details(
+            "HTTP 429 weekly rate limit, resets at 2026-11-17T10:00:00Z. retry after 60 seconds",
+        )
+        .unwrap();
+        assert_eq!(details.window, "weekly");
+        assert_eq!(details.reset.as_deref(), Some("2026-11-17T10:00:00Z"));
+        assert_eq!(
+            usage_limit_details("429 too many requests, retry after 60 seconds")
+                .unwrap()
+                .reset,
+            None
+        );
+        assert_eq!(usage_limit_details("Rate limited: The usage limit has been reached. Plan: team. Resets in 30d 4h 29m (2026-08-21 04:31 UTC).").unwrap().reset.as_deref(), Some("2026-08-21 04:31 UTC"));
+        assert!(usage_limit_details("401 invalid token id 14290").is_none());
+        assert!(usage_limit_details("insufficient_quota").is_some());
+    }
 
     #[test]
     fn definitive_exhaustion_excludes_ambiguous_rate_limits() {
@@ -193,6 +376,8 @@ mod tests {
             "You have reached your weekly limit",
             "OAuth usage exhausted",
             "429 quota exhausted",
+            "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h16m14s.",
+            "\"reason\": \"QUOTA_EXHAUSTED\"",
             "credits have run out",
             "insufficient_quota",
             "Your credit balance is too low",
@@ -284,5 +469,48 @@ mod tests {
             classify_failover_error_message("model version 4130 failed"),
             FailoverDecision::None
         );
+    }
+}
+
+#[cfg(test)]
+mod exhausted_limit_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn throttles_that_clear_shortly_are_not_exhausted() {
+        for message in [
+            "429 Too Many Requests: rate limit exceeded",
+            "Too many requests, please slow down",
+            "429: concurrency limit reached, retry after 5 seconds",
+        ] {
+            assert!(
+                !is_exhausted_account_limit(message, Some(Duration::from_secs(5))),
+                "{message}"
+            );
+            assert!(!is_exhausted_account_limit(message, None), "{message}");
+        }
+    }
+
+    #[test]
+    fn spent_allowances_and_far_resets_are_exhausted() {
+        for message in [
+            "HTTP 429: usage_limit_reached",
+            "Weekly rate limit exceeded",
+            "429: 5h window spent, try later",
+            "Rate limit: resets at 2099-01-01T00:00:00Z",
+            "insufficient_quota: you exceeded your current quota",
+            "HTTP 401 invalid token",
+        ] {
+            assert!(is_exhausted_account_limit(message, None), "{message}");
+        }
+        assert!(is_exhausted_account_limit(
+            "429 too many requests",
+            Some(Duration::from_secs(3_600))
+        ));
+        assert!(!is_exhausted_account_limit(
+            "429 too many requests",
+            Some(TRANSIENT_LIMIT_MAX_WAIT)
+        ));
     }
 }

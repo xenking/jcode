@@ -3,8 +3,9 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use super::args::McpCommand;
-use crate::mcp::{McpConfig, McpServerConfig, oauth};
+use super::args::{ApprovalsCommand, McpCommand};
+use crate::mcp::{McpConfig, McpServerConfig, approvals, oauth};
+use std::path::Path;
 
 fn remote_server<'a>(config: &'a McpConfig, name: &str) -> Result<(&'a McpServerConfig, &'a str)> {
     let server = config.servers.get(name).with_context(|| {
@@ -90,9 +91,126 @@ fn render_list(rows: &[Value]) -> String {
     output
 }
 
+fn approval_rows(config: &McpConfig, project_dir: Option<&Path>) -> Vec<Value> {
+    let mut names: Vec<_> = config.servers.keys().collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let server = &config.servers[name];
+            json!({
+                "name": name,
+                "approval": if server.approval.is_off() { "off" } else { "annotations" },
+                "approve_free": server.approve_free,
+                "file": approvals::locate(project_dir, name).map(|found| found.path.display().to_string()),
+            })
+        })
+        .collect()
+}
+
+fn render_approvals(rows: &[Value]) -> String {
+    if rows.is_empty() {
+        return "No MCP servers configured.\n".into();
+    }
+    let mut output = String::new();
+    for row in rows {
+        let free: Vec<&str> = row["approve_free"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let allowed = match (free.as_slice(), row["approval"].as_str()) {
+            (_, Some("off")) => "every tool runs without asking".to_string(),
+            ([], _) => "no tool is always allowed".to_string(),
+            (free, _) if free.contains(&approvals::ALL_TOOLS) => {
+                "every tool is always allowed".to_string()
+            }
+            (free, _) => format!("always allowed: {}", free.join(", ")),
+        };
+        output.push_str(&format!(
+            "  {} [approval: {}] {} ({})\n",
+            row["name"].as_str().unwrap_or("<unnamed>"),
+            row["approval"].as_str().unwrap_or("?"),
+            allowed,
+            row["file"].as_str().unwrap_or("file unknown"),
+        ));
+    }
+    output
+}
+
+/// One `mcp test` row: the tool name plus what jcode learned from the server.
+/// `unannotated` and `writes` both mean a call asks first when the server opted
+/// in to approval; only `read-only` runs free.
+fn render_tool_line(server: &McpServerConfig, tool: &crate::mcp::McpToolDef) -> String {
+    let mut notes = Vec::new();
+    notes.push(if tool.is_read_only() {
+        "read-only"
+    } else if tool.annotations.is_some() {
+        "writes"
+    } else {
+        "unannotated"
+    });
+    if tool.output_schema.is_some() {
+        notes.push("typed result");
+    }
+    if server.requires_approval(tool) {
+        notes.push("asks first");
+    }
+    format!("{}  ({})", tool.name, notes.join(", "))
+}
+
 pub(crate) async fn run(action: McpCommand) -> Result<()> {
     let config = McpConfig::load();
+    let project_dir = match std::env::current_dir() {
+        Ok(dir) => Some(dir),
+        Err(_) => None,
+    };
+    if let Some(warning) = approvals::inert_config_toml_warning()
+        && matches!(
+            action,
+            McpCommand::List { .. } | McpCommand::Approvals { .. }
+        )
+    {
+        eprintln!("warning: {warning}");
+    }
     match action {
+        McpCommand::Approvals { json, action } => match action {
+            None => {
+                let rows = approval_rows(&config, project_dir.as_deref());
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else {
+                    print!(
+                        "Approvals per server (a running session picks changes up on its next call):\n{}",
+                        render_approvals(&rows)
+                    );
+                }
+            }
+            Some(ApprovalsCommand::Allow { server, tool }) => {
+                let grant = tool
+                    .as_deref()
+                    .map_or(approvals::Grant::Server, approvals::Grant::Tool);
+                let path = approvals::grant(project_dir.as_deref(), &server, grant)?;
+                println!(
+                    "Allowed {} in {}",
+                    tool.as_deref()
+                        .map_or(format!("every tool on '{server}'"), |tool| format!(
+                            "'{tool}' on '{server}'"
+                        )),
+                    path.display()
+                );
+            }
+            Some(ApprovalsCommand::Revoke { server, tool }) => {
+                let (path, removed) =
+                    approvals::revoke(project_dir.as_deref(), &server, tool.as_deref())?;
+                println!(
+                    "Removed {removed} approve_free entr{} for '{server}' from {}",
+                    if removed == 1 { "y" } else { "ies" },
+                    path.display()
+                );
+            }
+        },
         McpCommand::Test { server: name } => {
             let server = config.servers.get(&name).with_context(|| format!("MCP server '{name}' is not configured. Run `jcode mcp list` to see configured names."))?;
             let mut client = crate::mcp::McpClient::connect(name.clone(), server).await
@@ -110,8 +228,18 @@ pub(crate) async fn run(action: McpCommand) -> Result<()> {
                 );
             }
             println!("Tools: {}", tools.len());
+            if !server.approval.is_off() {
+                let asking = tools
+                    .iter()
+                    .filter(|tool| server.requires_approval(tool))
+                    .count();
+                println!(
+                    "Approval: annotations ({asking} of {} tools ask a human first)",
+                    tools.len()
+                );
+            }
             for tool in tools {
-                println!("  {}", tool.name);
+                println!("  {}", render_tool_line(server, &tool));
             }
         }
         McpCommand::List { json } => {
@@ -177,6 +305,75 @@ mod tests {
             "remote": {"url": "https://example.com/mcp?secret=token", "headers": {"aUtHoRiZaTiOn": "Bearer secret-header"}, "enabled": false},
             "broken": {"type": "http"}
         }})).unwrap()
+    }
+
+    #[test]
+    fn approvals_listing_shows_mode_and_exempt_tools_per_server() {
+        let config: McpConfig = serde_json::from_value(json!({"servers": {
+            "asks": {"command": "x", "approval": "annotations"},
+            "some": {"command": "x", "approval": "annotations", "approve_free": ["a", "b"]},
+            "all": {"command": "x", "approval": "annotations", "approve_free": ["*"]},
+            "off": {"command": "x"}
+        }}))
+        .unwrap();
+        let rows = approval_rows(&config, None);
+        assert_eq!(rows[0]["name"], "all");
+        assert_eq!(rows[2]["approve_free"], json!([]));
+        let text = render_approvals(&rows);
+        assert!(
+            text.contains("all [approval: annotations] every tool is always allowed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("asks [approval: annotations] no tool is always allowed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("some [approval: annotations] always allowed: a, b"),
+            "{text}"
+        );
+        assert!(
+            text.contains("off [approval: off] every tool runs without asking"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn mcp_test_rows_show_what_the_server_declared_and_what_will_ask() {
+        use crate::mcp::{McpApproval, McpToolAnnotations, McpToolDef};
+        let tool = |name: &str, read_only: Option<bool>, typed: bool| McpToolDef {
+            name: name.into(),
+            input_schema: json!({"type": "object"}),
+            output_schema: typed.then(|| json!({"type": "object"})),
+            annotations: read_only.map(|flag| McpToolAnnotations {
+                read_only_hint: Some(flag),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut server: McpServerConfig =
+            serde_json::from_value(json!({"command": "x", "approve_free": ["free"]})).unwrap();
+        assert_eq!(
+            render_tool_line(&server, &tool("get", Some(true), true)),
+            "get  (read-only, typed result)"
+        );
+        assert_eq!(
+            render_tool_line(&server, &tool("put", Some(false), false)),
+            "put  (writes)"
+        );
+        server.approval = McpApproval::Annotations;
+        assert_eq!(
+            render_tool_line(&server, &tool("put", Some(false), false)),
+            "put  (writes, asks first)"
+        );
+        assert_eq!(
+            render_tool_line(&server, &tool("bare", None, false)),
+            "bare  (unannotated, asks first)"
+        );
+        assert_eq!(
+            render_tool_line(&server, &tool("free", None, false)),
+            "free  (unannotated)"
+        );
     }
 
     #[test]

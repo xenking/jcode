@@ -74,7 +74,7 @@ fn nested_chat_swarm_member(
 }
 
 #[test]
-fn test_prepare_messages_places_live_swarm_card_beneath_matching_spawn_tool_call() {
+fn fork_test_prepare_messages_places_live_swarm_card_beneath_matching_spawn_tool_call() {
     let session_id = "spawned-session-123";
     let state = TestState {
         display_messages: vec![DisplayMessage {
@@ -94,6 +94,8 @@ fn test_prepare_messages_places_live_swarm_card_beneath_matching_spawn_tool_call
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
             }),
+            codemode: None,
+            ask: None,
         }],
         swarm_members: vec![chat_swarm_member(session_id)],
         anim_elapsed: 0.16,
@@ -106,27 +108,14 @@ fn test_prepare_messages_places_live_swarm_card_beneath_matching_spawn_tool_call
         .iter()
         .map(extract_line_text)
         .collect::<Vec<_>>();
-    let tool_row = rendered
-        .iter()
-        .position(|line| line.contains("Spawn an authentication reviewer"))
-        .expect("missing swarm tool row");
-    let card_row = rendered
-        .iter()
-        .position(|line| line.contains("🐄 ● API reviewer"))
-        .expect("missing live member card");
     let all = rendered.join("\n");
-
-    assert_eq!(
-        card_row,
-        tool_row + 1,
-        "card must directly follow tool: {all}"
-    );
-    // Transcript cards are deliberately stable one-liners: no elapsed time,
-    // todos, or tool progress (those live on the dedicated swarm page), so
-    // old chat rows do not move while the user is reading them.
     assert!(
-        rendered[card_row].contains("🐄 ● API reviewer · Working"),
-        "stable card line missing: {all}"
+        all.contains("API reviewer") && all.contains("Review the authentication flow"),
+        "{all}"
+    );
+    assert!(
+        !all.contains("Spawn an authentication reviewer") && !all.contains("🐄 ●"),
+        "{all}"
     );
     assert!(
         !all.contains("00:18"),
@@ -187,14 +176,16 @@ fn test_prepare_messages_keeps_transcript_card_stable_with_nested_descendants() 
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
             }),
+            codemode: None,
+            ask: None,
         }],
-        transcript_swarm_members: Some(vec![
+        swarm_members: vec![
             chat_swarm_member(root_id),
             child_a,
             child_b,
             grandchild,
             unrelated,
-        ]),
+        ],
         ..Default::default()
     };
 
@@ -204,17 +195,8 @@ fn test_prepare_messages_keeps_transcript_card_stable_with_nested_descendants() 
         .map(extract_line_text)
         .collect::<Vec<_>>();
     let all = rendered.join("\n");
-    // The transcript deliberately renders only the spawned member's stable
-    // one-line card. Descendant trees, todos, and current work live on the
-    // dedicated live swarm page so chat rows do not churn.
-    let root = rendered
-        .iter()
-        .position(|line| line.contains("🐄 ● API reviewer"))
-        .unwrap_or_else(|| panic!("missing root card: {all}"));
-    assert!(
-        rendered[root].contains("Working"),
-        "root card should show status: {all}"
-    );
+    assert!(all.contains("API reviewer"), "missing spawn row: {all}");
+    assert!(!all.contains("🐄 ●"), "extra card: {all}");
     assert!(
         !all.contains("Auth tests") && !all.contains("Token audit"),
         "descendants must not render in the transcript: {all}"
@@ -245,11 +227,12 @@ fn test_prepare_messages_uses_exact_spawn_member_outside_gallery_subtree() {
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
             }),
+            codemode: None,
+            ask: None,
         }],
         // Simulate a stale/missing ownership edge excluding the member from the
         // persistent gallery while the authoritative spawn result still names it.
         swarm_members: Vec::new(),
-        transcript_swarm_members: Some(vec![chat_swarm_member(session_id)]),
         ..Default::default()
     };
 
@@ -260,7 +243,7 @@ fn test_prepare_messages_uses_exact_spawn_member_outside_gallery_subtree() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        rendered.contains("🐄 ● API reviewer"),
+        rendered.contains("API reviewer") && !rendered.contains("🐄 ●"),
         "rendered={rendered}"
     );
 }
@@ -282,6 +265,8 @@ fn test_prepare_messages_matches_real_prefixed_spawn_result_without_input_metada
                 intent: None,
                 thought_signature: None,
             }),
+            codemode: None,
+            ask: None,
         }],
         swarm_members: vec![chat_swarm_member(session_id)],
         ..Default::default()
@@ -294,7 +279,8 @@ fn test_prepare_messages_matches_real_prefixed_spawn_result_without_input_metada
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        rendered.contains("🐄 ● API reviewer"),
+        rendered.contains("🐝 + → spawned-session-123 · spawn  ⊞")
+            && !rendered.contains("🐄 ● API reviewer"),
         "rendered={rendered}"
     );
 }
@@ -315,6 +301,8 @@ fn test_prepare_messages_does_not_attach_member_to_unmatched_spawn_result() {
                 intent: None,
                 thought_signature: None,
             }),
+            codemode: None,
+            ask: None,
         }],
         swarm_members: vec![chat_swarm_member("spawned-session-123")],
         ..Default::default()
@@ -350,6 +338,8 @@ fn test_prepare_messages_matches_spawn_member_by_unique_label_when_result_is_ref
                 intent: Some("Spawn an authentication reviewer".to_string()),
                 thought_signature: None,
             }),
+            codemode: None,
+            ask: None,
         }],
         swarm_members: vec![member],
         ..Default::default()
@@ -362,7 +352,7 @@ fn test_prepare_messages_matches_spawn_member_by_unique_label_when_result_is_ref
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        rendered.contains("🐄 ● API reviewer"),
+        rendered.contains("API reviewer") && !rendered.contains("🐄 ●"),
         "rendered={rendered}"
     );
 }
@@ -387,6 +377,8 @@ fn test_prepare_messages_does_not_guess_when_spawn_label_is_ambiguous() {
                 intent: None,
                 thought_signature: None,
             }),
+            codemode: None,
+            ask: None,
         }],
         swarm_members: vec![first, second],
         ..Default::default()
@@ -546,6 +538,8 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         }],
         status: ProcessingStatus::RunningTool("batch".to_string()),
         anim_elapsed: 0.0,
@@ -835,6 +829,8 @@ fn test_prepare_messages_centers_meta_footer_in_centered_mode() {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
+                ask: None,
             },
         ],
         ..Default::default()
@@ -913,14 +909,18 @@ fn test_prepare_messages_tool_row_refreshes_after_message_version_bump() {
         duration_secs: None,
         title: None,
         tool_data: Some(tool_call.clone()),
+        codemode: None,
+        ask: None,
     };
     let final_message = DisplayMessage {
         role: "tool".to_string(),
-        content: "x".repeat(7_600),
+        content: crate::test_tokens::text_of_tokens(1_900),
         tool_calls: vec![],
         duration_secs: None,
         title: None,
         tool_data: Some(tool_call),
+        codemode: None,
+        ask: None,
     };
 
     let first = TestState {
@@ -946,7 +946,10 @@ fn test_prepare_messages_tool_row_refreshes_after_message_version_bump() {
         .collect();
 
     assert!(
-        first_rendered.iter().any(|line| line.contains("1 tok")),
+        first_rendered.iter().any(|line| line.contains(&format!(
+            "{} tok",
+            crate::message::estimate_text(crate::message::TokenFamily::default(), "pending")
+        ))),
         "expected initial render to reflect placeholder tool output: {first_rendered:?}"
     );
     assert!(
@@ -1082,6 +1085,8 @@ fn test_render_tool_message_batch_nested_subcall_params_still_render() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -1119,6 +1124,8 @@ fn test_render_tool_message_batch_flat_grep_subcall_uses_pattern_and_path() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
+        ask: None,
     };
 
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -1158,6 +1165,8 @@ fn test_render_tool_message_batch_subcall_lines_alignment_unset() {
             intent: None,
             thought_signature: None,
         }),
+        codemode: None,
+        ask: None,
     };
 
     // In non-centered mode, lines have no alignment set
@@ -1244,6 +1253,8 @@ fn assert_thinking_tool_adjacency(embedded_assistant: bool, compact: bool) {
             intent: Some(title.into()),
             thought_signature: None,
         }),
+        codemode: None,
+        ask: None,
     };
     let state = TestState {
         display_messages: vec![
@@ -1342,3 +1353,6 @@ mod reasoning_history;
 
 #[path = "prepare_error_tests.rs"]
 mod error_rows;
+
+#[path = "prepare_additional_tests.rs"]
+mod additional_streaming_hash_default_fallback_invalidates_same_length_frame;

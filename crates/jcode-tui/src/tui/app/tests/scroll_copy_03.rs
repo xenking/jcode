@@ -1,72 +1,4 @@
 #[test]
-fn test_scroll_ctrl_k_j_offset() {
-    let _render_lock = scroll_render_test_lock();
-    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 20);
-
-    assert_eq!(app.scroll_offset, 0);
-    assert!(!app.auto_scroll_paused);
-
-    let (up_code, up_mods) = scroll_up_key(&app);
-    let (down_code, down_mods) = scroll_down_key(&app);
-
-    // Render first so LAST_MAX_SCROLL is populated
-    render_and_snap(&app, &mut terminal);
-
-    // Scroll up (switches to absolute-from-top mode)
-    app.handle_key(up_code.clone(), up_mods).unwrap();
-    assert!(app.auto_scroll_paused);
-    let first_offset = app.scroll_offset;
-
-    app.handle_key(up_code.clone(), up_mods).unwrap();
-    let second_offset = app.scroll_offset;
-    assert!(
-        second_offset < first_offset,
-        "scrolling up should decrease absolute offset (move toward top)"
-    );
-
-    // Scroll down (increases absolute position = moves toward bottom)
-    app.handle_key(down_code.clone(), down_mods).unwrap();
-    assert_eq!(
-        app.scroll_offset, first_offset,
-        "one scroll down should undo one scroll up"
-    );
-
-    // Keep scrolling down until back at bottom
-    for _ in 0..10 {
-        app.handle_key(down_code.clone(), down_mods).unwrap();
-        if !app.auto_scroll_paused {
-            break;
-        }
-    }
-    assert_eq!(app.scroll_offset, 0);
-    assert!(!app.auto_scroll_paused);
-
-    // Stays at 0 when already at bottom
-    app.handle_key(down_code.clone(), down_mods).unwrap();
-    assert_eq!(app.scroll_offset, 0);
-}
-
-#[test]
-fn test_scroll_offset_capped() {
-    let _render_lock = scroll_render_test_lock();
-    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 1, 4);
-
-    let (up_code, up_mods) = scroll_up_key(&app);
-
-    // Render first so LAST_MAX_SCROLL is populated
-    render_and_snap(&app, &mut terminal);
-
-    // Spam scroll-up many times
-    for _ in 0..500 {
-        app.handle_key(up_code.clone(), up_mods).unwrap();
-    }
-
-    // Should be at 0 (absolute top) after scrolling up enough
-    assert_eq!(app.scroll_offset, 0);
-    assert!(app.auto_scroll_paused);
-}
-
-#[test]
 fn test_scroll_render_bottom() {
     let _render_lock = scroll_render_test_lock();
     let (app, mut terminal) = create_scroll_test_app(80, 15, 1, 20);
@@ -122,6 +54,8 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         },
         DisplayMessage {
             role: "assistant".to_string(),
@@ -130,13 +64,15 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         },
     ];
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
     app.is_processing = false;
-    app.streaming.streaming_text.clear();
+    app.streaming.streaming_text_mut().clear();
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
 
@@ -156,7 +92,10 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
         text
     );
     let visible_history = text.lines().skip(2).collect::<Vec<_>>().join(" ");
-    let normalized_history = visible_history.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized_history = visible_history
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(
         normalized_history.contains("Intro line 20 - quick brown fox jumps over the lazy dog."),
         "latest visible content should remain visible below preview, got:\n{}",
@@ -559,7 +498,7 @@ fn test_scroll_down_past_bottom_does_not_accumulate_phantom_offset() {
     // Simulate streaming so scroll_max_estimate() inflates above rendered_max.
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
-    app.streaming.streaming_text = "x".repeat(20_000);
+    app.streaming.streaming_text = "x".repeat(20_000).into();
 
     // Hammer scroll-down well past the bottom.
     for _ in 0..200 {
@@ -585,10 +524,22 @@ fn test_scroll_acceleration_multiplier_scales_with_flick_speed() {
     use std::time::Duration;
     // A fast flick (short gap between wheel events) gets a subtle 2x boost; a
     // slow, deliberate notch stays at 1x for precise positioning.
-    assert_eq!(App::scroll_acceleration_multiplier(Duration::from_millis(10)), 2);
-    assert_eq!(App::scroll_acceleration_multiplier(Duration::from_millis(100)), 1);
-    assert_eq!(App::scroll_acceleration_multiplier(Duration::from_millis(200)), 1);
-    assert_eq!(App::scroll_acceleration_multiplier(Duration::from_secs(5)), 1);
+    assert_eq!(
+        App::scroll_acceleration_multiplier(Duration::from_millis(10)),
+        2
+    );
+    assert_eq!(
+        App::scroll_acceleration_multiplier(Duration::from_millis(100)),
+        1
+    );
+    assert_eq!(
+        App::scroll_acceleration_multiplier(Duration::from_millis(200)),
+        1
+    );
+    assert_eq!(
+        App::scroll_acceleration_multiplier(Duration::from_secs(5)),
+        1
+    );
 }
 
 #[test]
@@ -597,10 +548,16 @@ fn test_fast_flick_enqueues_more_lines_than_a_slow_notch() {
     // "Scroll power": the lines committed per wheel notch scale with flick speed
     // (shorter inter-event gap => bigger multiplier => more lines), capped so the
     // hardest flick stays controllable. Shared by the chat and /resume preview.
-    let fast = App::scroll_intent_lines(App::scroll_acceleration_multiplier(Duration::from_millis(10)));
-    let slow =
-        App::scroll_intent_lines(App::scroll_acceleration_multiplier(Duration::from_millis(400)));
-    assert!(fast > slow, "a fast flick commits more lines than a slow notch ({fast} > {slow})");
+    let fast = App::scroll_intent_lines(App::scroll_acceleration_multiplier(
+        Duration::from_millis(10),
+    ));
+    let slow = App::scroll_intent_lines(App::scroll_acceleration_multiplier(
+        Duration::from_millis(400),
+    ));
+    assert!(
+        fast > slow,
+        "a fast flick commits more lines than a slow notch ({fast} > {slow})"
+    );
     assert_eq!(slow, 3, "a deliberate notch uses the base intent");
     // Even a maximum-velocity multiplier stays within the controllable cap.
     assert!(App::scroll_intent_lines(8) <= 5, "intent is capped");
@@ -620,7 +577,10 @@ fn test_momentum_drain_decelerates_to_one_line() {
     app.mouse_scroll_queue = 0;
     let empty = app.mouse_scroll_drain_amount();
 
-    assert!(big > small, "large momentum should drain faster ({big} > {small})");
+    assert!(
+        big > small,
+        "large momentum should drain faster ({big} > {small})"
+    );
     assert_eq!(tail, 1, "the last line should drain one at a time");
     let _ = empty;
 }
@@ -717,8 +677,11 @@ fn repro_ctrl_shift_jk_scroll_with_text_in_input() {
     app.input = "some draft text".to_string();
 
     // Ctrl+Shift+K with text present.
-    app.handle_key(KeyCode::Char('k'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-        .unwrap();
+    app.handle_key(
+        KeyCode::Char('k'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    )
+    .unwrap();
     assert!(
         app.auto_scroll_paused,
         "Ctrl+Shift+K should scroll up even with text in input (offset moved like plain: {plain_offset})"
@@ -730,8 +693,11 @@ fn repro_ctrl_shift_jk_scroll_with_text_in_input() {
     let shift_up_offset = app.scroll_offset;
 
     // Ctrl+Shift+J should scroll back down.
-    app.handle_key(KeyCode::Char('j'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-        .unwrap();
+    app.handle_key(
+        KeyCode::Char('j'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    )
+    .unwrap();
     assert!(
         app.scroll_offset > shift_up_offset || !app.auto_scroll_paused,
         "Ctrl+Shift+J should scroll down toward the bottom"
@@ -798,6 +764,8 @@ fn test_history_anchor_keeps_distance_from_bottom_after_prepend() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         },
     );
     app.bump_display_messages_version();
@@ -851,13 +819,18 @@ fn test_history_anchor_reconciles_into_scroll_offset_after_render() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         },
     );
     app.bump_display_messages_version();
     render_and_snap(&app, &mut terminal);
     let resolved = crate::tui::ui::last_resolved_chat_scroll();
 
-    assert!(app.reconcile_history_anchor(), "reconcile should apply once");
+    assert!(
+        app.reconcile_history_anchor(),
+        "reconcile should apply once"
+    );
     assert!(
         app.pending_history_anchor.is_none(),
         "anchor should be consumed after reconcile"
@@ -898,14 +871,16 @@ fn compacted_history_app_with_remaining(turns: usize) -> App {
         }],
     );
     let compacted_count = turns * 2;
-    app.session.compaction = Some(crate::session::StoredCompactionState {
-        summary_text: "older turns".to_string(),
-        openai_encrypted_content: None,
-        snapcompact: None,
-        covers_up_to_turn: turns,
-        original_turn_count: turns,
-        compacted_count,
-    });
+    app.session
+        .adopt_compaction(Some(crate::session::StoredCompactionState {
+            summary_text: "older turns".to_string(),
+            plan_context: None,
+            openai_encrypted_content: None,
+            snapcompact: None,
+            covers_up_to_turn: turns,
+            original_turn_count: turns,
+            compacted_count,
+        }));
 
     let (rendered_messages, _images, _info) =
         crate::session::render_messages_and_images_with_compacted_history(&app.session, 0);
@@ -918,6 +893,8 @@ fn compacted_history_app_with_remaining(turns: usize) -> App {
             duration_secs: None,
             title: None,
             tool_data: msg.tool_data,
+            codemode: None,
+            ask: None,
         })
         .collect();
     app.replace_display_messages(rendered);
@@ -1208,7 +1185,8 @@ fn repro_scroll_up_holds_while_reasoning_streams() {
             }
 
             // User scrolls up while reasoning is still streaming.
-            app.handle_key(KeyCode::PageUp, KeyModifiers::empty()).unwrap();
+            app.handle_key(KeyCode::PageUp, KeyModifiers::empty())
+                .unwrap();
             let scrolled = render_and_snap(&app, &mut terminal);
 
             let moved = scrolled != bottom;
@@ -1287,8 +1265,22 @@ fn repro_mouse_wheel_during_token_by_token_reasoning() {
 
         // Token-by-token reasoning trickles in with paced reveal between tokens.
         let tokens = [
-            "Let ", "me ", "think ", "about ", "the ", "problem ", "step ", "by ", "step.\n",
-            "First ", "I ", "consider ", "the ", "inputs ", "and ", "constraints.\n",
+            "Let ",
+            "me ",
+            "think ",
+            "about ",
+            "the ",
+            "problem ",
+            "step ",
+            "by ",
+            "step.\n",
+            "First ",
+            "I ",
+            "consider ",
+            "the ",
+            "inputs ",
+            "and ",
+            "constraints.\n",
         ];
         for tok in tokens {
             app.handle_server_event(
@@ -1413,7 +1405,9 @@ fn repro_scroll_held_across_reasoning_close_and_answer() {
 
             // Reasoning closes (anchors) and the answer begins -- the big reflow.
             app.handle_server_event(
-                crate::protocol::ServerEvent::ReasoningDone { duration_secs: None },
+                crate::protocol::ServerEvent::ReasoningDone {
+                    duration_secs: None,
+                },
                 &mut remote,
             );
             app.handle_server_event(
@@ -1471,10 +1465,9 @@ fn repro_scroll_held_across_reasoning_close_and_answer() {
     );
 }
 
-
 /// End-to-end: a swarm notification carrying a sender-provided tldr renders
-/// collapsed (tldr + `▸ expand` badge, body hidden) through a REAL draw, and a
-/// left click on the badge expands it in place (body visible, `▾ collapse`
+/// collapsed (shared token row + `⊞` badge, body hidden) through a REAL draw,
+/// and a left click on the badge expands it in place (body visible, `⊟`
 /// badge). Exercises the full path: collapsible encoding -> body render ->
 /// live copy-viewport snapshot -> `swarm_expand_target_from_screen` ->
 /// `toggle_swarm_message_expand`.
@@ -1485,7 +1478,8 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
 
     let body = "The flaky test was caused by a race in the setup helper. \
                 I rewrote it to use a barrier and verified 200 consecutive runs pass.";
-    let content = jcode_tui_messages::encode_collapsible_swarm_content("fixed the flaky test", body);
+    let content =
+        jcode_tui_messages::encode_collapsible_swarm_content("fixed the flaky test", body);
     app.display_messages = vec![
         DisplayMessage::user("hi"),
         DisplayMessage::swarm("DM from sheep", content),
@@ -1502,8 +1496,8 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
 
     let collapsed = render_and_snap(&app, &mut terminal);
     assert!(
-        collapsed.contains("fixed the flaky test"),
-        "collapsed card must show the tldr:\n{collapsed}"
+        collapsed.contains("tok") && !collapsed.contains("fixed the flaky test"),
+        "collapsed DM must show only token usage:\n{collapsed}"
     );
     assert!(
         collapsed.contains("⊞"),
@@ -1546,7 +1540,7 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         });
     };
 
-    // A click on the tldr text (left of the badge) must NOT toggle.
+    // A click on the token text (left of the badge) must NOT toggle.
     click(&mut app, badge_col.saturating_sub(6), badge_row);
     assert!(
         jcode_tui_messages::parse_collapsible_swarm_content(&app.display_messages[1].content)
@@ -1554,16 +1548,23 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
         "click left of the badge must not expand the card"
     );
 
-    click(&mut app, badge_col + 2, badge_row);
+    click(&mut app, badge_col, badge_row);
     let parsed =
         jcode_tui_messages::parse_collapsible_swarm_content(&app.display_messages[1].content)
             .expect("content stays collapsible after toggle");
     assert!(parsed.expanded, "badge click must expand the card");
-    assert_eq!(app.status_notice(), Some("Swarm message expanded".to_string()));
+    assert_eq!(
+        app.status_notice(),
+        Some("Swarm message expanded".to_string())
+    );
 
     let expanded = render_and_snap(&app, &mut terminal);
     assert!(
-        expanded.contains("race in the setup helper"),
+        expanded
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("race in the setup helper"),
         "expanded card must show the body:\n{expanded}"
     );
     assert!(
@@ -1588,13 +1589,16 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
     }
     let (collapse_col, collapse_row) =
         collapse_badge.expect("collapse badge must be visible in the frame");
-    click(&mut app, collapse_col + 2, collapse_row);
+    click(&mut app, collapse_col, collapse_row);
     assert!(
         jcode_tui_messages::parse_collapsible_swarm_content(&app.display_messages[1].content)
             .is_some_and(|parsed| !parsed.expanded),
         "collapse badge click must fold the card back down"
     );
 }
+
+#[path = "scroll_copy_03/grouped_dm_badge.rs"]
+mod grouped_dm_badge;
 
 #[cfg(test)]
 #[path = "../tests_input_scroll.rs"]
@@ -1669,7 +1673,10 @@ fn command_palette_open_does_not_move_existing_rows() {
         );
         checked += 1;
     }
-    assert!(checked >= 3, "expected transcript rows to sample:\n{before}");
+    assert!(
+        checked >= 3,
+        "expected transcript rows to sample:\n{before}"
+    );
 }
 
 #[test]
@@ -1686,6 +1693,8 @@ fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
         msgs.push(DisplayMessage {
             role: "assistant".to_string(),
@@ -1694,6 +1703,8 @@ fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
     }
     app.display_messages = msgs;
@@ -1709,9 +1720,14 @@ fn test_alt_e_expands_prompt_preview_to_multiple_prompts() {
     let before = render_and_snap(&app, &mut terminal);
     assert!(!before.contains("question number 2"), "{before}");
 
-    app.handle_key(KeyCode::Char('e'), KeyModifiers::ALT).unwrap();
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::ALT)
+        .unwrap();
     let after = render_and_snap(&app, &mut terminal);
-    app.handle_key(KeyCode::Char('e'), KeyModifiers::ALT).unwrap();
+    app.handle_key(KeyCode::Char('e'), KeyModifiers::ALT)
+        .unwrap();
     assert!(after.contains("question number 2"), "{after}");
     assert!(after.contains("question number 3"), "{after}");
 }
+
+#[path = "scroll_copy_03_additional_tests.rs"]
+mod additional_test_scroll_ctrl_k_j_offset;

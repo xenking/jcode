@@ -1,6 +1,14 @@
 #[path = "commands_release_prompts.rs"]
 mod release_prompts;
 pub(super) use release_prompts::*;
+#[path = "commands_manual_subagent.rs"]
+mod manual_subagent;
+use manual_subagent::launch_manual_subagent;
+#[path = "commands_git_diff.rs"]
+mod git_diff;
+pub(in crate::tui) use git_diff::GIT_DIFF_HEADING;
+pub(super) use git_diff::git_suggestions;
+pub(super) use git_diff::handle_git_command;
 
 pub(super) use super::commands_improve::{
     build_improve_prompt, build_improve_resume_prompt, build_refactor_prompt,
@@ -32,588 +40,21 @@ use super::{App, DisplayMessage, LocalRewindUndoSnapshot, ProcessingStatus};
 use crate::bus::{Bus, BusEvent, GitStatusCompleted, ManualToolCompleted, ToolEvent, ToolStatus};
 use crate::id;
 use crate::message::{ContentBlock, Message, Role};
+use crate::session::Inherit;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Instant;
 
-pub(super) const REVIEW_PREFERRED_MODEL: &str = "gpt-5.5";
-const POKE_OFF_UI_HINT: &str = "/poke off to stop.";
-
-const TODO_COMPLETION_CONTINUATION_MESSAGE: &str =
-    crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE;
-const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str =
-    crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct TodoConfidenceSummary {
-    pub completion_average: Option<u8>,
-    pub completion_confidence_needs_validation: bool,
-    pub confidence_spike_detected: bool,
-    pub needs_more_work: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PokeCommand {
-    Trigger,
-    On,
-    Off,
-    Status,
-}
-
-pub(super) enum PokeActivation {
-    EnabledNoIncomplete,
-    Queued,
-    SendNow {
-        incomplete_count: usize,
-        poke_msg: String,
-    },
-}
-
-pub(super) fn parse_poke_command(trimmed: &str) -> Option<Result<PokeCommand, String>> {
-    match trimmed {
-        "/poke" => Some(Ok(PokeCommand::Trigger)),
-        "/poke on" => Some(Ok(PokeCommand::On)),
-        "/poke off" => Some(Ok(PokeCommand::Off)),
-        "/poke status" => Some(Ok(PokeCommand::Status)),
-        _ if trimmed.starts_with("/poke ") => Some(Err("Usage: /poke [on|off|status]".to_string())),
-        _ => None,
-    }
-}
-
-pub(super) fn is_poke_message(message: &str) -> bool {
-    crate::todo::is_auto_poke_message(message)
-}
-
-pub(super) fn is_todo_confidence_summary_message(message: &str) -> bool {
-    message.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE)
-        || message.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
-        || message.starts_with("All todos are done. Todo confidence summary:")
-}
-
-fn is_incomplete_todo_poke(message: &str) -> bool {
-    let trimmed = message.trim();
-    trimmed.starts_with("You have ")
-        && trimmed
-            .lines()
-            .next()
-            .is_some_and(|line| line.contains(" incomplete todo"))
-        && is_poke_message(trimmed)
-}
-
-/// An incomplete-todo poke can linger in the queue (for example re-queued
-/// after a server busy rejection) while the model finishes every todo.
-/// Sending it afterwards nags about finished work, so drop it at dispatch.
-pub(super) fn drop_stale_incomplete_todo_pokes(app: &App, messages: &mut Vec<String>) {
-    if messages.iter().any(|m| is_incomplete_todo_poke(m)) && incomplete_poke_todos(app).is_empty()
-    {
-        crate::logging::info("Dropping stale incomplete-todo poke: no open todos remain");
-        messages.retain(|m| !is_incomplete_todo_poke(m));
-    }
-}
-
-pub(super) fn queued_messages_are_only_pokes(messages: &[String]) -> bool {
-    !messages.is_empty() && messages.iter().all(|message| is_poke_message(message))
-}
-
-pub(super) fn clear_queued_poke_messages(app: &mut App) -> usize {
-    let before_queued = app.queued_messages.len();
-    app.queued_messages
-        .retain(|message| !is_poke_message(message));
-    let before_hidden = app.hidden_queued_system_messages.len();
-    app.hidden_queued_system_messages
-        .retain(|message| !is_todo_confidence_summary_message(message));
-    let removed = before_queued.saturating_sub(app.queued_messages.len())
-        + before_hidden.saturating_sub(app.hidden_queued_system_messages.len());
-    if removed > 0 && !app.has_queued_followups() {
-        app.pending_queued_dispatch = false;
-    }
-    removed
-}
-
-pub(super) fn disable_auto_poke(app: &mut App) -> usize {
-    let cleared = clear_queued_poke_messages(app);
-    app.auto_poke_incomplete_todos = false;
-    // Disarming is explicit (/poke off) or a circuit breaker; either way it must
-    // stick for the rest of the session instead of being re-armed by the
-    // default-on re-arm in `schedule_auto_poke_followup_if_needed`.
-    app.auto_poke_default_on = false;
-    app.todo_confidence_spike_challenged = false;
-    app.todo_completion_gate_attempts = 0;
-    app.last_auto_poke_fingerprint = None;
-    app.auto_poke_attempts = 0;
-    app.last_todo_ownership_fingerprint = None;
-    app.todo_gate_digest_delivered = false;
-    cleared
-}
+#[path = "commands/poke_transfer.rs"]
+mod poke_transfer;
+#[allow(unused_imports)]
+pub(crate) use poke_transfer::*;
 
 #[path = "commands_auto_poke_errors.rs"]
 mod auto_poke_errors;
-pub(super) use auto_poke_errors::is_non_retryable_auto_poke_error;
-
-/// Whether `error` is a transient connectivity failure (DNS, name resolution,
-/// routing, unreachable host) that the agent itself cannot repair by resending
-/// immediately. These are NOT non-retryable: they resolve once the network
-/// environment recovers, so callers route them to a network-wait/resume path
-/// rather than stopping auto-poke. Kept separate from
-/// [`is_non_retryable_auto_poke_error`] precisely so a transient disconnect is
-/// never treated as a permanent failure.
-pub(super) fn is_auto_poke_connectivity_error(error: &str) -> bool {
-    // Delegate to the shared connectivity classifier (jcode-app-core's
-    // network_retry) so this list can never drift out of sync with the wait-
-    // for-network path, then add wrappers specific to this call site.
-    if crate::network_retry::classify_message(error).is_some() {
-        return true;
-    }
-
-    let lower = error.to_ascii_lowercase();
-
-    let connectivity_markers = [
-        "failed to send openai-compatible chat request",
-        "could not resolve host",
-        "couldn't resolve host",
-    ];
-
-    connectivity_markers
-        .iter()
-        .any(|marker| lower.contains(marker))
-}
-
-/// Whether `error` is a deterministic model/endpoint-capability failure that can
-/// never succeed by resending the identical request: the configured model is not
-/// valid for the configured endpoint (e.g. Volcengine Ark's coding-plan endpoint
-/// returning `404 UnsupportedModel` for a model that lacks the coding plan
-/// feature, or a plain model-not-found). Unlike the broader
-/// [`is_non_retryable_auto_poke_error`] set (which also covers billing, payload
-/// size, auth, etc.), this is narrow enough that we can fail fast *regardless of
-/// auto-poke* during reconnect/recovery continuation instead of burning the
-/// retry budget on a request that is structurally guaranteed to 4xx. See #387.
-pub(super) fn is_fatal_model_endpoint_error(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-
-    let model_endpoint_markers = [
-        "unsupportedmodel",
-        "unsupported model",
-        "does not support the coding plan",
-        "coding plan feature",
-        "model_not_found",
-        "model_not_supported",
-        "invalid model",
-        "the model does not exist",
-        "model does not exist",
-    ];
-
-    model_endpoint_markers
-        .iter()
-        .any(|marker| lower.contains(marker))
-}
-
-pub(super) fn stop_auto_poke_for_non_retryable_error(app: &mut App, error: &str) -> bool {
-    if !app.auto_poke_incomplete_todos || !is_non_retryable_auto_poke_error(error) {
-        return false;
-    }
-
-    let cleared = disable_auto_poke(app);
-    app.rate_limit_pending_message = None;
-    app.rate_limit_reset = None;
-    app.push_display_message(DisplayMessage::system(format!(
-        "🛑 The last request failed in a way that retrying won't fix, so we stopped poking.{} Fix the request or session, then /poke to resume.",
-        if cleared == 0 {
-            String::new()
-        } else {
-            format!(
-                " Cleared {} queued poke follow-up{}.",
-                cleared,
-                if cleared == 1 { "" } else { "s" }
-            )
-        }
-    )));
-    app.set_status_notice("Poke stopped: this error won't fix itself");
-    true
-}
-
-pub(super) fn poke_disabled_message(cleared: usize) -> String {
-    format!(
-        "Auto-poke disabled.{}",
-        if cleared == 0 {
-            String::new()
-        } else {
-            format!(
-                " Cleared {} queued poke follow-up{}.",
-                cleared,
-                if cleared == 1 { "" } else { "s" }
-            )
-        }
-    )
-}
-
-pub(super) fn poke_enabled_without_incomplete_message() -> String {
-    "Auto-poke enabled. Nothing unfinished right now; we'll poke the agent if it stops with todos left.".to_string()
-}
-
-pub(super) fn poke_queued_display_message() -> String {
-    format!(
-        "👉 Poke queued. We'll re-check for unfinished todos after this turn. {}",
-        POKE_OFF_UI_HINT
-    )
-}
-
-pub(super) fn poke_triggered_display_message(incomplete_count: usize) -> String {
-    format!(
-        "👉 {} incomplete todo{}. We poked the agent. {}",
-        incomplete_count,
-        if incomplete_count == 1 { "" } else { "s" },
-        POKE_OFF_UI_HINT,
-    )
-}
-
-pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
-    let incomplete = incomplete_poke_todos(app);
-    app.auto_poke_incomplete_todos = true;
-    // Explicitly turning poke on also restores default-on re-arming.
-    app.auto_poke_default_on = true;
-    app.todo_confidence_spike_challenged = false;
-    app.todo_completion_gate_attempts = 0;
-    app.last_auto_poke_fingerprint = None;
-    app.auto_poke_attempts = 0;
-    app.last_todo_ownership_fingerprint = None;
-    // Re-arming starts a fresh review cycle, so the deferred quality digest is
-    // eligible to be delivered again for the upcoming work.
-    app.todo_gate_digest_delivered = false;
-    // Re-arming is an explicit user action: give the guardrail circuit
-    // breaker its full budget again (the user likely rephrased the task).
-    app.consecutive_guardrail_stops = 0;
-    app.turn_guardrail_stopped = false;
-    app.set_status_notice("Poke: ON");
-
-    if incomplete.is_empty() {
-        return PokeActivation::EnabledNoIncomplete;
-    }
-
-    if app.is_processing {
-        app.set_status_notice("Poke queued after current turn");
-        PokeActivation::Queued
-    } else {
-        let incomplete_count = incomplete.len();
-        let poke_msg = build_poke_message(&incomplete);
-        PokeActivation::SendNow {
-            incomplete_count,
-            poke_msg,
-        }
-    }
-}
-
-pub(super) fn activate_auto_poke_local(app: &mut App) {
-    match activate_auto_poke(app) {
-        PokeActivation::EnabledNoIncomplete => {
-            app.push_display_message(DisplayMessage::system(
-                poke_enabled_without_incomplete_message(),
-            ));
-        }
-        PokeActivation::Queued => {
-            app.push_display_message(DisplayMessage::system(poke_queued_display_message()));
-        }
-        PokeActivation::SendNow {
-            incomplete_count,
-            poke_msg,
-        } => {
-            app.push_display_message(DisplayMessage::system(poke_triggered_display_message(
-                incomplete_count,
-            )));
-
-            app.add_provider_message(Message::user(&poke_msg));
-            app.session.add_message(
-                Role::User,
-                vec![ContentBlock::Text {
-                    text: poke_msg,
-                    cache_control: None,
-                }],
-            );
-            let _ = app.session.save();
-
-            app.is_processing = true;
-            app.status = ProcessingStatus::Sending;
-            app.clear_streaming_render_state();
-            app.stream_buffer.clear();
-            app.thought_line_inserted = false;
-            app.thinking_prefix_emitted = false;
-            app.thinking_buffer.clear();
-            app.streaming_tool_calls.clear();
-            app.batch_progress = None;
-            app.streaming.streaming_input_tokens = 0;
-            app.streaming.streaming_output_tokens = 0;
-            app.streaming.streaming_cache_read_tokens = None;
-            app.streaming.streaming_cache_creation_tokens = None;
-            app.kv_cache.current_api_usage_recorded = false;
-            app.upstream_provider = None;
-            app.status_detail = None;
-            app.streaming.streaming_tps_start = None;
-            app.streaming.streaming_tps_elapsed = std::time::Duration::ZERO;
-            app.streaming.streaming_tps_collect_output = false;
-            app.streaming.streaming_total_output_tokens = 0;
-            app.streaming.streaming_tps_observed_output_tokens = 0;
-            app.streaming.streaming_tps_observed_elapsed = std::time::Duration::ZERO;
-            app.processing_started = Some(Instant::now());
-            app.visible_turn_started = Some(Instant::now());
-            app.pending_turn = true;
-        }
-    }
-}
-
-pub(super) fn toggle_auto_poke_hotkey_local(app: &mut App) {
-    if app.auto_poke_incomplete_todos {
-        let cleared = disable_auto_poke(app);
-        app.set_status_notice("Poke: OFF");
-        app.push_display_message(DisplayMessage::system(poke_disabled_message(cleared)));
-    } else {
-        activate_auto_poke_local(app);
-    }
-}
-
-pub(super) fn transfer_pause_message() -> String {
-    "Transfer requested. Please pause after the current step, update the todo list if needed, and stop so work can continue in the transferred session."
-        .to_string()
-}
-
-fn transfer_active_messages(session: &crate::session::Session) -> Vec<Message> {
-    let start = session
-        .compaction
-        .as_ref()
-        .map(|state| state.compacted_count.min(session.messages.len()))
-        .unwrap_or(0);
-    session.messages[start..]
-        .iter()
-        .map(crate::session::StoredMessage::to_message)
-        .collect()
-}
-
-pub(super) fn create_transfer_session_from_parent(
-    parent_session_id: &str,
-    parent: &crate::session::Session,
-    compaction: Option<crate::session::StoredCompactionState>,
-) -> anyhow::Result<(String, String)> {
-    let mut todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
-    // Background task IDs belong to the parent session. Transfer the work,
-    // not foreign dependencies, and leave the parent's durable todos intact.
-    for todo in &mut todos {
-        todo.waiting_on.clear();
-        todo.waiting_reason = None;
-    }
-    let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
-    child.messages.clear();
-    child.compaction = compaction;
-    child.system_prompt = parent.system_prompt.clone();
-    child.working_dir = parent.working_dir.clone();
-    child.model = parent.model.clone();
-    child.provider_key = parent.provider_key.clone();
-    child.subagent_model = parent.subagent_model.clone();
-    child.improve_mode = parent.improve_mode;
-    child.autoreview_enabled = parent.autoreview_enabled;
-    child.autojudge_enabled = parent.autojudge_enabled;
-    child.is_canary = parent.is_canary;
-    child.testing_build = parent.testing_build.clone();
-    child.status = crate::session::SessionStatus::Closed;
-    child.provider_session_id = None;
-    child.save()?;
-    crate::todo::save_todos(&child.id, &todos)?;
-    Ok((child.id.clone(), child.display_name().to_string()))
-}
-
-async fn prepare_transfer_session_local(
-    parent: crate::session::Session,
-    provider: std::sync::Arc<dyn crate::provider::Provider>,
-) -> anyhow::Result<super::PreparedTransferSession> {
-    let compaction = crate::compaction::build_transfer_compaction_state(
-        provider,
-        transfer_active_messages(&parent),
-        parent.compaction.clone(),
-    )
-    .await?;
-    let (session_id, session_name) =
-        create_transfer_session_from_parent(parent.id.as_str(), &parent, compaction)?;
-    Ok(super::PreparedTransferSession {
-        session_id,
-        session_name,
-    })
-}
-
-pub(super) fn start_local_transfer_prepare(app: &mut App) -> anyhow::Result<()> {
-    if app.pending_local_transfer.is_some() {
-        return Ok(());
-    }
-
-    let parent = app.session.clone();
-    let provider = app.provider.fork();
-    let (tx, rx) = std::sync::mpsc::channel();
-    app.pending_local_transfer = Some(super::PendingLocalTransfer { receiver: rx });
-
-    tokio::spawn(async move {
-        let result = prepare_transfer_session_local(parent, provider).await;
-        let _ = tx.send(result);
-    });
-
-    Ok(())
-}
-
-pub(super) fn poll_local_transfer_prepare(app: &mut App) -> bool {
-    let recv_result = {
-        let Some(pending) = app.pending_local_transfer.as_ref() else {
-            return false;
-        };
-        pending.receiver.try_recv()
-    };
-
-    match recv_result {
-        Ok(result) => {
-            app.pending_local_transfer = None;
-            app.pending_transfer_request = false;
-            match result {
-                Ok(prepared) => {
-                    let exe = super::launch_client_executable();
-                    let cwd = crate::session::Session::load(&prepared.session_id)
-                        .ok()
-                        .and_then(|session| session.working_dir)
-                        .map(std::path::PathBuf::from)
-                        .filter(|path| path.is_dir())
-                        .or_else(|| std::env::current_dir().ok())
-                        .unwrap_or_else(|| std::path::PathBuf::from("."));
-                    let socket = std::env::var("JCODE_SOCKET").ok();
-                    match super::spawn_in_new_terminal(
-                        &exe,
-                        &prepared.session_id,
-                        &cwd,
-                        socket.as_deref(),
-                    ) {
-                        Ok(true) => {
-                            app.push_display_message(DisplayMessage::system(format!(
-                                "↗ Transfer launched in {}.",
-                                prepared.session_name
-                            )));
-                            app.set_status_notice("Transfer launched");
-                        }
-                        Ok(false) => {
-                            app.push_display_message(DisplayMessage::system(format!(
-                                "↗ Transfer session {} created.\n\nNo terminal was opened automatically. Resume manually:\n\n  jcode --resume {}",
-                                prepared.session_name, prepared.session_id
-                            )));
-                            app.set_status_notice("Transfer session created");
-                        }
-                        Err(error) => {
-                            app.push_display_message(DisplayMessage::error(format!(
-                                "Transfer session {} was created but failed to open a window: {}\n\nResume manually: jcode --resume {}",
-                                prepared.session_name, error, prepared.session_id
-                            )));
-                            app.set_status_notice("Transfer open failed");
-                        }
-                    }
-                }
-                Err(error) => {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to prepare transfer session: {}",
-                        error
-                    )));
-                    app.set_status_notice("Transfer failed");
-                }
-            }
-            true
-        }
-        Err(std::sync::mpsc::TryRecvError::Empty) => false,
-        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-            app.pending_local_transfer = None;
-            app.pending_transfer_request = false;
-            app.push_display_message(DisplayMessage::error(
-                "Transfer preparation failed before returning a result.".to_string(),
-            ));
-            app.set_status_notice("Transfer failed");
-            true
-        }
-    }
-}
-
-pub(super) fn maybe_begin_pending_local_transfer(app: &mut App) -> bool {
-    if app.is_remote || app.is_processing || !app.pending_transfer_request {
-        return false;
-    }
-    if app.pending_local_transfer.is_some() {
-        return false;
-    }
-
-    match start_local_transfer_prepare(app) {
-        Ok(()) => {
-            app.push_display_message(DisplayMessage::system(
-                "Preparing transferred session with compacted context...".to_string(),
-            ));
-            app.set_status_notice("Preparing transfer");
-        }
-        Err(error) => {
-            app.pending_transfer_request = false;
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to start transfer preparation: {}",
-                error
-            )));
-            app.set_status_notice("Transfer failed");
-        }
-    }
-    true
-}
-
-pub(super) fn handle_transfer_command_local(app: &mut App) {
-    if app.pending_transfer_request || app.pending_local_transfer.is_some() {
-        app.push_display_message(DisplayMessage::system(
-            "A transfer is already pending.".to_string(),
-        ));
-        app.set_status_notice("Transfer already pending");
-        return;
-    }
-
-    app.pending_transfer_request = true;
-    if app.is_processing {
-        app.interleave_message = Some(transfer_pause_message());
-        app.interleave_images.clear();
-        app.push_display_message(DisplayMessage::system(
-            "Queued /transfer. The current session will be asked to pause, then the compacted handoff will open in a new window."
-                .to_string(),
-        ));
-        app.set_status_notice("Transfer queued after current turn");
-    } else {
-        let _ = maybe_begin_pending_local_transfer(app);
-    }
-}
-
-pub(super) fn poke_status_message(app: &App) -> String {
-    let incomplete = incomplete_poke_todos(app);
-    let queued_followup = app
-        .queued_messages
-        .iter()
-        .any(|message| is_poke_message(message))
-        || app
-            .hidden_queued_system_messages
-            .iter()
-            .any(|message| is_todo_confidence_summary_message(message));
-    let mut message = format!(
-        "Auto-poke: {}. {} incomplete todo{}.",
-        if app.auto_poke_incomplete_todos {
-            "ON"
-        } else {
-            "OFF"
-        },
-        incomplete.len(),
-        if incomplete.len() == 1 { "" } else { "s" }
-    );
-    if queued_followup {
-        message.push_str(" A follow-up poke is queued.");
-    }
-    if app.is_processing {
-        message.push_str(" A turn is currently running.");
-    }
-    message
-}
-
-pub(super) fn current_subagent_model_summary(app: &App) -> String {
-    match app.session.subagent_model.as_deref() {
-        Some(model) => format!("fixed {}", model),
-        None => format!("inherit current ({})", app.provider.model()),
-    }
-}
+pub(super) use auto_poke_errors::{
+    is_auto_poke_connectivity_error, is_fatal_model_endpoint_error,
+    is_non_retryable_auto_poke_error,
+};
 
 fn derive_subagent_description(prompt: &str) -> String {
     let words: Vec<&str> = prompt.split_whitespace().take(4).collect();
@@ -624,751 +65,17 @@ fn derive_subagent_description(prompt: &str) -> String {
     }
 }
 
-pub(super) fn parse_manual_subagent_spec(rest: &str) -> Result<ManualSubagentSpec, String> {
-    let mut iter = rest.split_whitespace().peekable();
-    let mut subagent_type = "general".to_string();
-    let mut model = None;
-    let mut session_id = None;
-    let mut prompt_tokens = Vec::new();
-
-    while let Some(token) = iter.next() {
-        match token {
-            "--type" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| "Missing value for --type.".to_string())?;
-                subagent_type = value.to_string();
-            }
-            "--model" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| "Missing value for --model.".to_string())?;
-                model = Some(value.to_string());
-            }
-            "--continue" => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| "Missing value for --continue.".to_string())?;
-                session_id = Some(value.to_string());
-            }
-            flag if flag.starts_with("--") => {
-                return Err(format!("Unknown flag {}.", flag));
-            }
-            prompt_start => {
-                prompt_tokens.push(prompt_start.to_string());
-                prompt_tokens.extend(iter.map(str::to_string));
-                break;
-            }
-        }
-    }
-
-    let prompt = prompt_tokens.join(" ").trim().to_string();
-    if prompt.is_empty() {
-        return Err("Missing prompt. Add text after /subagent.".to_string());
-    }
-
-    Ok(ManualSubagentSpec {
-        subagent_type,
-        model,
-        session_id,
-        prompt,
-    })
-}
-
-fn launch_manual_subagent(app: &mut App, spec: ManualSubagentSpec) {
-    let description = derive_subagent_description(&spec.prompt);
-    let tool_call = crate::message::ToolCall {
-        id: id::new_id("call"),
-        name: "subagent".to_string(),
-        input: serde_json::json!({
-            "description": description,
-            "prompt": spec.prompt,
-            "subagent_type": spec.subagent_type,
-            "model": spec.model,
-            "session_id": spec.session_id,
-            "command": "/subagent",
-        }),
-        intent: None,
-        thought_signature: None,
-    };
-
-    app.push_display_message(DisplayMessage {
-        role: "tool".to_string(),
-        content: tool_call.name.clone(),
-        tool_calls: vec![],
-        duration_secs: None,
-        title: None,
-        tool_data: Some(tool_call.clone()),
-    });
-
-    let content_blocks = vec![ContentBlock::ToolUse {
-        id: tool_call.id.clone(),
-        name: tool_call.name.clone(),
-        input: tool_call.input.clone(),
-        thought_signature: None,
-    }];
-    app.add_provider_message(Message {
-        role: Role::Assistant,
-        content: content_blocks.clone(),
-        timestamp: Some(chrono::Utc::now()),
-        tool_duration_ms: None,
-    });
-    let message_id = app.session.add_message(Role::Assistant, content_blocks);
-    let _ = app.session.save();
-    app.subagent_status = Some("starting subagent".to_string());
-    app.set_status_notice("Running subagent");
-
-    let registry = app.registry.clone();
-    let session_id = app.session.id.clone();
-    let working_dir = app.session.working_dir.clone();
-    let tool_call_for_task = tool_call.clone();
-    tokio::spawn(async move {
-        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-            session_id: session_id.clone(),
-            message_id: message_id.clone(),
-            tool_call_id: tool_call_for_task.id.clone(),
-            tool_name: tool_call_for_task.name.clone(),
-            status: ToolStatus::Running,
-            intent: tool_call_for_task.intent.clone(),
-            title: None,
-        }));
-
-        let ctx = crate::tool::ToolContext {
-            session_id: session_id.clone(),
-            message_id: message_id.clone(),
-            tool_call_id: tool_call_for_task.id.clone(),
-            working_dir: working_dir.as_deref().map(PathBuf::from),
-            stdin_request_tx: None,
-            graceful_shutdown_signal: None,
-            execution_mode: crate::tool::ToolExecutionMode::Direct,
-        };
-
-        let start = Instant::now();
-        let result = registry
-            .execute(
-                &tool_call_for_task.name,
-                tool_call_for_task.input.clone(),
-                ctx,
-            )
-            .await;
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        let (output, is_error, title, status) = match result {
-            Ok(output) => {
-                crate::telemetry::record_tool_call();
-                (output.output, false, output.title, ToolStatus::Completed)
-            }
-            Err(error) => {
-                crate::telemetry::record_tool_failure();
-                (format!("Error: {}", error), true, None, ToolStatus::Error)
-            }
-        };
-
-        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-            session_id: session_id.clone(),
-            message_id,
-            tool_call_id: tool_call_for_task.id.clone(),
-            tool_name: tool_call_for_task.name.clone(),
-            status,
-            intent: tool_call_for_task.intent.clone(),
-            title: title.clone(),
-        }));
-
-        Bus::global().publish(BusEvent::ManualToolCompleted(ManualToolCompleted {
-            session_id,
-            tool_call: tool_call_for_task,
-            output,
-            is_error,
-            title,
-            duration_ms,
-        }));
-    });
-}
-
-fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> bool {
-    if !trimmed.starts_with("/subagent-model") {
-        return false;
-    }
-
-    if app.is_remote {
-        app.push_display_message(DisplayMessage::error(
-            "/subagent-model requires a live jcode server connection in remote mode.".to_string(),
-        ));
-        return true;
-    }
-
-    let rest = trimmed
-        .strip_prefix("/subagent-model")
-        .unwrap_or_default()
-        .trim();
-
-    if rest.is_empty() || matches!(rest, "show" | "status") {
-        app.push_display_message(DisplayMessage::system(format!(
-            "Subagent model for this session: {}\n\nUse /subagent-model <name> to pin a model, or /subagent-model inherit to use the current model.",
-            current_subagent_model_summary(app)
-        )));
-        return true;
-    }
-
-    if matches!(rest, "inherit" | "reset" | "clear") {
-        app.session.subagent_model = None;
-        let _ = app.session.save();
-        app.push_display_message(DisplayMessage::system(format!(
-            "Subagent model reset to inherit the current model ({}).",
-            app.provider.model()
-        )));
-        app.set_status_notice("Subagent model: inherit");
-        return true;
-    }
-
-    app.session.subagent_model = Some(rest.to_string());
-    let _ = app.session.save();
-    app.push_display_message(DisplayMessage::system(format!(
-        "Subagent model pinned to {} for this session.",
-        rest
-    )));
-    app.set_status_notice(format!("Subagent model → {}", rest));
-    true
-}
-
-fn handle_subagent_command(app: &mut App, trimmed: &str) -> bool {
-    if !trimmed.starts_with("/subagent") || trimmed.starts_with("/subagent-model") {
-        return false;
-    }
-
-    if app.is_remote {
-        app.push_display_message(DisplayMessage::error(
-            "/subagent requires a live jcode server connection in remote mode.".to_string(),
-        ));
-        return true;
-    }
-
-    let rest = trimmed.strip_prefix("/subagent").unwrap_or_default().trim();
-    if rest.is_empty() {
-        app.push_display_message(DisplayMessage::error(
-            "Usage: /subagent [--type <kind>] [--model <name>] [--continue <session_id>] <prompt>"
-                .to_string(),
-        ));
-        return true;
-    }
-
-    match parse_manual_subagent_spec(rest) {
-        Ok(spec) => launch_manual_subagent(app, spec),
-        Err(error) => {
-            app.push_display_message(DisplayMessage::error(format!(
-                "{}\nUsage: /subagent [--type <kind>] [--model <name>] [--continue <session_id>] <prompt>",
-                error
-            )));
-        }
-    }
-    true
-}
-
-/// `/cancel` (and `/stop`) interrupt the in-flight turn, mirroring Ctrl+C
-/// while processing. The command has long been registered and advertised by
-/// interactive prompts, but had no top-level dispatch, so typing it outside a
-/// pending prompt fell through to skill parsing and produced
-/// "Unknown skill: /cancel" (issue #496).
-pub(super) fn handle_cancel_command(app: &mut App, trimmed: &str) -> bool {
-    if trimmed != "/cancel" && trimmed != "/stop" {
-        return false;
-    }
-
-    let pending_retry = app.rate_limit_reset.is_some() && app.rate_limit_pending_message.is_some();
-    if app.is_processing {
-        app.cancel_requested = true;
-        app.interleave_message = None;
-        app.interleave_images.clear();
-        app.pending_soft_interrupts.clear();
-        app.pending_soft_interrupt_requests.clear();
-        if app.cancel_overnight_for_interrupt() {
-            app.set_status_notice("Interrupting... Overnight cancelled");
-        } else {
-            app.set_status_notice("Interrupting...");
-        }
-    } else if pending_retry {
-        app.clear_pending_remote_retry();
-        if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
-            app.status = ProcessingStatus::Idle;
-            app.status_detail = None;
-        }
-        app.set_status_notice("Pending retry cancelled");
-    } else {
-        app.push_display_message(DisplayMessage::system(
-            "Nothing to cancel: no prompt or operation is in progress.".to_string(),
-        ));
-    }
-    true
-}
-
-pub(super) fn handle_help_command(app: &mut App, trimmed: &str) -> bool {
-    if let Some(topic) = trimmed
-        .strip_prefix("/help ")
-        .or_else(|| trimmed.strip_prefix("/? "))
-    {
-        if let Some(help) = app.command_help(topic) {
-            app.push_display_message(DisplayMessage::system(help));
-        } else {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Unknown command '{}'. Use /help to list commands.",
-                topic.trim()
-            )));
-        }
-        return true;
-    }
-
-    if trimmed == "/help" || trimmed == "/?" || trimmed == "/commands" {
-        app.help_scroll = Some(0);
-        return true;
-    }
-
-    false
-}
-
-/// `/keys` shows the keymap diagnostics: detected terminal, discovered terminal
-/// and macOS shortcuts, and any conflicts with jcode's own keybindings.
-/// `/keys refresh` forces a fresh scan of the machine (otherwise a cached
-/// snapshot up to a day old is reused).
-pub(super) fn handle_keys_command(app: &mut App, trimmed: &str) -> bool {
-    let Some(rest) = slash_command_rest(trimmed, "/keys")
-        .or_else(|| slash_command_rest(trimmed, "/keybindings"))
-    else {
-        return false;
-    };
-
-    let force_refresh = matches!(rest.trim(), "refresh" | "rescan" | "reload");
-    let snapshot = if force_refresh {
-        crate::setup_hints::keymap::refresh_and_save()
-    } else {
-        crate::setup_hints::keymap::snapshot_cached_or_refresh()
-    };
-
-    let cfg = crate::config::config();
-    let report = crate::setup_hints::keymap::render_report(&cfg.keybindings, &snapshot);
-    app.push_display_message(DisplayMessage::system(report));
-
-    if let Some(status) =
-        crate::setup_hints::keymap::render_status_line(&cfg.keybindings, &snapshot)
-    {
-        app.set_status_notice(status);
-    } else {
-        app.set_status_notice("No keybinding conflicts detected");
-    }
-    true
-}
-
-pub(super) fn handle_model_status_command(app: &mut App, trimmed: &str) -> bool {
-    let Some(rest) = slash_command_rest(trimmed, "/provider-test-coverage")
-        .or_else(|| slash_command_rest(trimmed, "/model-status"))
-    else {
-        return false;
-    };
-
-    if rest.trim().is_empty() {
-        app.model_status_content = build_provider_test_coverage_summary();
-        app.model_status_scroll = Some(0);
-        return true;
-    }
-
-    let mut parts = rest.split_whitespace();
-    let provider = parts
-        .next()
-        .map(str::to_string)
-        .unwrap_or_else(|| app.provider_name().to_string());
-    let explicit_model = parts.collect::<Vec<_>>().join(" ");
-    let model = if explicit_model.trim().is_empty() {
-        app.provider_model()
-    } else {
-        explicit_model
-    };
-
-    app.model_status_content = build_model_status_report(&provider, &model);
-    app.model_status_scroll = Some(0);
-    true
-}
-
-/// Parse an explicit diff-mode name accepted by `/diff <mode>`. Returns `None`
-/// for unrecognized values so the caller can report a usage error.
-fn parse_diff_mode_name(value: &str) -> Option<crate::config::DiffDisplayMode> {
-    use crate::config::DiffDisplayMode;
-    match value.trim().to_ascii_lowercase().as_str() {
-        "off" | "none" | "hide" | "hidden" => Some(DiffDisplayMode::Off),
-        "inline" | "on" => Some(DiffDisplayMode::Inline),
-        "full" | "full-inline" | "full_inline" | "fullinline" | "inline-full" => {
-            Some(DiffDisplayMode::FullInline)
-        }
-        "file" | "fullfile" | "full-file" => Some(DiffDisplayMode::File),
-        _ => None,
-    }
-}
-
-fn apply_diff_mode(app: &mut App, mode: crate::config::DiffDisplayMode) {
-    app.diff_mode = mode;
-    if !app.diff_pane_visible() {
-        app.diff_pane_focus = false;
-    }
-    app.set_status_notice(format!("Diffs: {}", app.diff_mode.label()));
-}
-
-pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
-    let Some(rest) = slash_command_rest(trimmed, "/diff") else {
-        return false;
-    };
-    let arg = rest.trim();
-
-    if arg.is_empty() || arg.eq_ignore_ascii_case("cycle") || arg.eq_ignore_ascii_case("next") {
-        let next = app.diff_mode.cycle();
-        apply_diff_mode(app, next);
-        return true;
-    }
-
-    if arg.eq_ignore_ascii_case("status") {
-        app.push_display_message(DisplayMessage::system(format!(
-            "Diff mode: {} (use /diff [off|inline|full|file] or /diff to cycle)",
-            app.diff_mode.label()
-        )));
-        return true;
-    }
-
-    match parse_diff_mode_name(arg) {
-        Some(mode) => apply_diff_mode(app, mode),
-        None => app.push_display_message(DisplayMessage::error(
-            "Usage: /diff [off|inline|full|file|cycle|status]".to_string(),
-        )),
-    }
-    true
-}
-
-pub(super) fn handle_log_command(app: &mut App, trimmed: &str) -> bool {
-    let Some(rest) = slash_command_rest(trimmed, "/log") else {
-        return false;
-    };
-
-    let mut parts = rest.splitn(2, char::is_whitespace);
-    let subcommand = parts.next().unwrap_or_default();
-    let note = parts.next().unwrap_or_default().trim();
-
-    if subcommand != "mark" {
-        app.push_display_message(DisplayMessage::error("Usage: /log mark [note]".to_string()));
-        return true;
-    }
-
-    let marker_id = format!(
-        "logmark-{}",
-        chrono::Local::now().format("%Y%m%d-%H%M%S%.3f")
-    );
-    let working_dir = active_working_dir(app)
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let note_for_log = if note.is_empty() { "(none)" } else { note };
-
-    crate::logging::info(&format!(
-        "JCODE_LOG_MARK id={} session={} provider={} model={} cwd={} note={}",
-        marker_id,
-        app.session.id,
-        app.provider_name(),
-        app.provider_model(),
-        working_dir,
-        note_for_log
-    ));
-
-    let mut message = format!(
-        "Log mark written: {}\n\nAgents can search ~/.jcode/logs/ for JCODE_LOG_MARK or this marker id.",
-        marker_id
-    );
-    if !note.is_empty() {
-        message.push_str(&format!("\n\nNote: {}", note));
-    }
-    app.push_display_message(DisplayMessage::system(message));
-    app.set_status_notice(format!("Log mark {}", marker_id));
-    true
-}
-
-fn build_model_status_report(provider_query: &str, model_query: &str) -> String {
-    crate::live_tests::format_provider_test_coverage_report(provider_query, model_query, None)
-}
-
-fn build_provider_test_coverage_summary() -> String {
-    match crate::live_tests::load_coverage(None) {
-        Ok((coverage, path)) => {
-            let summary = crate::live_tests::strict_live_provider_model_coverage_summary(
-                &coverage,
-                path.display().to_string(),
-            );
-            // 0 = no per-pair cap: the overlay scrolls, so show every pair.
-            crate::live_tests::format_strict_live_provider_model_coverage_summary(&summary, 0)
-        }
-        Err(err) => {
-            let mut out = String::new();
-            out.push_str("Live provider/model E2E coverage\n");
-            out.push_str("Status: no verification ledger found on this install\n");
-            out.push_str(&format!("Ledger error: {err}\n"));
-            out
-        }
-    }
-}
-
-pub(super) fn handle_ssh_command(app: &mut App, trimmed: &str) -> bool {
-    let Some(rest) = trimmed.strip_prefix("/ssh") else {
-        return false;
-    };
-    if !rest.is_empty()
-        && !rest
-            .chars()
-            .next()
-            .map(|c| c.is_whitespace())
-            .unwrap_or(false)
-    {
-        return false;
-    }
-
-    let mut parts = rest.split_whitespace();
-    let first = parts.next();
-    match first {
-        None => show_ssh_remotes(app),
-        Some("add") => {
-            let name = parts.next().unwrap_or("school");
-            begin_ssh_target_prompt(app, name);
-        }
-        Some("status") => show_ssh_status(app),
-        Some("disconnect") => {
-            if let Some(name) = parts.next() {
-                disconnect_ssh_remote(app, name);
-            } else {
-                app.push_display_message(DisplayMessage::error(
-                    "Usage: /ssh disconnect <name>".to_string(),
-                ));
-            }
-        }
-        Some(name) => {
-            let inline_target = parts.next();
-            if let Some(target) = inline_target {
-                match crate::ssh_remote::upsert_profile(name, target) {
-                    Ok(profile) => connect_ssh_remote(app, profile),
-                    Err(error) => app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to save SSH remote {}: {}",
-                        name, error
-                    ))),
-                }
-            } else {
-                match crate::ssh_remote::find_profile(name) {
-                    Ok(Some(profile)) => connect_ssh_remote(app, profile),
-                    Ok(None) => begin_ssh_target_prompt(app, name),
-                    Err(error) => app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to load SSH remotes: {}",
-                        error
-                    ))),
-                }
-            }
-        }
-    }
-    true
-}
-
-pub(super) fn handle_pending_ssh_remote_target(app: &mut App, name: String, input: String) {
-    let target = input.trim();
-    if target.is_empty() || target.eq_ignore_ascii_case("cancel") {
-        app.push_display_message(DisplayMessage::system(
-            "SSH remote setup cancelled.".to_string(),
-        ));
-        app.set_status_notice("SSH setup cancelled");
-        return;
-    }
-    match crate::ssh_remote::upsert_profile(&name, target) {
-        Ok(profile) => connect_ssh_remote(app, profile),
-        Err(error) => app.push_display_message(DisplayMessage::error(format!(
-            "Failed to save SSH remote {}: {}",
-            name, error
-        ))),
-    }
-}
-
-fn begin_ssh_target_prompt(app: &mut App, name: &str) {
-    app.pending_ssh_remote_name = Some(name.to_string());
-    app.push_display_message(DisplayMessage::system(format!(
-        "SSH setup: {}
-
-Step 1/4: Tell Jcode where to connect.
-
-Enter only the SSH target, meaning the part after ssh:
-
-  alice@login.school.edu
-
-You can also enter an SSH config alias like school.
-
-Security model
-  - Jcode stores this host/user target so you can run /ssh {} later.
-  - Jcode does not ask for or store your SSH password.
-  - If a password is needed, it will be typed into your system ssh prompt, not into Jcode.
-
-Type cancel to stop setup.",
-        name, name
-    )));
-    app.set_status_notice("SSH setup 1/4: enter target");
-}
-
-fn show_ssh_remotes(app: &mut App) {
-    match crate::ssh_remote::load_config() {
-        Ok(config) if config.hosts.is_empty() => {
-            app.push_display_message(DisplayMessage::system(
-                "SSH remotes
-
-No SSH remotes are configured yet.
-
-Start with:
-
-  /ssh school
-
-Jcode will ask for the SSH target, then use your system SSH client for authentication. Jcode never stores SSH passwords."
-                    .to_string(),
-            ));
-        }
-        Ok(config) => {
-            let mut lines = vec!["SSH remotes".to_string(), "".to_string()];
-            for profile in config.hosts {
-                let alive = if crate::ssh_remote::is_control_master_alive(&profile) {
-                    "✓ connected"
-                } else {
-                    "not connected"
-                };
-                lines.push(format!(
-                    "  - {} -> {} ({})",
-                    profile.name, profile.ssh_target, alive
-                ));
-            }
-            lines.push("".to_string());
-            lines.push(
-                "Use /ssh <name> to connect, /ssh status to check, or /ssh disconnect <name> to disconnect."
-                    .to_string(),
-            );
-            lines.push("".to_string());
-            lines.push("Security: Jcode stores targets only, never SSH passwords.".to_string());
-            app.push_display_message(DisplayMessage::system(lines.join("\n")));
-        }
-        Err(error) => app.push_display_message(DisplayMessage::error(format!(
-            "Failed to load SSH remotes: {}",
-            error
-        ))),
-    }
-}
-
-fn show_ssh_status(app: &mut App) {
-    show_ssh_remotes(app);
-}
-
-fn connect_ssh_remote(app: &mut App, profile: crate::ssh_remote::SshRemoteProfile) {
-    if crate::ssh_remote::is_control_master_alive(&profile)
-        || crate::ssh_remote::can_connect_batch_mode(&profile)
-    {
-        app.push_display_message(DisplayMessage::system(format!(
-            "SSH remote {}
-
-Step 4/4: Connected.
-
-Jcode verified that {} is reachable through your system SSH client.
-
-What this means:
-  - Authentication is handled by OpenSSH / your SSH agent.
-  - Jcode did not see or store your password.
-  - The SSH connection setup is ready for remote Jcode tools.
-
-Next implementation step: start the remote Jcode server over this verified SSH connection.",
-            profile.name, profile.ssh_target
-        )));
-        app.set_status_notice(format!("SSH {} connected 4/4", profile.name));
-        return;
-    }
-
-    match crate::ssh_remote::spawn_control_master_terminal(&profile) {
-        Ok(true) => {
-            app.push_display_message(DisplayMessage::system(format!(
-                "SSH remote {}
-
-Step 2/4: Opening secure SSH login terminal.
-
-Jcode could not connect without an interactive login, so it opened a separate terminal running your system ssh command.
-
-What to expect in that terminal
-  1. OpenSSH may ask for your password or two-factor prompt.
-  2. You type credentials into OpenSSH, not into Jcode.
-  3. After login, SSH creates a temporary background control socket.
-  4. The terminal verifies that socket before closing.
-
-Security model
-  - Jcode cannot read what you type in the SSH terminal.
-  - Jcode stores only the target {}.
-  - Close or disconnect later with /ssh disconnect {}.",
-                profile.name, profile.ssh_target, profile.name
-            )));
-            app.set_status_notice("SSH setup 2/4: login terminal opened");
-        }
-        Ok(false) => app.push_display_message(DisplayMessage::system(format!(
-            "SSH remote {}
-
-Step 2/4: Manual login needed.
-
-Jcode could not open a terminal automatically. Run this command yourself:
-
-  ssh -f -M -S {} -N {}
-
-Type your password into that SSH prompt if asked. Jcode will not see or store it.",
-            profile.name,
-            crate::ssh_remote::control_socket_path(&profile.name)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "~/.jcode/ssh-control/remote.sock".to_string()),
-            profile.ssh_target
-        ))),
-        Err(error) => app.push_display_message(DisplayMessage::error(format!(
-            "Failed to open SSH login terminal: {}",
-            error
-        ))),
-    }
-}
-
-fn disconnect_ssh_remote(app: &mut App, name: &str) {
-    match crate::ssh_remote::find_profile(name) {
-        Ok(Some(profile)) => match crate::ssh_remote::disconnect(&profile) {
-            Ok(true) => {
-                app.push_display_message(DisplayMessage::system(format!(
-                    "Disconnected SSH remote {}.",
-                    name
-                )));
-                app.set_status_notice("SSH disconnected");
-            }
-            Ok(false) => app.push_display_message(DisplayMessage::system(format!(
-                "SSH remote {} did not have an active ControlMaster connection.",
-                name
-            ))),
-            Err(error) => app.push_display_message(DisplayMessage::error(format!(
-                "Failed to disconnect SSH remote {}: {}",
-                name, error
-            ))),
-        },
-        Ok(None) => app.push_display_message(DisplayMessage::error(format!(
-            "Unknown SSH remote {}. Use /ssh to list remotes.",
-            name
-        ))),
-        Err(error) => app.push_display_message(DisplayMessage::error(format!(
-            "Failed to load SSH remote {}: {}",
-            name, error
-        ))),
-    }
-}
-
-fn handle_btw_command(app: &mut App, trimmed: &str) -> bool {
-    if trimmed != "/btw" && !trimmed.starts_with("/btw ") {
-        return false;
-    }
-
-    let question = trimmed.strip_prefix("/btw").unwrap_or_default().trim();
-    if question.is_empty() {
-        app.push_display_message(DisplayMessage::error("Usage: /btw <question>".to_string()));
-        return true;
-    }
-
-    fork_session_with_prompt_local(app, Some(question));
-    true
-}
+#[path = "commands/info_commands.rs"]
+mod info_commands;
+#[allow(unused_imports)]
+pub(crate) use info_commands::*;
+
+#[path = "commands/ssh_commands.rs"]
+mod ssh_commands;
+#[allow(unused_imports)]
+pub(crate) use ssh_commands::*;
+
+pub(super) use super::btw::handle_btw_command;
 
 /// `/fork [prompt]` and `/split`: fork the current session into a new window.
 /// With a prompt, the forked session starts by answering it.
@@ -1387,8 +94,9 @@ fn handle_fork_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 /// Fork the current session (like `/split`) and, when given, deliver `prompt`
-/// as the first message of the forked session. Shared by `/btw <question>`,
-/// `/fork [prompt]`, and `/split`.
+/// as the first message of the forked session. Shared by `/fork [prompt]` and
+/// `/split`; `/btw` uses a side card instead and only annotates a prompt here on
+/// a remote daemon session.
 pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>) {
     // Images attached to the input belong to the prompt being forked off, so
     // they travel with it instead of lingering on the parent's next message.
@@ -1511,120 +219,6 @@ fn handle_back_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
-fn git_command_repo_dir(app: &App) -> Result<PathBuf, String> {
-    if let Some(path) = active_working_dir(app) {
-        if path.is_dir() {
-            return Ok(path);
-        }
-
-        return Err(format!(
-            "Unable to run /git: session working directory {} is not accessible from this jcode client.",
-            path.display()
-        ));
-    }
-
-    if app.is_remote {
-        return Err(
-            "Unable to run /git: the remote session does not have a working directory.".to_string(),
-        );
-    }
-
-    std::env::current_dir()
-        .map_err(|_| "Unable to determine a working directory for /git.".to_string())
-}
-
-fn run_git_command(repo_dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo_dir)
-        .output()
-        .map_err(|error| format!("Failed to run git {}: {}", args.join(" "), error))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let failure = if stderr.is_empty() {
-            format!(
-                "git {} exited with status {}",
-                args.join(" "),
-                output.status
-            )
-        } else {
-            stderr
-        };
-        return Err(failure);
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim_end()
-        .to_string())
-}
-
-fn build_git_status_message_for_dir(repo_dir: PathBuf) -> Result<String, String> {
-    let repo_root =
-        run_git_command(&repo_dir, &["rev-parse", "--show-toplevel"]).map_err(|error| {
-            format!(
-                "No git repository found for {}: {}",
-                repo_dir.display(),
-                error
-            )
-        })?;
-    let status = run_git_command(&repo_dir, &["status", "--short", "--branch"])?;
-
-    let repo_root_path = std::path::Path::new(&repo_root);
-    let relative_dir = repo_dir
-        .strip_prefix(repo_root_path)
-        .ok()
-        .and_then(|path| {
-            if path.as_os_str().is_empty() {
-                None
-            } else {
-                Some(path.display().to_string())
-            }
-        })
-        .unwrap_or_else(|| ".".to_string());
-
-    let heading = if relative_dir == "." {
-        format!("/git in {}", repo_root)
-    } else {
-        format!("/git in {} ({})", repo_root, relative_dir)
-    };
-
-    let status_block = status
-        .lines()
-        .map(|line| format!("  {}", line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(format!("{heading}\n\n{status_block}"))
-}
-
-fn handle_git_command(app: &mut App, trimmed: &str) -> bool {
-    if trimmed != "/git" && trimmed != "/git status" {
-        if trimmed.starts_with("/git ") {
-            app.push_display_message(DisplayMessage::error(
-                "Usage: /git or /git status".to_string(),
-            ));
-            return true;
-        }
-        return false;
-    }
-
-    let session_id = active_session_id(app);
-    match git_command_repo_dir(app) {
-        Ok(repo_dir) => {
-            app.set_status_notice("Git status loading...");
-            std::thread::spawn(move || {
-                let result = build_git_status_message_for_dir(repo_dir);
-                Bus::global().publish(BusEvent::GitStatusCompleted(GitStatusCompleted {
-                    session_id,
-                    result,
-                }));
-            });
-        }
-        Err(error) => app.push_display_message(DisplayMessage::error(error)),
-    }
-    true
-}
-
 fn transcript_opened_message(path: &std::path::Path) -> String {
     format!("Opened transcript file:\n\n  {}", path.display())
 }
@@ -1656,7 +250,7 @@ fn handle_transcript_command(app: &mut App, trimmed: &str) -> bool {
         }
     };
 
-    if !app.is_remote && app.session.id == session_id {
+    if !app.is_remote && app.session.id() == session_id {
         let _ = app.session.save();
     }
 
@@ -1688,537 +282,21 @@ pub(super) fn handle_git_status_completed(app: &mut App, completed: GitStatusCom
 
     match completed.result {
         Ok(message) => {
+            app.set_status_notice(if message.starts_with(GIT_DIFF_HEADING) {
+                "Git diff"
+            } else {
+                "Git status"
+            });
             app.push_display_message(DisplayMessage::system(message));
-            app.set_status_notice("Git status");
         }
         Err(error) => app.push_display_message(DisplayMessage::error(error)),
     }
 }
 
-pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
-    if handle_subagent_model_command(app, trimmed)
-        || app.handle_hotkeys_command(trimmed)
-        || app.handle_terminal_setup_command(trimmed)
-        || handle_subagent_command(app, trimmed)
-        || handle_observe_command(app, trimmed)
-        || handle_todos_view_command(app, trimmed)
-        || super::commands_overnight::handle_overnight_command(app, trimmed)
-        || super::split_view::handle_split_view_command(app, trimmed)
-        || handle_btw_command(app, trimmed)
-        || handle_fork_command(app, trimmed)
-        || handle_transcript_command(app, trimmed)
-        || handle_git_command(app, trimmed)
-        || handle_catchup_command(app, trimmed)
-        || handle_back_command(app, trimmed)
-        || handle_autoreview_command_local(app, trimmed)
-        || handle_autojudge_command_local(app, trimmed)
-        || handle_review_command_local(app, trimmed)
-        || handle_judge_command_local(app, trimmed)
-        || handle_selfdev_command(app, trimmed)
-    {
-        return true;
-    }
-
-    if super::commands_cloud::parse_cloud_command(trimmed).is_some() {
-        let session_id = active_session_id(app);
-        if matches!(
-            super::commands_cloud::parse_cloud_command(trimmed),
-            Some(
-                super::commands_cloud::CloudCommand::Move { .. }
-                    | super::commands_cloud::CloudCommand::MoveSelected { .. }
-            )
-        ) && let Err(error) = app.session.save_prepared()
-        {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Could not save this session before moving it: {error}. Nothing moved."
-            )));
-            return true;
-        }
-        super::commands_cloud::handle_cloud_command(app, trimmed, &session_id);
-        return true;
-    }
-
-    if trimmed == "/commit" {
-        handle_commit_command_local(app);
-        return true;
-    }
-
-    if trimmed == "/merge" {
-        handle_merge_command_local(app);
-        return true;
-    }
-
-    if trimmed == "/merge-remote-release" {
-        handle_merge_remote_release_command_local(app);
-        return true;
-    }
-
-    if trimmed == "/commit-push" || trimmed == "/commit-and-push" {
-        handle_commit_push_command_local(app);
-        return true;
-    }
-
-    if matches!(
-        trimmed,
-        "/fast-release" | "/cut-release" | "/commit-push-release"
-    ) {
-        handle_fast_release_command_local(app);
-        return true;
-    }
-
-    if trimmed == "/fast-macos-release" {
-        handle_fast_macos_release_command_local(app);
-        return true;
-    }
-
-    if trimmed == "/remote-release" {
-        handle_remote_release_command_local(app);
-        return true;
-    }
-
-    // After `/remote-release`: the parser claims only `/remote` + whitespace/end.
-    if super::commands_remote::handle_remote_command(app, trimmed) {
-        return true;
-    }
-
-    if trimmed == "/triage" || trimmed.starts_with("/triage ") {
-        let rest = trimmed.strip_prefix("/triage").unwrap_or_default();
-        handle_triage_command_local(app, rest);
-        return true;
-    }
-
-    if trimmed == "/resume" || trimmed == "/sessions" || trimmed == "/session" {
-        app.open_session_picker();
-        app.record_keybinding_slow(super::shortcut_hints::LearnableAction::Resume);
-        return true;
-    }
-
-    if trimmed == "/active" {
-        app.open_active_sessions_picker();
-        return true;
-    }
-
-    if let Some(command) = parse_plan_command(trimmed) {
-        handle_plan_command_local(app, command);
-        return true;
-    }
-
-    if let Some(command) = parse_improve_command(trimmed) {
-        match command {
-            Ok(command) => handle_improve_command_local(app, command),
-            Err(error) => app.push_display_message(DisplayMessage::error(error)),
-        }
-        return true;
-    }
-
-    if let Some(command) = parse_refactor_command(trimmed) {
-        match command {
-            Ok(command) => handle_refactor_command_local(app, command),
-            Err(error) => app.push_display_message(DisplayMessage::error(error)),
-        }
-        return true;
-    }
-
-    if trimmed == "/clear" {
-        reset_current_session(app);
-        return true;
-    }
-
-    if trimmed == "/cls" || trimmed == "/clear-view" {
-        app.clear_view_keep_context();
-        return true;
-    }
-
-    if trimmed == "/save" || trimmed.starts_with("/save ") {
-        let label = trimmed.strip_prefix("/save").unwrap_or_default().trim();
-        let label = if label.is_empty() {
-            None
-        } else {
-            Some(label.to_string())
-        };
-        app.session.mark_saved(label.clone());
-        if let Err(e) = app.session.save() {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to save session: {}",
-                e
-            )));
-            return true;
-        }
-        crate::tui::session_picker::invalidate_session_list_cache();
-        app.trigger_save_memory_extraction();
-        let name = app.session.display_name().to_string();
-        let msg = if let Some(ref lbl) = app.session.save_label {
-            format!(
-                "📌 Session {} saved as \"{}\". It will appear at the top of /resume.",
-                name, lbl,
-            )
-        } else {
-            format!(
-                "📌 Session {} saved. It will appear at the top of /resume.",
-                name,
-            )
-        };
-        app.push_display_message(DisplayMessage::system(msg));
-        app.set_status_notice("Session saved");
-        return true;
-    }
-
-    if trimmed == "/unsave" {
-        app.session.unmark_saved();
-        if let Err(e) = app.session.save() {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to save session: {}",
-                e
-            )));
-            return true;
-        }
-        crate::tui::session_picker::invalidate_session_list_cache();
-        let name = app.session.display_name().to_string();
-        app.push_display_message(DisplayMessage::system(format!(
-            "Removed bookmark from session {}.",
-            name,
-        )));
-        app.set_status_notice("Bookmark removed");
-        return true;
-    }
-
-    if trimmed == "/rename" || trimmed.starts_with("/rename ") {
-        let title = trimmed.strip_prefix("/rename").unwrap_or_default().trim();
-        if title.is_empty() {
-            app.push_display_message(DisplayMessage::error(
-                "Usage: /rename <session name> or /rename --clear".to_string(),
-            ));
-            return true;
-        }
-
-        if title == "--clear" {
-            app.session.rename_title(None);
-            if let Err(e) = app.session.save() {
-                app.push_display_message(DisplayMessage::error(format!(
-                    "Failed to clear session name: {}",
-                    e
-                )));
-                return true;
-            }
-            crate::tui::session_picker::invalidate_session_list_cache();
-            app.update_terminal_title();
-            let name = app.session.display_title_or_name().to_string();
-            app.push_display_message(DisplayMessage::system(format!(
-                "Cleared custom name. Session title is now {}.",
-                name,
-            )));
-            app.set_status_notice("Session name cleared");
-            return true;
-        }
-
-        app.session.rename_title(Some(title.to_string()));
-        if let Err(e) = app.session.save() {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to rename session: {}",
-                e
-            )));
-            return true;
-        }
-        crate::tui::session_picker::invalidate_session_list_cache();
-        app.update_terminal_title();
-        app.push_display_message(DisplayMessage::system(format!(
-            "Renamed session to {}.",
-            title,
-        )));
-        app.set_status_notice("Session renamed");
-        return true;
-    }
-
-    if trimmed == "/memory status" {
-        let default_enabled = crate::config::config().features.memory;
-        app.push_display_message(DisplayMessage::system(format!(
-            "Memory feature: {} (config default: {})",
-            if app.memory_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            },
-            if default_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        )));
-        return true;
-    }
-
-    if trimmed == "/memory" {
-        let new_state = !app.memory_enabled;
-        app.set_memory_feature_enabled(new_state);
-        let label = if new_state { "ON" } else { "OFF" };
-        app.set_status_notice(format!("Memory: {}", label));
-        app.push_display_message(DisplayMessage::system(format!(
-            "Memory feature {} for this session.",
-            if new_state { "enabled" } else { "disabled" }
-        )));
-        return true;
-    }
-
-    if trimmed == "/memory on" {
-        app.set_memory_feature_enabled(true);
-        app.set_status_notice("Memory: ON");
-        app.push_display_message(DisplayMessage::system(
-            "Memory feature enabled for this session.".to_string(),
-        ));
-        return true;
-    }
-
-    if trimmed == "/memory off" {
-        app.set_memory_feature_enabled(false);
-        app.set_status_notice("Memory: OFF");
-        app.push_display_message(DisplayMessage::system(
-            "Memory feature disabled for this session.".to_string(),
-        ));
-        return true;
-    }
-
-    if trimmed.starts_with("/memory ") {
-        app.push_display_message(DisplayMessage::error(
-            "Usage: /memory [on|off|status]".to_string(),
-        ));
-        return true;
-    }
-
-    if handle_test_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_disabled_mission_command(app, trimmed) {
-        return true;
-    }
-
-    if handle_goals_command(app, trimmed) {
-        return true;
-    }
-
-    if trimmed == "/swarm" || trimmed == "/swarm status" {
-        let default_enabled = crate::config::config().features.swarm;
-        app.push_display_message(DisplayMessage::system(format!(
-            "Swarm feature: {} (config default: {})",
-            if app.swarm_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            },
-            if default_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        )));
-        return true;
-    }
-
-    if trimmed == "/swarm on" {
-        app.set_swarm_feature_enabled(true);
-        app.set_status_notice("Swarm: ON");
-        app.push_display_message(DisplayMessage::system(
-            "Swarm feature enabled for this session.".to_string(),
-        ));
-        return true;
-    }
-
-    if trimmed == "/swarm off" {
-        app.set_swarm_feature_enabled(false);
-        app.set_status_notice("Swarm: OFF");
-        app.push_display_message(DisplayMessage::system(
-            "Swarm feature disabled for this session.".to_string(),
-        ));
-        return true;
-    }
-
-    if trimmed.starts_with("/swarm ") {
-        app.push_display_message(DisplayMessage::error(
-            "Usage: /swarm [on|off|status]".to_string(),
-        ));
-        return true;
-    }
-
-    if trimmed == "/rewind undo" {
-        let Some(snapshot) = app.rewind_undo_snapshot.take() else {
-            app.push_display_message(DisplayMessage::system("No rewind to undo.".to_string()));
-            return true;
-        };
-
-        let current_count = app.session.rewind_target_count();
-        let restored = snapshot.visible_message_count.saturating_sub(current_count);
-        app.session.replace_messages(snapshot.messages);
-        app.provider_session_id = snapshot.provider_session_id;
-        app.session.provider_session_id = snapshot.session_provider_session_id;
-        app.session.updated_at = chrono::Utc::now();
-        let provider_messages = app.session.messages_for_provider_uncached();
-        app.replace_provider_messages(provider_messages);
-
-        app.clear_display_messages();
-        // Drop any streaming mermaid preview tied to the transcript being
-        // replaced (defensive: submit_input's commit already clears it on the
-        // slash-command path, but direct callers must not leak the slot).
-        // ACTIVE_DIAGRAMS deliberately survives: undo RESTORES messages whose
-        // diagrams are already registered, and the body-cache prefix reuse in
-        // ui_prepare.rs means re-rendered-identical messages do not re-run the
-        // mermaid path (and so would never re-register if we cleared here).
-        app.clear_streaming_render_state();
-        for rendered in crate::session::render_messages(&app.session) {
-            app.push_display_message(DisplayMessage {
-                role: rendered.role,
-                content: rendered.content,
-                tool_calls: rendered.tool_calls,
-                duration_secs: None,
-                title: None,
-                tool_data: rendered.tool_data,
-            });
-        }
-
-        let _ = app.session.save();
-        app.push_display_message(DisplayMessage::system(format!(
-            "✓ Undid rewind. Restored {} message{}.",
-            restored,
-            if restored == 1 { "" } else { "s" }
-        )));
-        return true;
-    }
-
-    if trimmed == "/rewind" {
-        // Number the same rendered transcript entries `/rewind N` targets so
-        // the printed numbers always match what a rewind actually does
-        // (issue #432).
-        let rendered_targets: Vec<_> = crate::session::render_messages(&app.session)
-            .into_iter()
-            .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
-            .collect();
-        if rendered_targets.is_empty() {
-            app.push_display_message(DisplayMessage::system(
-                "No messages in conversation.".to_string(),
-            ));
-            return true;
-        }
-
-        let mut history = String::from("Conversation history:\n\n");
-        for (i, msg) in rendered_targets.iter().enumerate() {
-            let role_str = match msg.role.as_str() {
-                "user" => "👤 User",
-                "assistant" => "🤖 Assistant",
-                _ => "💬 Message",
-            };
-            let content = msg.content.replace('\n', " ");
-            let preview = crate::util::truncate_str(content.trim(), 80);
-            history.push_str(&format!("  {} {} - {}\n", i + 1, role_str, preview));
-        }
-        history.push_str("\nUse /rewind N to rewind to message N (removes all messages after). After rewinding, use /rewind undo to restore the removed messages.");
-
-        app.push_display_message(DisplayMessage::system(history).with_title("Rewind"));
-        return true;
-    }
-
-    if let Some(num_str) = trimmed.strip_prefix("/rewind ") {
-        let num_str = num_str.trim();
-        let targets = app.session.rewind_target_stored_indices();
-        let visible_count = targets.len();
-        match num_str.parse::<usize>() {
-            Ok(n) if n > 0 && n <= visible_count => {
-                let removed = visible_count - n;
-                app.rewind_undo_snapshot = Some(LocalRewindUndoSnapshot {
-                    messages: app.session.messages.clone(),
-                    provider_session_id: app.provider_session_id.clone(),
-                    session_provider_session_id: app.session.provider_session_id.clone(),
-                    visible_message_count: visible_count,
-                });
-                app.session.truncate_messages(targets[n - 1] + 1);
-                let provider_messages = app.session.messages_for_provider_uncached();
-                app.replace_provider_messages(provider_messages);
-                app.session.updated_at = chrono::Utc::now();
-
-                app.clear_display_messages();
-                // Same defensive preview clear as /rewind undo above.
-                // ACTIVE_DIAGRAMS survives here too: messages BEFORE the
-                // rewind point are retained, and body-cache prefix reuse
-                // (ui_prepare.rs build_body_from_base) skips re-rendering
-                // them, so clearing the registry would orphan the pinned
-                // pane / margin widget for diagrams that are still in the
-                // transcript. Diagrams from rewound-away messages leak until
-                // eviction (ACTIVE_DIAGRAMS_MAX) - a pinned, known tradeoff
-                // (tests/swarm_plan_graph_inline.rs).
-                app.clear_streaming_render_state();
-                for rendered in crate::session::render_messages(&app.session) {
-                    app.push_display_message(DisplayMessage {
-                        role: rendered.role,
-                        content: rendered.content,
-                        tool_calls: rendered.tool_calls,
-                        duration_secs: None,
-                        title: None,
-                        tool_data: rendered.tool_data,
-                    });
-                }
-
-                app.provider_session_id = None;
-                app.session.provider_session_id = None;
-                let _ = app.session.save();
-
-                app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Rewound to message {}. Removed {} message{}. Undo anytime with /rewind undo.",
-                    n,
-                    removed,
-                    if removed == 1 { "" } else { "s" }
-                )));
-            }
-            Ok(n) => {
-                app.push_display_message(DisplayMessage::error(format!(
-                    "Invalid message number: {}. Valid range: 1-{}",
-                    n, visible_count
-                )));
-            }
-            Err(_) => {
-                app.push_display_message(DisplayMessage::error(format!(
-                    "Usage: /rewind N where N is a message number (1-{})",
-                    visible_count
-                )));
-            }
-        }
-        return true;
-    }
-
-    if let Some(command) = parse_poke_command(trimmed) {
-        match command {
-            Err(error) => app.push_display_message(DisplayMessage::error(error)),
-            Ok(PokeCommand::Status) => {
-                app.push_display_message(DisplayMessage::system(poke_status_message(app)));
-            }
-            Ok(PokeCommand::Off) => {
-                let cleared = disable_auto_poke(app);
-                app.set_status_notice("Poke: OFF");
-                app.push_display_message(DisplayMessage::system(poke_disabled_message(cleared)));
-            }
-            Ok(PokeCommand::Trigger | PokeCommand::On) => {
-                activate_auto_poke_local(app);
-            }
-        }
-
-        return true;
-    }
-
-    if trimmed == "/transfer" {
-        if app.is_remote {
-            app.push_display_message(DisplayMessage::error(
-                "/transfer requires an active connected session in remote mode.".to_string(),
-            ));
-        } else {
-            handle_transfer_command_local(app);
-        }
-        return true;
-    }
-
-    if trimmed.starts_with("/transfer ") {
-        app.push_display_message(DisplayMessage::error("Usage: /transfer".to_string()));
-        return true;
-    }
-
-    false
-}
+#[path = "commands/session_command.rs"]
+mod session_command;
+#[allow(unused_imports)]
+pub(crate) use session_command::*;
 
 pub(super) fn build_merge_prompt() -> String {
     String::from(
@@ -2769,9 +847,9 @@ pub(super) fn active_session_id(app: &App) -> String {
     if app.is_remote {
         app.remote_session_id
             .clone()
-            .unwrap_or_else(|| app.session.id.clone())
+            .unwrap_or_else(|| app.session.id().to_owned())
     } else {
-        app.session.id.clone()
+        app.session.id().to_owned()
     }
 }
 
@@ -2802,26 +880,21 @@ fn todo_confidence_weight(priority: &str) -> u32 {
     }
 }
 
-fn weighted_confidence_average(scores: impl IntoIterator<Item = (u8, u32)>) -> Option<u8> {
+fn weighted_confidence_average(
+    scores: impl IntoIterator<Item = (crate::todo::ConfidenceState, u32)>,
+) -> Option<crate::todo::ConfidenceState> {
     let mut weighted_sum = 0u32;
     let mut total_weight = 0u32;
-    for (score, weight) in scores {
-        weighted_sum += u32::from(score) * weight;
+    for (state, weight) in scores {
+        weighted_sum += u32::from(state.level()) * weight;
         total_weight += weight;
     }
     if total_weight == 0 {
         None
     } else {
-        Some(((weighted_sum + total_weight / 2) / total_weight) as u8)
-    }
-}
-
-pub(super) fn build_todo_confidence_summary_message(todos: &[crate::todo::TodoItem]) -> String {
-    let summary = todo_confidence_summary(todos);
-    if summary.confidence_spike_detected && !summary.completion_confidence_needs_validation {
-        crate::todo::build_todo_confidence_spike_continuation_message(todos)
-    } else {
-        crate::todo::build_todo_completion_continuation_message(todos)
+        Some(crate::todo::ConfidenceState::from_level(
+            ((weighted_sum + total_weight / 2) / total_weight) as u8,
+        ))
     }
 }
 
@@ -2841,7 +914,7 @@ pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoCo
     let completion_average = weighted_confidence_average(
         completion_states
             .iter()
-            .map(|(_, state, weight)| (state.legacy_score(), *weight)),
+            .map(|(_, state, weight)| (*state, *weight)),
     );
     let missing_completion_confidence = completed
         .iter()
@@ -2866,13 +939,15 @@ pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoCo
 }
 
 pub(super) fn active_working_dir(app: &App) -> Option<std::path::PathBuf> {
-    app.session
-        .working_dir
-        .as_deref()
-        .map(std::path::PathBuf::from)
+    app.session.working_dir().map(std::path::PathBuf::from)
 }
 
 pub(super) fn handle_dictation_command(app: &mut App, trimmed: &str) -> bool {
+    if let Some(rest) = slash_command_rest(trimmed, "/voice history") {
+        let notice = app.jarvis_listener.queue_history(rest);
+        app.set_status_notice(notice);
+        return true;
+    }
     if trimmed == "/voice" {
         app.toggle_voice_input();
         return true;
@@ -3071,7 +1146,7 @@ pub(super) fn handle_latex_command(app: &mut App, trimmed: &str) -> bool {
     };
     let arg = rest.trim();
 
-    let current = crate::config::config().display.latex_rendering;
+    let current = crate::config::config().display.render_prefs().latex;
     if arg.is_empty() || arg.eq_ignore_ascii_case("status") {
         app.push_display_message(DisplayMessage::system(format!(
             "LaTeX rendering: {} (use /latex [on|off|none|unicode|image|status])\n\n  none    - keep raw $...$ source\n  unicode - terminal-friendly text math\n  image   - typeset PNG per formula (needs latex+dvipng or pdflatex+pdftocairo)",
@@ -3094,7 +1169,7 @@ pub(super) fn handle_latex_command(app: &mut App, trimmed: &str) -> bool {
 
     match crate::config::Config::set_latex_rendering(mode) {
         Ok(()) => {
-            let effective = crate::config::config().display.latex_rendering;
+            let effective = crate::config::config().display.render_prefs().latex;
             app.set_status_notice(format!("LaTeX rendering: {}", effective.as_str()));
             let override_note = if effective != mode {
                 " JCODE_LATEX_RENDERING overrides the saved mode."
@@ -3112,7 +1187,7 @@ pub(super) fn handle_latex_command(app: &mut App, trimmed: &str) -> bool {
             "Failed to set LaTeX rendering to {}: {}. Nothing changed; the session keeps {}.",
             mode.as_str(),
             error,
-            crate::config::config().display.latex_rendering.as_str()
+            crate::config::config().display.render_prefs().latex.as_str()
         ))),
     }
     true
@@ -3187,7 +1262,7 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
             return true;
         }
     };
-    let path = match ensure_swarm_prompt_edit_path(app.session.working_dir.as_deref(), &jcode_dir) {
+    let path = match ensure_swarm_prompt_edit_path(app.session.working_dir(), &jcode_dir) {
         Ok(path) => path,
         Err(error) => {
             app.push_display_message(DisplayMessage::error(format!(
@@ -3581,6 +1656,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                             duration_secs: None,
                             title: None,
                             tool_data: None,
+                            codemode: None,
+                            ask: None,
                         });
                     }
                     Err(reason) => {
@@ -3595,6 +1672,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                             duration_secs: None,
                             title: None,
                             tool_data: None,
+                            codemode: None,
+                            ask: None,
                         });
                     }
                 }
@@ -3607,6 +1686,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
+                    ask: None,
                 });
             }
         }
@@ -3636,6 +1717,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
         return true;
     }
@@ -3654,6 +1737,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
+                    ask: None,
                 });
             }
             Err(e) => {
@@ -3664,6 +1749,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
+                    ask: None,
                 });
             }
         }
@@ -3683,6 +1770,8 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
+                    ask: None,
                 });
                 return true;
             }
@@ -3781,81 +1870,17 @@ pub(super) fn handle_feedback_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
-/// `/telemetry [all|none|<category> on|off]` - show or change the same
-/// per-category telemetry choices offered by the onboarding "Telemetry settings"
-/// page, so the promise made there ("change this later with /telemetry") holds.
+/// `/telemetry` - this build has telemetry removed; there is nothing to configure.
 pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("/telemetry") else {
         return false;
     };
-    if !rest.is_empty()
-        && !rest
-            .chars()
-            .next()
-            .map(|c| c.is_whitespace())
-            .unwrap_or(false)
-    {
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return false;
     }
-
-    use crate::telemetry::TelemetryCategory;
-    use crate::tui::app::onboarding_flow::status_label_for;
-    let args: Vec<String> = rest
-        .split_whitespace()
-        .map(|a| a.to_ascii_lowercase())
-        .collect();
-    let mut checked = crate::telemetry::category_settings();
-    let parse_on = |v: &str| match v {
-        "on" | "yes" | "true" | "1" => Some(true),
-        "off" | "no" | "false" | "0" => Some(false),
-        _ => None,
-    };
-    let usage = "Usage: /telemetry [all|none] or /telemetry <category> on|off. Categories: content, usage, crashes, features, cost, accounts.";
-    match args.as_slice() {
-        [] => {
-            let mut text = String::from("Telemetry settings:\n");
-            for (i, category) in TelemetryCategory::ALL.into_iter().enumerate() {
-                text.push_str(&format!(
-                    "  [{}] {} ({}): {}\n",
-                    if checked[i] { "x" } else { " " },
-                    category.label(),
-                    category.key(),
-                    category.caption()
-                ));
-            }
-            if crate::telemetry::opt_out_forced_by_env() {
-                text.push_str("Your environment disables all telemetry (JCODE_NO_TELEMETRY / DO_NOT_TRACK).\n");
-            }
-            text.push_str(usage);
-            app.push_display_message(DisplayMessage::system(text));
-            app.set_status_notice(status_label_for(checked));
-            return true;
-        }
-        [all] if matches!(all.as_str(), "all" | "everything" | "on") => checked = [true; 6],
-        [none] if matches!(none.as_str(), "none" | "nothing" | "off") => checked = [false; 6],
-        [all, value] if all == "all" && parse_on(value).is_some() => {
-            checked = [parse_on(value).unwrap_or(false); 6]
-        }
-        [key, value] => match (TelemetryCategory::from_key(key), parse_on(value)) {
-            (Some(category), Some(on)) => {
-                if let Some(i) = TelemetryCategory::ALL.iter().position(|c| *c == category) {
-                    checked[i] = on;
-                }
-            }
-            _ => {
-                app.push_display_message(DisplayMessage::error(usage.to_string()));
-                return true;
-            }
-        },
-        _ => {
-            app.push_display_message(DisplayMessage::error(usage.to_string()));
-            return true;
-        }
-    }
-    crate::telemetry::set_category_settings(checked);
-    let label = status_label_for(checked);
-    app.push_display_message(DisplayMessage::system(label.clone()));
-    app.set_status_notice(label);
+    app.push_display_message(DisplayMessage::system(
+        "Telemetry is disabled in this build. Nothing is collected or sent, and there are no settings to change.",
+    ));
     true
 }
 

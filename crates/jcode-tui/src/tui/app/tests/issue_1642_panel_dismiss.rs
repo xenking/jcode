@@ -3,8 +3,8 @@ fn test_side_panel_dismiss_rendered_click_preserves_pages_and_reopens() {
     let _lock = scroll_render_test_lock();
     for fullscreen in [false, true] {
         let mut app = create_test_app();
-        app.diagram_mode = crate::config::DiagramDisplayMode::None;
-        app.diagram_pane_enabled = false;
+        app.diagram.mode = crate::config::DiagramDisplayMode::None;
+        app.diagram.enabled = false;
         app.side_panel = test_side_panel_snapshot("plan", &"Long title ".repeat(30));
         let mut linked = app.side_panel.pages[0].clone();
         linked.id = "linked".to_string();
@@ -78,8 +78,8 @@ fn test_side_panel_dismiss_rendered_click_preserves_pages_and_reopens() {
 fn test_side_panel_restore_button_click_and_expiry() {
     let _lock = scroll_render_test_lock();
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     app.side_panel = test_side_panel_snapshot("plan", "Plan");
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
     app.dismiss_side_panel();

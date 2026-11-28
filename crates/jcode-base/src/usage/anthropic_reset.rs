@@ -5,13 +5,18 @@
 //! account's reset for the week.
 
 use super::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const API_BASE: &str = "https://api.anthropic.com";
 const STATUS_PATH: &str = "/api/oauth/usage?at_wall=1&skip_spend=1";
 const PROFILE_PATH: &str = "/api/oauth/profile";
 /// Server-side program name of the weekly session-limit reset.
 const PROGRAM: &str = "juniper_tide";
+
+#[derive(Serialize)]
+struct ResetRequest {
+    program: &'static str,
+}
 
 pub use jcode_usage_types::AnthropicLimitResetOffer;
 
@@ -35,7 +40,7 @@ struct StatusBlock {
 
 /// Parse the status block from an at-wall usage response. `None` means the
 /// account is not offered resets at all, so no reset control should appear.
-fn offer_from_status(
+pub(super) fn offer_from_status(
     value: &serde_json::Value,
     account_label: Option<&str>,
 ) -> Option<AnthropicLimitResetOffer> {
@@ -61,25 +66,28 @@ pub(super) fn authorize(
     request: reqwest::RequestBuilder,
     access_token: &str,
 ) -> reqwest::RequestBuilder {
-    crate::provider::anthropic::apply_oauth_attribution_headers(
-        request
-            .bearer_auth(access_token)
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-            .header(
-                "User-Agent",
-                crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
-            )
-            .header("anthropic-beta", "oauth-2025-04-20"),
-        &crate::provider::anthropic::new_oauth_request_id(),
-    )
+    crate::provider::anthropic::apply_claude_account_headers(request, access_token)
 }
 
+#[cfg(test)]
 pub(super) fn reset_client() -> Result<reqwest::Client> {
+    reset_builder()
+        .build()
+        .context("Could not create the Claude reset client")
+}
+
+fn reset_builder() -> reqwest::ClientBuilder {
     // Never follow redirects with credentials or retry the claim automatically.
     reqwest::Client::builder()
         .timeout(Duration::from_secs(35))
         .redirect(reqwest::redirect::Policy::none())
+}
+
+/// The reset client for one stored login, through that login's egress.
+pub(super) async fn reset_client_for(account_label: Option<&str>) -> Result<reqwest::Client> {
+    crate::egress::transport("claude", account_label)
+        .await?
+        .apply(reset_builder())?
         .build()
         .context("Could not create the Claude reset client")
 }
@@ -142,9 +150,12 @@ pub(super) fn cached_limit_reset_offer(
 // remain unknown and must not be displayed as a confirmed empty balance.
 fn explicitly_ineligible(value: &serde_json::Value) -> bool {
     value
-        .pointer("/juniper_tide/eligible")
-        .and_then(|v| v.as_bool())
-        == Some(false)
+        .get("juniper_tide")
+        .is_none_or(|block| !super::anthropic_banked::not_evaluated(block))
+        && value
+            .pointer("/juniper_tide/eligible")
+            .and_then(|v| v.as_bool())
+            == Some(false)
 }
 
 /// A confirmation pins the login, organization and token, so switching the
@@ -270,7 +281,13 @@ pub async fn prepare_anthropic_limit_reset(
     account_label: Option<String>,
 ) -> Result<std::result::Result<PendingAnthropicLimitReset, AnthropicLimitResetUnavailable>> {
     let access_token = fresh_access_token(account_label.as_deref()).await?;
-    prepare_with_token(&reset_client()?, API_BASE, access_token, account_label).await
+    prepare_with_token(
+        &reset_client_for(account_label.as_deref()).await?,
+        API_BASE,
+        access_token,
+        account_label,
+    )
+    .await
 }
 
 async fn prepare_with_token(
@@ -375,7 +392,12 @@ impl AnthropicLimitResetOutcome {
 pub async fn consume_anthropic_limit_reset(
     pending: &PendingAnthropicLimitReset,
 ) -> Result<AnthropicLimitResetOutcome> {
-    let result = consume_with_client(&reset_client()?, API_BASE, pending).await;
+    let result = consume_with_client(
+        &reset_client_for(pending.account_label.as_deref()).await?,
+        API_BASE,
+        pending,
+    )
+    .await;
     // Invalidate even on uncertain errors: a timed-out claim may have applied.
     invalidate_anthropic_usage_reset_state(pending.account_label.as_deref());
     result
@@ -392,7 +414,7 @@ async fn consume_with_client(
     );
     let result = async {
         let response = authorize(client.post(url), &pending.access_token)
-            .json(&serde_json::json!({ "program": PROGRAM }))
+            .json(&ResetRequest { program: PROGRAM })
             .send()
             .await
             .context("Could not receive the Claude reset result")?;
@@ -416,12 +438,24 @@ async fn consume_with_client(
 /// reset. Only local state changes, so this is safe to repeat.
 pub fn invalidate_anthropic_usage_reset_state(account_label: Option<&str>) {
     super::cache::invalidate_anthropic_usage_after_reset(account_label);
-    if let Some(label) = account_label {
-        super::banked::record_anthropic_offer(label, None);
-    }
     crate::provider::clear_claude_provider_unavailability_for_account_label(account_label);
 }
 
 #[cfg(test)]
 #[path = "anthropic_reset_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod request_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn reset_request_matches_legacy_bytes_without_sending() {
+        let expected = serde_json::to_vec(&serde_json::json!({ "program": PROGRAM })).unwrap();
+        let builder = reqwest::Client::new()
+            .post("https://example.invalid/reset")
+            .json(&ResetRequest { program: PROGRAM });
+        let request = builder.build().unwrap();
+        assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+    }
+}

@@ -375,11 +375,8 @@ impl Transport for NativeSshTransport {
     fn shutdown_handle(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
         let tx = self.outgoing.clone();
         Some(Arc::new(move || {
-            match tx.send(Outgoing::Close) {
-                Ok(()) => {}
-                // The worker has already stopped, which satisfies shutdown.
-                Err(_) => {}
-            }
+            // A closed channel already satisfies shutdown.
+            drop(tx.send(Outgoing::Close));
         }))
     }
 
@@ -410,6 +407,7 @@ impl JcodeClient {
                 request_timeout: options.request_timeout.or(Some(options.connect_timeout)),
                 ensure_runtime: false,
                 supports_user_response: false,
+                supports_applets: false,
             },
         )
     }
@@ -620,6 +618,7 @@ mod tests {
                 v: API_VERSION_MAJOR,
                 reply_to: hello["id"].as_u64(),
                 event: ApiEvent::HelloOk {
+                    runtime_identity: None,
                     version: API_VERSION_MAJOR,
                     server: "fake".into(),
                     capabilities: vec![],

@@ -1,58 +1,3 @@
-/// Regression: the completion-gate circuit breaker clears
-/// `auto_poke_incomplete_todos`, and the only restore used to live in the
-/// all-complete branch. Since the breaker can only trip while every todo is
-/// complete, an agent that added open work immediately afterwards left
-/// auto-poke disarmed for the rest of the session, and the guard at the top
-/// of `schedule_auto_poke_followup_if_needed` returned false immediately.
-#[test]
-fn test_open_work_rearms_auto_poke_after_completion_gate_breaker() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-
-        crate::todo::save_todos(
-            &app.session.id,
-            &[crate::todo::TodoItem {
-                lane_after: None,
-                lane_owner: None,
-                stage: None,
-                details: None,
-                group: None,
-                id: "open".to_string(),
-                content: "Still open".to_string(),
-                status: "in_progress".to_string(),
-                priority: "high".to_string(),
-                blocked_by: Vec::new(),
-                assigned_to: None,
-                confidence: None,
-                completion_confidence: None,
-                confidence_history: Vec::new(),
-                waiting_reason: None,
-                requires_user_auth: None,
-                waiting_on: Vec::new(),
-            }],
-        )
-        .expect("save todos");
-
-        // The exact state the circuit breaker leaves behind: flag cleared,
-        // configured default still on, nothing else touched.
-        app.auto_poke_default_on = true;
-        app.auto_poke_incomplete_todos = false;
-        app.last_auto_poke_fingerprint = None;
-        app.final_response_todo_fingerprint = None;
-        app.todo_final_response_requested = false;
-        app.pending_queued_dispatch = false;
-        app.pending_turn = false;
-
-        let poked = app.schedule_auto_poke_followup_if_needed();
-
-        assert!(
-            app.auto_poke_incomplete_todos,
-            "open work must re-arm auto-poke after the completion-gate breaker"
-        );
-        assert!(poked, "open work must still produce a poke");
-    });
-}
-
 include!("model_picker_startup_tests.rs");
 
 #[test]
@@ -61,8 +6,10 @@ fn test_cloud_handoff_defers_turn_end_auto_poke_without_disarming_it() {
         for command in ["/cloud", "/local"] {
             let mut app = create_test_app();
             crate::todo::save_todos(
-                &app.session.id,
+                app.session.id(),
                 &[crate::todo::TodoItem {
+                    lane_speed: None,
+                    lane_profile: None,
                     lane_after: None,
                     lane_owner: None,
                     stage: None,
@@ -86,7 +33,7 @@ fn test_cloud_handoff_defers_turn_end_auto_poke_without_disarming_it() {
             app.auto_poke_default_on = true;
             app.auto_poke_incomplete_todos = true;
             app.is_processing = true;
-            let session = app.session.id.clone();
+            let session = app.session.id().to_owned();
             assert!(super::commands_cloud::handle_cloud_command(
                 &mut app, command, &session
             ));
@@ -174,6 +121,8 @@ impl AuthUxStateSpaceProvider {
         let mut routes = Vec::new();
         if self.include_wrong_profile_first {
             routes.push(crate::provider::ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "wrong-profile-first".to_string(),
                 provider: self.provider_label.to_string(),
                 api_method: "openai-compatible:other-provider".to_string(),
@@ -185,10 +134,14 @@ impl AuthUxStateSpaceProvider {
                 },
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
         for model in self.models {
             routes.push(crate::provider::ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: (*model).to_string(),
                 provider: self.provider_label.to_string(),
                 api_method: format!("openai-compatible:{}", self.provider_id),
@@ -200,9 +153,13 @@ impl AuthUxStateSpaceProvider {
                 },
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
             if self.include_generic_profile_duplicate {
                 routes.push(crate::provider::ModelRoute {
+                    speed_options: Vec::new(),
+                    reasoning_efforts: None,
                     model: (*model).to_string(),
                     provider: self.provider_label.to_string(),
                     api_method: "openai-compatible".to_string(),
@@ -214,6 +171,8 @@ impl AuthUxStateSpaceProvider {
                     },
                     usage: None,
                     cheapness: None,
+                    account: None,
+                    icon: None,
                 });
             }
         }
@@ -225,6 +184,8 @@ impl MixedModelRoutesProvider {
     fn routes() -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "gpt-5.5".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -232,8 +193,12 @@ impl MixedModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "claude-opus-4-6".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-oauth".to_string(),
@@ -241,8 +206,12 @@ impl MixedModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "Qwen/Qwen3-Coder-480B-A35B-Instruct".to_string(),
                 provider: "Chutes".to_string(),
                 api_method: "openai-compatible:chutes".to_string(),
@@ -250,8 +219,12 @@ impl MixedModelRoutesProvider {
                 detail: "https://llm.chutes.ai/v1".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             crate::provider::ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
@@ -259,6 +232,8 @@ impl MixedModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ]
     }
@@ -503,6 +478,8 @@ impl Provider for CountingModelRoutesProvider {
         }
         (0..self.route_count)
             .map(|idx| crate::provider::ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: if idx < 26 {
                     format!("counting-{}", (b'a' + idx as u8) as char)
                 } else {
@@ -514,6 +491,8 @@ impl Provider for CountingModelRoutesProvider {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             })
             .collect()
     }
@@ -525,65 +504,67 @@ impl Provider for CountingModelRoutesProvider {
 
 #[test]
 fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
-    ensure_test_jcode_home_if_unset();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        clear_persisted_test_ui_state();
+        crate::tui::ui::clear_test_render_state_for_tests();
 
-    let calls = StdArc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
-        calls: StdArc::clone(&calls),
-        route_count: 400,
-        delay: Duration::from_millis(25),
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
+            calls: StdArc::clone(&calls),
+            route_count: 400,
+            delay: Duration::from_millis(25),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+        for c in "/subagent-model".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        wait_for_model_picker_load(&mut app);
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("subagent model picker should be open");
+        assert!(picker.preview);
+        assert_eq!(picker.entries.len(), 401, "400 models plus inherit");
+        assert!(matches!(
+            picker.entries[0].action,
+            crate::tui::PickerAction::SubagentModelChoice { inherit: true }
+        ));
+        let calls_after_load = calls.load(Ordering::SeqCst);
+
+        for _ in 0..10 {
+            app.handle_key(KeyCode::Down, KeyModifiers::empty())
+                .unwrap();
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            calls_after_load,
+            "navigation must not rebuild or re-query the model catalog"
+        );
+
+        app.handle_key(KeyCode::Char('3'), KeyModifiers::empty())
+            .unwrap();
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        assert!(
+            !picker.filtered.is_empty(),
+            "typed input should filter models"
+        );
+        assert!(picker.filtered.len() < picker.entries.len());
+
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+        assert!(app.session.subagent_model().is_some());
+        assert_eq!(app.provider.model(), "counting-a");
     });
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-    let mut app = App::new_for_test_harness(provider, registry);
-    app.queue_mode = false;
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
-
-    for c in "/subagent-model".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
-            .unwrap();
-    }
-    wait_for_model_picker_load(&mut app);
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("subagent model picker should be open");
-    assert!(picker.preview);
-    assert_eq!(picker.entries.len(), 401, "400 models plus inherit");
-    assert!(matches!(
-        picker.entries[0].action,
-        crate::tui::PickerAction::SubagentModelChoice { inherit: true }
-    ));
-    let calls_after_load = calls.load(Ordering::SeqCst);
-
-    for _ in 0..10 {
-        app.handle_key(KeyCode::Down, KeyModifiers::empty())
-            .unwrap();
-    }
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        calls_after_load,
-        "navigation must not rebuild or re-query the model catalog"
-    );
-
-    app.handle_key(KeyCode::Char('3'), KeyModifiers::empty())
-        .unwrap();
-    let picker = app.inline_interactive_state.as_ref().unwrap();
-    assert!(
-        !picker.filtered.is_empty(),
-        "typed input should filter models"
-    );
-    assert!(picker.filtered.len() < picker.entries.len());
-
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
-    assert!(app.session.subagent_model.is_some());
-    assert_eq!(app.provider.model(), "counting-a");
 }
 
 #[test]
@@ -591,7 +572,6 @@ fn test_model_picker_reuses_cached_entries_until_invalidated() {
     // The cache key includes account/config paths. Keep them stable while
     // account-selection regressions scope their own temporary homes.
     let _env_lock = crate::storage::lock_test_env();
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -632,7 +612,6 @@ fn test_model_picker_reuses_cached_entries_until_invalidated() {
 
 #[test]
 fn test_shift_tab_model_favorite_hotkey_preserves_input_line() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -661,7 +640,6 @@ fn test_shift_tab_model_favorite_hotkey_preserves_input_line() {
 
 #[test]
 fn test_new_local_session_does_not_run_post_login_model_refresh() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
 
     let authed = StdArc::new(AtomicBool::new(false));
@@ -709,7 +687,6 @@ fn test_new_local_session_does_not_run_post_login_model_refresh() {
 
 #[test]
 fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -769,7 +746,7 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
         app.inline_interactive_state.is_none(),
         "activation completion should still not open /model automatically"
     );
-    assert_eq!(app.session.model.as_deref(), Some("state-space-alpha"));
+    assert_eq!(app.session.model(), Some("state-space-alpha"));
     let last = app.display_messages.last().expect("activation message");
     assert!(last.content.contains("Added models:"));
     assert!(last.content.contains("state-space-alpha"));
@@ -781,7 +758,7 @@ fn test_tui_api_key_auth_refreshes_catalog_shows_diff_without_opening_picker() {
         &mut app,
         "/model state-space-beta"
     ));
-    assert_eq!(app.session.model.as_deref(), Some("state-space-beta"));
+    assert_eq!(app.session.model(), Some("state-space-beta"));
     assert_eq!(
         app.status_notice(),
         Some("Model → state-space-beta".to_string())
@@ -805,7 +782,6 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
     ]);
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -844,18 +820,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         .content
         .clone();
     assert!(prompt.contains("Cerebras API Key"), "{prompt}");
-    assert!(
-        prompt.contains("Stored variable: CEREBRAS_API_KEY"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("Endpoint: https://api.cerebras.ai/v1"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("Suggested default model: gpt-oss-120b"),
-        "{prompt}"
-    );
+    assert!(prompt.contains("Default model: gpt-oss-120b"), "{prompt}");
     assert!(prompt.contains("Paste your API key below"), "{prompt}");
 
     let pending = app
@@ -889,11 +854,9 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                         .unwrap()
                         .join("cerebras.env");
                     assert!(
-                        login
-                            .message
-                            .contains(&format!("Stored at {}.", expected_path.display())),
-                        "{}",
-                        login.message
+                        expected_path.exists(),
+                        "expected saved key file at {}",
+                        expected_path.display()
                     );
                     assert!(login.message.contains("Fetching models now."));
                     assert!(!login.message.contains("did not switch models"));
@@ -1006,11 +969,8 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         activation_events, 1,
         "expected exactly one provider activation event"
     );
-    assert_eq!(
-        app.session.model.as_deref(),
-        Some("qwen-3-235b-a22b-instruct-2507")
-    );
-    assert_eq!(app.session.provider_key.as_deref(), Some("cerebras"));
+    assert_eq!(app.session.model(), Some("qwen-3-235b-a22b-instruct-2507"));
+    assert_eq!(app.session.provider_key(), Some("cerebras"));
     assert_eq!(
         set_model_requests.lock().unwrap().as_slice(),
         ["cerebras:qwen-3-235b-a22b-instruct-2507"],
@@ -1118,8 +1078,8 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
     app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::empty())
         .expect("Cerebras picker selection should switch models");
 
-    assert_eq!(app.session.model.as_deref(), Some("llama3.1-8b"));
-    assert_eq!(app.session.provider_key.as_deref(), Some("cerebras"));
+    assert_eq!(app.session.model(), Some("llama3.1-8b"));
+    assert_eq!(app.session.provider_key(), Some("cerebras"));
     assert_eq!(app.provider.model(), "llama3.1-8b");
     assert_eq!(
         set_model_requests.lock().unwrap().as_slice(),
@@ -1130,67 +1090,70 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
 
 #[test]
 fn test_tui_openai_compatible_empty_catalog_does_not_switch_to_profile_default() {
-    ensure_test_jcode_home_if_unset();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        clear_persisted_test_ui_state();
+        crate::tui::ui::clear_test_render_state_for_tests();
 
-    let refreshes = StdArc::new(AtomicUsize::new(0));
-    let set_model_attempts = StdArc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn Provider> = Arc::new(EmptyPostLoginCatalogProvider {
-        refreshes: StdArc::clone(&refreshes),
-        set_model_attempts: StdArc::clone(&set_model_attempts),
-    });
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-    let mut app = App::new_for_test_harness(provider, registry);
-    app.queue_mode = false;
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+        let refreshes = StdArc::new(AtomicUsize::new(0));
+        let set_model_attempts = StdArc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(EmptyPostLoginCatalogProvider {
+            refreshes: StdArc::clone(&refreshes),
+            set_model_attempts: StdArc::clone(&set_model_attempts),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
 
-    let mut bus_rx = crate::bus::Bus::global().subscribe();
-    while bus_rx.try_recv().is_ok() {}
+        let mut bus_rx = crate::bus::Bus::global().subscribe();
+        while bus_rx.try_recv().is_ok() {}
 
-    let _guard = rt.enter();
-    app.start_openai_compatible_post_login_activation(
-        "cerebras".to_string(),
-        "Cerebras".to_string(),
-    );
+        let _guard = rt.enter();
+        app.start_openai_compatible_post_login_activation(
+            "cerebras".to_string(),
+            "Cerebras".to_string(),
+        );
 
-    let activity = rt.block_on(async {
-        loop {
-            match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
-                Ok(Ok(crate::bus::BusEvent::ProviderModelActivated { .. })) => {
-                    panic!("empty catalog must not activate a provider model")
+        let activity = rt.block_on(async {
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), bus_rx.recv()).await {
+                    Ok(Ok(crate::bus::BusEvent::ProviderModelActivated { .. })) => {
+                        panic!("empty catalog must not activate a provider model")
+                    }
+                    Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => {
+                        panic!(
+                            "empty local catalog must not publish final login failure: {login:?}"
+                        )
+                    }
+                    Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
+                        if activity.message.contains("Model Discovery Still Updating") =>
+                    {
+                        break activity;
+                    }
+                    Ok(Ok(_)) => continue,
+                    other => panic!("expected pending catalog activity, got {other:?}"),
                 }
-                Ok(Ok(crate::bus::BusEvent::LoginCompleted(login))) => {
-                    panic!("empty local catalog must not publish final login failure: {login:?}")
-                }
-                Ok(Ok(crate::bus::BusEvent::UiActivity(activity)))
-                    if activity.message.contains("Model Discovery Still Updating") =>
-                {
-                    break activity;
-                }
-                Ok(Ok(_)) => continue,
-                other => panic!("expected pending catalog activity, got {other:?}"),
             }
-        }
-    });
+        });
 
-    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        set_model_attempts.load(Ordering::SeqCst),
-        0,
-        "post-login activation must not try the metadata default when the catalog has no selectable route"
-    );
-    assert!(activity.message.contains("Saved credentials are active"));
-    assert!(activity.message.contains("Jcode is still processing"));
-    assert!(!activity.message.contains("did not switch models"));
-    assert!(!activity.message.contains("documented default"));
-    assert!(!activity.message.contains("qwen-3-coder-480b"));
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            set_model_attempts.load(Ordering::SeqCst),
+            0,
+            "post-login activation must not try the metadata default when the catalog has no selectable route"
+        );
+        assert!(activity.message.contains("Saved credentials are active"));
+        assert!(activity.message.contains("Jcode is still processing"));
+        assert!(!activity.message.contains("did not switch models"));
+        assert!(!activity.message.contains("documented default"));
+        assert!(!activity.message.contains("qwen-3-coder-480b"));
+    });
 }
 
 #[test]
 fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1257,119 +1220,120 @@ fn test_tui_openai_compatible_local_refresh_failure_is_pending_not_final_failure
 
 #[test]
 fn test_model_picker_opens_simplified_state_before_async_routes_complete() {
-    ensure_test_jcode_home_if_unset();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        clear_persisted_test_ui_state();
+        crate::tui::ui::clear_test_render_state_for_tests();
 
-    let calls = StdArc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
-        calls: StdArc::clone(&calls),
-        route_count: 2,
-        delay: Duration::from_millis(75),
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
+            calls: StdArc::clone(&calls),
+            route_count: 2,
+            delay: Duration::from_millis(75),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+        app.open_model_picker();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("loading picker should open immediately");
+        assert_eq!(picker.entries.len(), 1);
+        assert_eq!(picker.entries[0].name, "counting-a");
+        assert_eq!(picker.entries[0].options[0].detail, "simplified catalog");
+        assert!(app.pending_model_picker_load.is_some());
+        assert_eq!(
+            app.status_notice(),
+            Some("Updating model routes…".to_string())
+        );
+
+        wait_for_model_picker_load(&mut app);
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("hydrated picker should still be open");
+        assert!(picker.entries.len() >= 2);
+        assert_eq!(app.status_notice(), Some("Model list updated".to_string()));
     });
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-    let mut app = App::new_for_test_harness(provider, registry);
-    app.queue_mode = false;
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
-
-    app.open_model_picker();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("loading picker should open immediately");
-    assert_eq!(picker.entries.len(), 1);
-    assert_eq!(picker.entries[0].name, "counting-a");
-    assert_eq!(picker.entries[0].options[0].detail, "simplified catalog");
-    assert!(app.pending_model_picker_load.is_some());
-    assert_eq!(
-        app.status_notice(),
-        Some("Updating model routes…".to_string())
-    );
-
-    wait_for_model_picker_load(&mut app);
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("hydrated picker should still be open");
-    assert!(picker.entries.len() >= 2);
-    assert_eq!(app.status_notice(), Some("Model list updated".to_string()));
 }
 
 #[test]
 fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration() {
-    ensure_test_jcode_home_if_unset();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+    with_temp_jcode_home(|| {
+        crate::tui::ui::clear_test_render_state_for_tests();
 
-    let provider: Arc<dyn Provider> = Arc::new(MixedModelRoutesProvider {
-        model: StdArc::new(StdMutex::new("gpt-5.5".to_string())),
-    });
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
-    let mut app = App::new_for_test_harness(provider, registry);
-    app.queue_mode = false;
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
-    app.recent_authenticated_provider = Some(("chutes".to_string(), Instant::now()));
+        let provider: Arc<dyn Provider> = Arc::new(MixedModelRoutesProvider {
+            model: StdArc::new(StdMutex::new("gpt-5.5".to_string())),
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+        let mut app = App::new_for_test_harness(provider, registry);
+        app.queue_mode = false;
+        app.diff_mode = crate::config::DiffDisplayMode::Inline;
+        app.recent_authenticated_provider = Some(("chutes".to_string(), Instant::now()));
 
-    app.open_model_picker();
-    wait_for_model_picker_load(&mut app);
+        app.open_model_picker();
+        wait_for_model_picker_load(&mut app);
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("hydrated mixed-provider model picker should be open");
-    let mut routes_by_model = std::collections::BTreeMap::new();
-    for entry in &picker.entries {
-        let route = entry
-            .active_option()
-            .expect("model picker entry should have an active route");
-        routes_by_model.insert(
-            entry.name.clone(),
-            (route.provider.clone(), route.api_method.clone()),
-        );
-    }
-
-    // Models with reasoning-effort support expand into effort rows (issue
-    // #458); the hydrated route must be preserved on each variant.
-    assert_eq!(
-        routes_by_model.get("gpt-5.5 (high)"),
-        Some(&("OpenAI".to_string(), "openai-oauth".to_string()))
-    );
-    assert_eq!(
-        routes_by_model.get("claude-opus-4-6 (high)"),
-        Some(&("Anthropic".to_string(), "claude-oauth".to_string()))
-    );
-    assert_eq!(
-        routes_by_model.get("Qwen/Qwen3-Coder-480B-A35B-Instruct"),
-        Some(&("Chutes".to_string(), "openai-compatible:chutes".to_string()))
-    );
-    assert_eq!(
-        routes_by_model.get("deepseek/deepseek-v4-pro (high)"),
-        Some(&("auto".to_string(), "openrouter".to_string()))
-    );
-
-    let chutes_rows = picker
-        .entries
-        .iter()
-        .filter(|entry| {
-            entry
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("hydrated mixed-provider model picker should be open");
+        let mut routes_by_model = std::collections::BTreeMap::new();
+        for entry in &picker.entries {
+            let route = entry
                 .active_option()
-                .map(|route| route.provider == "Chutes")
-                .unwrap_or(false)
-        })
-        .count();
-    assert_eq!(
-        chutes_rows, 1,
-        "opening the model list must not collapse every route to the recently authenticated direct provider: {:?}",
-        routes_by_model
-    );
+                .expect("model picker entry should have an active route");
+            routes_by_model.insert(
+                entry.name.clone(),
+                (route.provider.clone(), route.api_method.clone()),
+            );
+        }
+
+        // A model is listed once, with the hydrated route of that row; the
+        // reasoning levels it accepts are the picker's second step.
+        assert_eq!(
+            routes_by_model.get("gpt-5.5"),
+            Some(&("OpenAI".to_string(), "openai-oauth".to_string()))
+        );
+        assert_eq!(
+            routes_by_model.get("claude-opus-4-6"),
+            Some(&("Anthropic".to_string(), "claude-oauth".to_string()))
+        );
+        assert_eq!(
+            routes_by_model.get("Qwen/Qwen3-Coder-480B-A35B-Instruct"),
+            Some(&("Chutes".to_string(), "openai-compatible:chutes".to_string()))
+        );
+        assert_eq!(
+            routes_by_model.get("deepseek/deepseek-v4-pro"),
+            Some(&("auto".to_string(), "openrouter".to_string()))
+        );
+
+        let chutes_rows = picker
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .active_option()
+                    .map(|route| route.provider == "Chutes")
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            chutes_rows, 1,
+            "opening the model list must not collapse every route to the recently authenticated direct provider: {:?}",
+            routes_by_model
+        );
+    });
 }
 
 #[test]
 fn test_model_picker_does_not_cache_single_model_fallback() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1429,7 +1393,6 @@ fn test_local_model_picker_selection_failure_keeps_picker_open_and_shows_next_st
 
 #[test]
 fn test_login_completed_spawns_auth_refresh_when_runtime_is_available() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1473,7 +1436,6 @@ fn test_login_completed_spawns_auth_refresh_when_runtime_is_available() {
 
 #[test]
 fn test_model_picker_waits_for_async_post_login_catalog_activation() {
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1558,6 +1520,11 @@ fn test_model_picker_waits_for_async_post_login_catalog_activation() {
 
 #[test]
 fn test_login_completed_surfaces_new_provider_models_in_local_model_picker() {
+    if runs_in_isolated_process(
+        "tui::app::tests::test_login_completed_surfaces_new_provider_models_in_local_model_picker",
+    ) {
+        return;
+    }
     let mut app = create_auth_refresh_test_app();
 
     app.handle_login_completed(crate::bus::LoginCompleted {
@@ -1649,6 +1616,8 @@ impl Provider for AzureLoginMockProvider {
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![crate::provider::ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: self.model(),
             provider: "Azure OpenAI".to_string(),
             api_method: "openai-compatible".to_string(),
@@ -1656,6 +1625,8 @@ impl Provider for AzureLoginMockProvider {
             detail: String::new(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }]
     }
 
@@ -1723,7 +1694,6 @@ fn test_azure_login_completion_switches_local_model_without_completion() {
     crate::env::set_var("AZURE_OPENAI_API_KEY", "test-key");
     crate::env::set_var("AZURE_OPENAI_USE_ENTRA", "0");
 
-    ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
     crate::tui::ui::clear_test_render_state_for_tests();
 
@@ -1749,8 +1719,14 @@ fn test_azure_login_completion_switches_local_model_without_completion() {
     app.queue_mode = false;
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.provider_session_id = Some("stale-upstream".to_string());
-    app.session.provider_session_id = Some("stale-upstream".to_string());
-    app.session.model = Some("old-model".to_string());
+    app.session.apply_route(crate::session::Route {
+        provider_session_id: Some("stale-upstream".to_string()),
+        ..app.session.route()
+    });
+    app.session.apply_route(crate::session::Route {
+        model: Some("old-model".to_string()),
+        ..app.session.route()
+    });
 
     app.handle_login_completed(crate::bus::LoginCompleted {
         provider: "Azure OpenAI".to_string(),
@@ -1759,9 +1735,9 @@ fn test_azure_login_completion_switches_local_model_without_completion() {
     });
 
     assert_eq!(&*model.lock().unwrap(), "azure-deployment");
-    assert_eq!(app.session.model.as_deref(), Some("azure-deployment"));
+    assert_eq!(app.session.model(), Some("azure-deployment"));
     assert_eq!(app.provider_session_id, None);
-    assert_eq!(app.session.provider_session_id, None);
+    assert_eq!(app.session.provider_session_id(), None);
     assert_eq!(auth_changed.load(Ordering::SeqCst), 1);
     assert_eq!(complete_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -1796,36 +1772,7 @@ fn test_local_model_picker_surfaces_antigravity_models_from_multiprovider() {
     }));
 }
 
-#[test]
-fn test_local_antigravity_model_picker_selection_preserves_antigravity_provider() {
-    let mut app = create_antigravity_picker_test_app();
-    app.open_model_picker();
-    wait_for_model_picker_load(&mut app);
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
-
-    let model_idx = picker
-        .entries
-        .iter()
-        .position(|entry| entry.name == "claude-sonnet-4-6")
-        .expect("antigravity model should be in picker");
-    let filtered_pos = picker
-        .filtered
-        .iter()
-        .position(|&i| i == model_idx)
-        .expect("antigravity model should be in filtered list");
-
-    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
-
-    assert_eq!(app.provider.name(), "Antigravity");
-    assert_eq!(app.provider.model(), "claude-sonnet-4-6");
-    assert!(app.inline_interactive_state.is_none());
-}
+include!("antigravity_model_selection.rs");
 
 #[test]
 fn test_local_model_picker_openrouter_bare_openai_route_uses_openai_catalog_prefix() {
@@ -1840,8 +1787,8 @@ fn test_local_model_picker_openrouter_bare_openai_route_uses_openai_catalog_pref
     let model_idx = picker
         .entries
         .iter()
-        .position(|entry| entry.name == "gpt-5.4 (high)")
-        .expect("openrouter-backed OpenAI effort entry should be in picker");
+        .position(|entry| entry.name == "gpt-5.4")
+        .expect("openrouter-backed OpenAI model should be in picker");
     let filtered_pos = picker
         .filtered
         .iter()
@@ -1849,8 +1796,17 @@ fn test_local_model_picker_openrouter_bare_openai_route_uses_openai_catalog_pref
         .expect("entry should be in filtered list");
 
     app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+    // Step one opens the level list; step two sends the switch.
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .expect("model picker selection should succeed");
+        .expect("model picker selection should open the effort step");
+    assert!(
+        app.inline_interactive_state
+            .as_ref()
+            .is_some_and(|picker| picker.entries.iter().all(|row| row.effort.is_some())),
+        "the effort step lists levels for the chosen route"
+    );
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .expect("effort selection should succeed");
 
     assert_eq!(
         set_model_calls.lock().unwrap().as_slice(),
@@ -1860,36 +1816,39 @@ fn test_local_model_picker_openrouter_bare_openai_route_uses_openai_catalog_pref
 
 #[test]
 fn test_agent_model_picker_openrouter_bare_openai_route_saves_openai_catalog_prefix() {
-    let (mut app, _set_model_calls) = create_openrouter_spec_capture_test_app();
+    // Shared env, config and catalog caches: run hermetically.
+    with_temp_jcode_home(|| {
+        let (mut app, _set_model_calls) = create_openrouter_spec_capture_test_app();
 
-    app.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
+        app.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
 
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("agent model picker should be open");
-    let model_idx = picker
-        .entries
-        .iter()
-        .position(|entry| entry.name == "gpt-5.4 (high)")
-        .expect("openrouter-backed OpenAI effort entry should be in picker");
-    let filtered_pos = picker
-        .filtered
-        .iter()
-        .position(|&i| i == model_idx)
-        .expect("entry should be in filtered list");
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("agent model picker should be open");
+        let model_idx = picker
+            .entries
+            .iter()
+            .position(|entry| entry.name == "gpt-5.4")
+            .expect("openrouter-backed OpenAI model should be in picker");
+        let filtered_pos = picker
+            .filtered
+            .iter()
+            .position(|&i| i == model_idx)
+            .expect("entry should be in filtered list");
 
-    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .expect("agent model picker selection should succeed");
+        app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .expect("agent model picker selection should succeed");
 
-    let last = app.display_messages.last().expect("display message");
-    assert_eq!(last.role, "system");
-    assert!(
-        last.content.contains("openai/gpt-5.4@OpenAI"),
-        "message should show normalized saved spec, got: {}",
-        last.content
-    );
+        let last = app.display_messages.last().expect("display message");
+        assert_eq!(last.role, "system");
+        assert!(
+            last.content.contains("openai/gpt-5.4@OpenAI"),
+            "message should show normalized saved spec, got: {}",
+            last.content
+        );
+    });
 }
 
 #[test]
@@ -1957,6 +1916,32 @@ GPT:
 
 #[test]
 fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
+    const CHILD_ENV: &str = "JCODE_LOGIN_SMOKE_PICKER_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let home = tempfile::tempdir().expect("isolated model picker home");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("tui::app::tests::test_login_smoke_model_picker_renders_unstacked_provider_rows")
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .env("JCODE_HOME", home.path())
+            .env_remove("JCODE_SSH_REMOTE")
+            .output()
+            .expect("run isolated model picker test");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "isolated model picker test was not executed"
+        );
+        return;
+    }
+    let _provider_env = ProviderEnvGuard::clear();
     let mut app = create_login_smoke_model_app();
     app.display_messages = vec![DisplayMessage::system("seed render state")];
     app.bump_display_messages_version();
@@ -1976,9 +1961,8 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         render_and_snap(app, &mut terminal)
     };
 
-    // Effort-capable routes now expand into multiple rows. Render focused
-    // slices so each provider remains observable without assuming the complete
-    // catalog fits in one terminal viewport.
+    // Render focused slices so each provider remains observable without
+    // assuming the complete catalog fits in one terminal viewport.
     let openai_text = render_filtered(&mut app, "gpt-5.4");
     let comtegra_text = render_filtered(&mut app, "glm-51-nvfp4");
     let copilot_text = render_filtered(&mut app, "claude-opus-4.6");
@@ -2096,6 +2080,7 @@ fn test_model_picker_filter_text_includes_provider_and_method() {
             available: true,
             detail: "https://llm.comtegra.cloud/v1".to_string(),
             estimated_reference_cost_micros: None,
+            icon: None,
         }],
         action: crate::tui::PickerAction::Model,
         selected_option: 0,
@@ -2241,10 +2226,12 @@ fn test_login_preview_enter_after_navigation_starts_selected_login() {
         .filtered
         .iter()
         .position(|&index| {
-            matches!(&picker.entries[index].action, crate::tui::PickerAction::Login(provider)
-                if provider.id == "anthropic-api")
+            matches!(
+                &picker.entries[index].action,
+                crate::tui::PickerAction::AutoApiKey
+            )
         })
-        .expect("Anthropic API key login should be listed");
+        .expect("Paste an API key login should be listed in starter view");
     for _ in 0..target {
         app.handle_key(KeyCode::Down, KeyModifiers::empty())
             .unwrap();
@@ -2263,6 +2250,131 @@ fn test_login_preview_enter_after_navigation_starts_selected_login() {
 }
 
 #[test]
+fn test_login_picker_starts_collapsed_with_more_providers_and_expands_on_enter() {
+    let mut app = create_test_app();
+    app.open_login_picker_inline();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("login picker should be open");
+    assert_eq!(picker.kind, crate::tui::PickerKind::Login);
+    // Starter view should stay compact (<= 7 rows, never pushed below the fold
+    // by saved accounts or other configured providers) and end with
+    // "More providers (N)…".
+    assert!(
+        picker.filtered.len() <= 7,
+        "starter list should stay compact (<= 7 rows), got {}",
+        picker.filtered.len()
+    );
+    assert!(
+        picker.filtered.len() < picker.entries.len(),
+        "starter list ({}) should be shorter than full catalog ({})",
+        picker.filtered.len(),
+        picker.entries.len()
+    );
+    let expand_pos = picker
+        .filtered
+        .iter()
+        .position(|&index| {
+            matches!(
+                picker.entries[index].action,
+                crate::tui::PickerAction::ExpandLoginProviders
+            )
+        })
+        .expect("More providers expand row should be visible in starter view");
+    assert!(
+        picker.filtered.iter().any(|&i| matches!(
+            picker.entries[i].action,
+            crate::tui::PickerAction::AutoApiKey
+        )),
+        "Paste an API key should be in starter view"
+    );
+    let starter_names: Vec<&str> = picker
+        .filtered
+        .iter()
+        .map(|&i| picker.entries[i].name.as_str())
+        .collect();
+    assert_eq!(
+        &starter_names[..5],
+        &[
+            "OpenAI",
+            "Anthropic/Claude",
+            "Google (Antigravity)",
+            "Paste an API key",
+            "Auto Import",
+        ],
+        "starter view should list OpenAI, Anthropic/Claude, Google (Antigravity), Paste an API key, Auto Import first; got {:?}",
+        starter_names
+    );
+    assert!(
+        !starter_names.contains(&"GitHub Copilot"),
+        "GitHub Copilot should be collapsed under More providers"
+    );
+    assert!(
+        !picker
+            .filtered
+            .iter()
+            .any(|&i| picker.entries[i].name == "Z.AI"),
+        "non-starter unconfigured provider should be collapsed by default"
+    );
+
+    // Typing a filter immediately searches hidden providers without expanding.
+    for ch in "z.ai".chars() {
+        app.handle_key(KeyCode::Char(ch), KeyModifiers::empty())
+            .unwrap();
+    }
+    let picker = app.inline_interactive_state.as_ref().unwrap();
+    assert!(
+        picker
+            .filtered
+            .iter()
+            .any(|&i| picker.entries[i].name == "Z.AI"),
+        "typing filter should immediately surface hidden providers like Z.AI"
+    );
+    assert!(
+        !picker.filtered.iter().any(|&i| matches!(
+            picker.entries[i].action,
+            crate::tui::PickerAction::ExpandLoginProviders
+        )),
+        "More providers expand row should not clutter filtered search results"
+    );
+    for _ in 0.."z.ai".len() {
+        app.handle_key(KeyCode::Backspace, KeyModifiers::empty())
+            .unwrap();
+    }
+
+    // Clearing the filter returns to the collapsed starter list, and pressing
+    // Enter on "More providers" expands in place without closing picker.
+    for _ in 0..expand_pos {
+        app.handle_key(KeyCode::Down, KeyModifiers::empty())
+            .unwrap();
+    }
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("expanding More providers should keep login picker open");
+    assert_eq!(picker.filtered.len(), picker.entries.len());
+    assert!(
+        picker
+            .filtered
+            .iter()
+            .any(|&i| picker.entries[i].name == "Z.AI"),
+        "expanded login picker should reveal hidden providers like Z.AI"
+    );
+    assert!(
+        !picker
+            .entries
+            .iter()
+            .any(|e| matches!(e.action, crate::tui::PickerAction::ExpandLoginProviders)),
+        "ExpandLoginProviders row should be removed once expanded"
+    );
+}
+
+#[test]
 fn test_subagent_model_command_sets_and_resets_session_preference() {
     let mut app = create_test_app();
 
@@ -2270,13 +2382,13 @@ fn test_subagent_model_command_sets_and_resets_session_preference() {
         &mut app,
         "/subagent-model gpt-5.4"
     ));
-    assert_eq!(app.session.subagent_model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(app.session.subagent_model(), Some("gpt-5.4"));
 
     assert!(super::commands::handle_session_command(
         &mut app,
         "/subagent-model inherit"
     ));
-    assert_eq!(app.session.subagent_model, None);
+    assert_eq!(app.session.subagent_model(), None);
 }
 
 #[test]
@@ -2287,14 +2399,14 @@ fn test_autoreview_command_toggles_session_preference() {
         &mut app,
         "/autoreview on"
     ));
-    assert_eq!(app.session.autoreview_enabled, Some(true));
+    assert_eq!(app.session.autoreview_enabled(), Some(true));
     assert!(app.autoreview_enabled);
 
     assert!(super::commands::handle_session_command(
         &mut app,
         "/autoreview off"
     ));
-    assert_eq!(app.session.autoreview_enabled, Some(false));
+    assert_eq!(app.session.autoreview_enabled(), Some(false));
     assert!(!app.autoreview_enabled);
 }
 
@@ -2306,14 +2418,14 @@ fn test_autojudge_command_toggles_session_preference() {
         &mut app,
         "/autojudge on"
     ));
-    assert_eq!(app.session.autojudge_enabled, Some(true));
+    assert_eq!(app.session.autojudge_enabled(), Some(true));
     assert!(app.autojudge_enabled);
 
     assert!(super::commands::handle_session_command(
         &mut app,
         "/autojudge off"
     ));
-    assert_eq!(app.session.autojudge_enabled, Some(false));
+    assert_eq!(app.session.autojudge_enabled(), Some(false));
     assert!(!app.autojudge_enabled);
 }
 
@@ -2321,7 +2433,7 @@ fn test_autojudge_command_toggles_session_preference() {
 fn test_transcript_path_command_reports_current_session_file() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
-        let expected = crate::session::session_path(&app.session.id).expect("session path");
+        let expected = crate::session::session_path(app.session.id()).expect("session path");
 
         assert!(super::commands::handle_session_command(
             &mut app,
@@ -2340,8 +2452,10 @@ fn test_poke_arms_auto_poke_until_todos_are_done() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
+                lane_speed: None,
+                lane_profile: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,
@@ -2380,8 +2494,10 @@ fn test_poke_status_reports_current_state() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
+                lane_speed: None,
+                lane_profile: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,
@@ -2441,8 +2557,10 @@ fn test_poke_off_disarms_and_clears_queued_followup() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
+                lane_speed: None,
+                lane_profile: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,
@@ -2497,8 +2615,10 @@ fn test_poke_queues_when_turn_is_in_progress() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
+                lane_speed: None,
+                lane_profile: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,
@@ -2539,9 +2659,11 @@ fn test_poke_queues_when_turn_is_in_progress() {
         }));
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[
                 crate::todo::TodoItem {
+                    lane_speed: None,
+                    lane_profile: None,
                     lane_after: None,
                     lane_owner: None,
                     stage: None,
@@ -2561,6 +2683,8 @@ fn test_poke_queues_when_turn_is_in_progress() {
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_speed: None,
+                    lane_profile: None,
                     lane_after: None,
                     lane_owner: None,
                     stage: None,
@@ -2594,7 +2718,7 @@ fn test_poke_queues_when_turn_is_in_progress() {
 }
 
 #[test]
-fn test_btw_forks_even_when_turn_is_in_progress() {
+fn test_btw_opens_a_side_card_even_when_turn_is_in_progress() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.is_processing = true;
@@ -2607,10 +2731,17 @@ fn test_btw_forks_even_when_turn_is_in_progress() {
         assert!(app.is_processing, "parent turn should keep running");
         assert!(app.queued_messages().is_empty());
         assert!(app.hidden_queued_system_messages.is_empty());
-        assert!(app.display_messages().iter().any(|msg| {
-            msg.content.contains("created for the next prompt")
-                || msg.content.contains("Next prompt launched in")
-        }));
+        // The card is visible at once and its own request waits for the turn.
+        let card = app.btw_card().expect("side card opens mid-turn");
+        assert_eq!(card.question, "should this fork context?");
+        assert!(card.waiting, "the request queues behind the running turn");
+        assert!(app.pending_btw_turn);
+        assert!(
+            !app.display_messages()
+                .iter()
+                .any(|msg| msg.content.contains("created for the next prompt")),
+            "no fork window is opened"
+        );
     });
 }
 
@@ -2619,8 +2750,10 @@ fn test_finish_turn_auto_pokes_again_when_todos_remain() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
+                lane_speed: None,
+                lane_profile: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,
@@ -2658,9 +2791,11 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[
                 crate::todo::TodoItem {
+                    lane_speed: None,
+                    lane_profile: None,
                     lane_after: None,
                     lane_owner: None,
                     stage: None,
@@ -2672,16 +2807,16 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                     priority: "high".to_string(),
                     blocked_by: Vec::new(),
                     assigned_to: None,
-                    confidence: Some(crate::todo::ConfidenceState::from_legacy_score(70)),
-                    completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(
-                        80,
-                    )),
+                    confidence: Some(crate::todo::ConfidenceState::Plausible),
+                    completion_confidence: Some(crate::todo::ConfidenceState::Plausible),
                     confidence_history: Vec::new(),
                     waiting_reason: None,
                     requires_user_auth: None,
                     waiting_on: Vec::new(),
                 },
                 crate::todo::TodoItem {
+                    lane_speed: None,
+                    lane_profile: None,
                     lane_after: None,
                     lane_owner: None,
                     stage: None,
@@ -2693,10 +2828,8 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                     priority: "medium".to_string(),
                     blocked_by: Vec::new(),
                     assigned_to: None,
-                    confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
-                    completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(
-                        95,
-                    )),
+                    confidence: Some(crate::todo::ConfidenceState::Plausible),
+                    completion_confidence: Some(crate::todo::ConfidenceState::Plausible),
                     confidence_history: Vec::new(),
                     waiting_reason: None,
                     requires_user_auth: None,
@@ -2707,7 +2840,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         .expect("save todos");
 
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -2761,9 +2894,9 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
 
         // Once the model records sufficient completion confidence through the
         // todo tool, the next completion check requests one clean final answer.
-        let mut validated = crate::todo::load_todos(&app.session.id).expect("load todos");
+        let mut validated = crate::todo::load_todos(app.session.id()).expect("load todos");
         for todo in &mut validated {
-            todo.completion_confidence = Some(crate::todo::ConfidenceState::from_legacy_score(100));
+            todo.completion_confidence = Some(crate::todo::ConfidenceState::Verified);
             todo.confidence_history = match todo.id.as_str() {
                 "todo-1" => vec![
                     crate::todo::ConfidenceState::Speculative,
@@ -2777,7 +2910,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                 ],
             };
         }
-        crate::todo::save_todos(&app.session.id, &validated).expect("save validated todos");
+        crate::todo::save_todos(app.session.id(), &validated).expect("save validated todos");
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         app.is_processing = true;
@@ -2812,19 +2945,19 @@ fn test_todo_completion_gate_detects_abrupt_confidence_increase() {
     let summary = super::commands::todo_confidence_summary(&[crate::todo::TodoItem {
         status: "completed".to_string(),
         priority: "high".to_string(),
-        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(0)),
-        completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+        confidence: Some(crate::todo::ConfidenceState::Speculative),
+        completion_confidence: Some(crate::todo::ConfidenceState::Verified),
         waiting_reason: None,
         requires_user_auth: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
-            crate::todo::ConfidenceState::from_legacy_score(0),
-            crate::todo::ConfidenceState::from_legacy_score(100),
+            crate::todo::ConfidenceState::Speculative,
+            crate::todo::ConfidenceState::Verified,
         ],
         ..Default::default()
     }]);
 
-    assert_eq!(summary.completion_average, Some(100));
+    assert_eq!(summary.completion_average, Some(crate::todo::ConfidenceState::Verified));
     assert!(!summary.completion_confidence_needs_validation);
     assert!(summary.confidence_spike_detected);
     assert!(summary.needs_more_work);
@@ -2835,8 +2968,8 @@ fn test_todo_completion_gate_allows_evidence_backed_confidence_steps() {
     let summary = super::commands::todo_confidence_summary(&[crate::todo::TodoItem {
         status: "completed".to_string(),
         priority: "high".to_string(),
-        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-        completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+        confidence: Some(crate::todo::ConfidenceState::Verified),
+        completion_confidence: Some(crate::todo::ConfidenceState::Verified),
         waiting_reason: None,
         requires_user_auth: None,
         waiting_on: Vec::new(),
@@ -2849,7 +2982,7 @@ fn test_todo_completion_gate_allows_evidence_backed_confidence_steps() {
         ..Default::default()
     }]);
 
-    assert_eq!(summary.completion_average, Some(100));
+    assert_eq!(summary.completion_average, Some(crate::todo::ConfidenceState::Verified));
     assert!(!summary.completion_confidence_needs_validation);
     assert!(!summary.confidence_spike_detected);
     assert!(!summary.needs_more_work);
@@ -2861,20 +2994,20 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Validate provider result".to_string(),
                 status: "completed".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence: Some(crate::todo::ConfidenceState::Verified),
+                completion_confidence: Some(crate::todo::ConfidenceState::Verified),
                 waiting_reason: None,
                 requires_user_auth: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::Speculative,
-                    crate::todo::ConfidenceState::from_legacy_score(100),
+                    crate::todo::ConfidenceState::Verified,
                 ],
                 ..Default::default()
             }],
@@ -2882,7 +3015,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         .expect("save todos");
 
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -2966,8 +3099,10 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
+                lane_speed: None,
+                lane_profile: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,
@@ -2979,8 +3114,8 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
-                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
+                confidence: Some(crate::todo::ConfidenceState::Plausible),
+                completion_confidence: Some(crate::todo::ConfidenceState::Plausible),
                 confidence_history: Vec::new(),
                 waiting_reason: None,
                 requires_user_auth: None,
@@ -3008,8 +3143,10 @@ fn test_finish_turn_auto_poke_preserves_visible_turn_started() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
+                lane_speed: None,
+                lane_profile: None,
                 lane_after: None,
                 lane_owner: None,
                 stage: None,
@@ -3083,7 +3220,7 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
             app.auto_poke_incomplete_todos = true;
             app.auto_poke_default_on = false;
             crate::todo::save_todos(
-                &app.session.id,
+                app.session.id(),
                 &[crate::todo::TodoItem {
                     id: "validated-result".into(),
                     content: "Validate the requested result".into(),
@@ -3099,7 +3236,7 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
             )
             .unwrap();
             // Missing goal metadata is not unfinished ownership work either.
-            crate::todo::save_goals(&app.session.id, &[]).unwrap();
+            crate::todo::save_goals(app.session.id(), &[]).unwrap();
             for id in 42..44 {
                 app.is_processing = true;
                 super::local::finish_turn(&mut app);
@@ -3130,3 +3267,6 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
 
 #[path = "state_model_poke_03/prompt_history_keys.rs"]
 mod prompt_history_keys;
+
+#[path = "state_model_poke_03_additional_tests.rs"]
+mod additional_test_open_work_rearms_auto_poke_after_completion_gate_breaker;

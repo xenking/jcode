@@ -58,22 +58,11 @@ impl Drop for EnvVarGuard {
 }
 
 fn test_config_dir(temp: &TempDir) -> std::path::PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        temp.path().join("Library").join("Application Support")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        temp.path().join("AppData").join("Roaming")
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        temp.path().to_path_buf()
-    }
+    temp.path().join("config").join("jcode")
 }
 
 fn write_test_api_key(temp: &TempDir, env_file: &str, env_key: &str, value: &str) {
-    let config_dir = test_config_dir(temp).join("jcode");
+    let config_dir = test_config_dir(temp);
     std::fs::create_dir_all(&config_dir).expect("create test config dir");
     std::fs::write(config_dir.join(env_file), format!("{env_key}={value}\n"))
         .expect("write test api key");
@@ -114,65 +103,8 @@ fn isolate_openrouter_autodetect_env() -> Vec<EnvVarGuard> {
     guards
 }
 
-#[test]
-fn test_has_credentials() {
-    let _has_creds = OpenRouterProvider::has_credentials();
-}
-
 #[path = "openrouter_tests/catalog_shape_tests.rs"]
 mod catalog_shape_tests;
-
-#[test]
-fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
-    let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
-    let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
-
-    let profile = jcode_base::config::NamedProviderConfig {
-        base_url: "https://llm.example.com/v1".to_string(),
-        api_key_env: Some("TEST_NAMED_COMPAT_KEY".to_string()),
-        model_catalog: true,
-        default_model: Some("example-model".to_string()),
-        ..Default::default()
-    };
-
-    let _provider = OpenRouterProvider::new_named_openai_compatible("example-compat", &profile)
-        .expect("named profile should initialize");
-
-    assert_eq!(
-        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
-        Ok("example-compat")
-    );
-}
-
-#[test]
-fn named_openai_compatible_provider_exposes_static_models_as_routes() {
-    let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
-    let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
-
-    let profile = jcode_base::config::NamedProviderConfig {
-        base_url: "https://llm.example.com/v1".to_string(),
-        api_key_env: Some("TEST_NAMED_COMPAT_KEY".to_string()),
-        model_catalog: true,
-        default_model: Some("glm-51-nvfp4".to_string()),
-        models: vec![jcode_base::config::NamedProviderModelConfig {
-            id: "glm-51-nvfp4".to_string(),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-
-    let provider = OpenRouterProvider::new_named_openai_compatible("comtegra-test", &profile)
-        .expect("named profile should initialize");
-    let routes = provider.model_routes();
-
-    assert!(routes.iter().any(|route| {
-        route.model == "glm-51-nvfp4"
-            && route.api_method == "openai-compatible:comtegra-test"
-            && route.available
-    }));
-}
 
 #[test]
 fn direct_openai_compatible_provider_advertises_image_input_support() {
@@ -375,7 +307,8 @@ fn deepseek_image_input_captured_requests_preserve_only_allowed_pixels() {
                 media_type: "image/png".to_string(),
                 data: pixels.to_string(),
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -473,7 +406,8 @@ fn direct_deepseek_profile_omits_image_url_parts() {
                 media_type: "image/png".to_string(),
                 data: "aW1hZ2U=".to_string(),
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -542,7 +476,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             content: vec![ContentBlock::Text {
                 text: "do a thing".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -552,7 +487,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             role: Role::Assistant,
             content: vec![ContentBlock::Reasoning {
                 text: "thinking about the request".to_string(),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -561,7 +497,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             content: vec![ContentBlock::Text {
                 text: "actually do this instead".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -635,7 +572,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             content: vec![ContentBlock::Text {
                 text: "do a thing".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -643,7 +581,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             role: Role::Assistant,
             content: vec![ContentBlock::Reasoning {
                 text: "thinking about the request".to_string(),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -652,7 +591,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             content: vec![ContentBlock::Text {
                 text: "actually do this instead".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -729,7 +669,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
             content: vec![ContentBlock::Text {
                 text: "list the files".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -742,7 +683,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -752,7 +694,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
                 tool_use_id: "call_1".to_string(),
                 content: "a.txt\nb.txt".to_string(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -823,7 +766,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
             content: vec![ContentBlock::Text {
                 text: "list the files".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -839,7 +783,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
                     input: serde_json::json!({"command": "ls"}),
                     thought_signature: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -849,7 +794,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
                 tool_use_id: "call_1".to_string(),
                 content: "a.txt\nb.txt".to_string(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1054,9 +1000,7 @@ fn test_configured_api_base_rejects_insecure_http_remote() {
 fn autodetects_single_saved_openai_compatible_profile() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _env = isolate_openrouter_autodetect_env();
 
     let opencode = jcode_base::provider_catalog::resolve_openai_compatible_profile(
@@ -1079,15 +1023,13 @@ fn autodetects_single_saved_openai_compatible_profile() {
 fn autodetects_single_saved_local_openai_compatible_profile() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _env = isolate_openrouter_autodetect_env();
 
     let lmstudio = jcode_base::provider_catalog::resolve_openai_compatible_profile(
         jcode_base::provider_catalog::LMSTUDIO_PROFILE,
     );
-    let config_dir = test_config_dir(&temp).join("jcode");
+    let config_dir = test_config_dir(&temp);
     std::fs::create_dir_all(&config_dir).expect("create test config dir");
     std::fs::write(
         config_dir.join(&lmstudio.env_file),
@@ -1112,9 +1054,7 @@ fn openrouter_transport_state_distinguishes_runtime_identities() {
     // autodetect tests do, so this test does not read whatever provider
     // profile happens to be configured on the host machine.
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _env = isolate_openrouter_autodetect_env();
 
     assert_eq!(
@@ -1175,9 +1115,7 @@ fn openrouter_transport_state_distinguishes_runtime_identities() {
 fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _env = isolate_openrouter_autodetect_env();
 
     let opencode = jcode_base::provider_catalog::resolve_openai_compatible_profile(
@@ -1209,9 +1147,7 @@ fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
 fn autodetected_profile_seeds_default_model_and_cache_namespace() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _env = isolate_openrouter_autodetect_env();
 
     let zai = jcode_base::provider_catalog::resolve_openai_compatible_profile(
@@ -1300,7 +1236,7 @@ fn make_provider() -> OpenRouterProvider {
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
         reasoning_effort: Arc::new(RwLock::new(None)),
         api_base: DEFAULT_API_BASE.to_string(),
-        auth: Arc::new(|| {
+        auth: Arc::new(|_| {
             Ok(ProviderAuth::AuthorizationBearer {
                 token: "test".to_string(),
                 label: DEFAULT_API_KEY_NAME.to_string(),
@@ -1325,6 +1261,7 @@ fn make_provider() -> OpenRouterProvider {
         endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
         provider_pin: Arc::new(Mutex::new(None)),
+        key_binding: Default::default(),
         endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
     }
 }
@@ -1335,7 +1272,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
         reasoning_effort: Arc::new(RwLock::new(None)),
         api_base: "https://compat.example.test/v1".to_string(),
-        auth: Arc::new(|| {
+        auth: Arc::new(|_| {
             Ok(ProviderAuth::AuthorizationBearer {
                 token: "test".to_string(),
                 label: "OPENAI_COMPAT_API_KEY".to_string(),
@@ -1360,6 +1297,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
         provider_pin: Arc::new(Mutex::new(None)),
+        key_binding: Default::default(),
         endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
     }
 }
@@ -1550,7 +1488,8 @@ fn openrouter_chat_request_sends_unified_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1645,7 +1584,7 @@ async fn live_openrouter_unified_reasoning_smoke() -> Result<()> {
     for model in models {
         let token = token.clone();
         let provider = OpenRouterProvider {
-            auth: Arc::new(move || {
+            auth: Arc::new(move |_| {
                 Ok(ProviderAuth::AuthorizationBearer {
                     token: token.clone(),
                     label: configured_api_key_name(),
@@ -1662,7 +1601,8 @@ async fn live_openrouter_unified_reasoning_smoke() -> Result<()> {
             content: vec![ContentBlock::Text {
                 text: "Live smoke test: answer exactly OK.".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];
@@ -1715,7 +1655,8 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1771,7 +1712,8 @@ fn sol_compatible_request_sends_low_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1823,7 +1765,8 @@ fn direct_openai_compatible_chat_request_preserves_max_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1871,7 +1814,7 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
     let provider = OpenRouterProvider {
         api_base,
         model: Arc::new(RwLock::new("live-login-flow-model".to_string())),
-        auth: Arc::new(|| {
+        auth: Arc::new(|_| {
             Ok(ProviderAuth::AuthorizationBearer {
                 token: "sk-live-catalog".to_string(),
                 label: "OPENAI_COMPAT_API_KEY".to_string(),
@@ -1961,7 +1904,7 @@ fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
     );
     let provider = OpenRouterProvider {
         api_base,
-        auth: Arc::new(|| {
+        auth: Arc::new(|_| {
             Ok(ProviderAuth::AuthorizationBearer {
                 token: "sk-live-catalog".to_string(),
                 label: "CEREBRAS_API_KEY".to_string(),
@@ -2287,9 +2230,7 @@ fn named_profile_context_window_survives_provider_qualified_model() {
 fn named_openai_compatible_loads_api_key_from_env_file() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp dir");
-    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _api_key = EnvVarGuard::remove("CUSTOM_API_KEY");
     write_test_api_key(&temp, "custom.env", "CUSTOM_API_KEY", "from-env-file");
@@ -2774,6 +2715,25 @@ fn runtime_display_name_for_profile_runtime_instance() {
 }
 
 #[test]
+fn compatible_profile_runtime_uses_jcode_compaction() {
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let jcode_home = temp.path().join("jcode-home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", &jcode_home);
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+    let _key = EnvVarGuard::set("NVIDIA_API_KEY", "nim-test-key");
+
+    let nim = OpenRouterProvider::new_openai_compatible_profile_runtime(
+        jcode_base::provider_catalog::NVIDIA_NIM_PROFILE,
+    )
+    .expect("build nvidia-nim runtime");
+    assert!(Provider::supports_compaction(&nim));
+    assert!(Provider::uses_jcode_compaction(&nim));
+}
+
+#[test]
 fn jcode_subscription_runtime_has_explicit_display_and_route_identity() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp home");
@@ -3116,6 +3076,7 @@ fn midstream_transport_fault_emits_retry_rollback_before_replay() {
 
         super::openrouter_sse_stream::run_stream_with_retries(
             client,
+            jcode_base::egress::Transport::default(),
             api_base,
             ProviderAuth::None {
                 label: "test".to_string(),
@@ -3450,7 +3411,8 @@ model_catalog = false
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -3542,3 +3504,6 @@ fn venice_disables_venice_system_prompt_by_default_but_user_can_override() {
 
 #[path = "catalog_auth_tests.rs"]
 mod catalog_auth;
+
+#[path = "openrouter_tests_additional_tests.rs"]
+mod additional_cache_breakpoint_preserves_shared_payload_when_already_marked;

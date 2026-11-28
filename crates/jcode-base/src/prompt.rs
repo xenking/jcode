@@ -13,6 +13,10 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system_prompt.md");
 /// This is a *replacement* hook. To merely add guidance on top of the default,
 /// use `.jcode/prompt-overlay.md` instead.
 pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
+    load_base_system_prompt_override(working_dir).unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.into())
+}
+
+fn load_base_system_prompt_override(working_dir: Option<&Path>) -> Option<String> {
     let project_dir = working_dir.unwrap_or(Path::new("."));
     let candidates = [
         Some(project_dir.join(".jcode").join("system-prompt.md")),
@@ -24,45 +28,308 @@ pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
         if let Ok(content) = std::fs::read_to_string(&path) {
             let trimmed = content.trim();
             if !trimmed.is_empty() {
-                return trimmed.to_string();
+                return Some(trimmed.to_string());
             }
         }
     }
-    DEFAULT_SYSTEM_PROMPT.to_string()
+    None
 }
 
 /// Prompt guidance for the optional Mermaid rendering capability.
 pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks inline.";
 
+/// Prompt guidance for the Codemode capability.
+///
+/// This is the only place the model is told *when* one script beats many
+/// single tool calls. Without it the model only ever sees the tool's own
+/// description, and measured history shows it then reaches for `bash` and
+/// `batch` instead (codemode was 0.14% of 7,884 tool calls).
+pub const CODEMODE_PROMPT: &str = "# Tool calls
+
+`codemode` runs one JavaScript or TypeScript program that calls tools itself, MCP tools included (`listTools('mcp__')`, `types(name)`). Use it when:
+- the task needs 5 or more tool calls,
+- each call needs the previous call's result,
+- you would loop over a list another tool returned,
+- a tool returns far more output than you need.
+
+Only the result, logs, and call receipts reach the conversation. Use `Promise.allSettled` for independent calls when partial results are useful.
+For example, pass `agentgrep` hits to `read` and return only needed `path:line` entries.
+
+Call `swarm` directly for short coordination. Use `codemode` for dependent swarm reads or to return only needed fields from large results.
+Use `batch` for a handful (1-10) independent calls whose results you want verbatim. Use `bash` for shell work, not to fan out tool calls. Call a tool directly when one call is enough.";
+
 /// Harness capabilities that conditionally contribute prompt modules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptCapabilities {
     pub mermaid: bool,
+    pub codemode: bool,
 }
 
 impl Default for PromptCapabilities {
     fn default() -> Self {
-        Self { mermaid: true }
+        Self {
+            mermaid: true,
+            codemode: false,
+        }
     }
 }
 
 impl PromptCapabilities {
     fn current() -> Self {
+        let config = crate::config::config();
         Self {
-            mermaid: crate::config::config().features.mermaid,
+            mermaid: config.features.mermaid,
+            codemode: config.features.code_mode && config.tools.codemode,
         }
     }
 }
 
-fn base_system_prompt_parts(
+fn base_system_prompt_parts(capabilities: PromptCapabilities, base: String) -> Vec<String> {
+    base_system_prompt_parts_composed(capabilities, base, &PromptComposition::default())
+}
+
+fn base_system_prompt_parts_composed(
     capabilities: PromptCapabilities,
-    working_dir: Option<&Path>,
+    base: String,
+    composition: &PromptComposition<'_>,
 ) -> Vec<String> {
-    let mut parts = vec![load_base_system_prompt(working_dir)];
+    // Without a session policy every gated line stays, but the markers never
+    // reach the model.
+    let base = render_tool_gated(&base, composition.tool_gate.unwrap_or(&|_| true));
+    let mut parts = vec![base];
+    if let Some(model_prompt) = composition.model_prompt {
+        for text in &model_prompt.append {
+            parts.push(render_tool_gated(
+                text,
+                composition.tool_gate.unwrap_or(&|_| true),
+            ));
+        }
+    }
     if capabilities.mermaid {
         parts.push(MERMAID_PROMPT.to_string());
     }
+    if capabilities.codemode && composition.tool_allowed("codemode") {
+        parts.push(CODEMODE_PROMPT.to_string());
+    }
+    if let Some(profile) = composition.profile
+        && let Some(section) = profile.section()
+    {
+        parts.push(section);
+    }
     parts
+}
+
+/// The prompt-visible part of an agent profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfilePrompt {
+    pub name: String,
+    pub instructions: Option<String>,
+    /// Whether the available-skills list is part of this profile's prompt.
+    pub include_skills: bool,
+}
+
+impl ProfilePrompt {
+    fn section(&self) -> Option<String> {
+        let instructions = self.instructions.as_deref()?.trim();
+        (!instructions.is_empty())
+            .then(|| format!("# Agent profile: {}\n\n{instructions}", self.name))
+    }
+}
+
+/// Session-specific inputs to static prompt composition.
+///
+/// Both are known before the first request and are frozen with the prefix.
+#[derive(Clone, Copy, Default)]
+pub struct PromptComposition<'a> {
+    /// Whether this session may call a tool. `None` keeps every tool-gated line.
+    pub tool_gate: Option<&'a dyn Fn(&str) -> bool>,
+    pub profile: Option<&'a ProfilePrompt>,
+    /// `[[agents.model_prompts]]` resolved for the session's model.
+    pub model_prompt: Option<&'a crate::model_prompt::ModelPrompt>,
+}
+
+impl PromptComposition<'_> {
+    fn tool_allowed(&self, name: &str) -> bool {
+        self.tool_gate.is_none_or(|gate| gate(name))
+    }
+
+    fn include_skills(&self) -> bool {
+        self.profile.is_none_or(|profile| profile.include_skills)
+    }
+}
+
+const TOOL_GATE_PREFIX: &str = "<!-- tools:";
+
+/// Parse a `<!-- tools: a, b -->` line prefix into its tool names and the text
+/// after the marker.
+fn split_tool_gate(line: &str) -> Option<(Vec<&str>, &str)> {
+    let rest = line.trim_start().strip_prefix(TOOL_GATE_PREFIX)?;
+    let (names, text) = rest.split_once("-->")?;
+    let names = names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    Some((names, text.trim_start()))
+}
+
+fn heading_level(line: &str) -> Option<usize> {
+    let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
+    (hashes > 0 && line[hashes..].starts_with(' ')).then_some(hashes)
+}
+
+/// Keep a `<!-- tools: a, b -->` line only when the session may call one of
+/// the listed tools, then drop headings left without content. Text without
+/// markers is returned unchanged, so custom prompts opt in explicitly.
+pub fn render_tool_gated(text: &str, gate: &dyn Fn(&str) -> bool) -> String {
+    if !text.contains(TOOL_GATE_PREFIX) {
+        return text.to_string();
+    }
+    let kept: Vec<&str> = text
+        .lines()
+        .filter_map(|line| match split_tool_gate(line) {
+            Some((names, rest)) => names.iter().any(|name| gate(name)).then_some(rest),
+            None => Some(line),
+        })
+        .collect();
+
+    let mut out: Vec<&str> = Vec::with_capacity(kept.len());
+    for (index, line) in kept.iter().enumerate() {
+        if let Some(level) = heading_level(line) {
+            let has_content = kept[index + 1..]
+                .iter()
+                .find(|next| !next.trim().is_empty())
+                .is_some_and(|next| heading_level(next).is_none_or(|next| next > level));
+            if !has_content {
+                continue;
+            }
+        }
+        // Removed lines must not leave stacked blank lines behind.
+        if line.trim().is_empty() && out.last().is_none_or(|last| last.trim().is_empty()) {
+            continue;
+        }
+        out.push(line);
+    }
+    while out.last().is_some_and(|line| line.trim().is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
+/// Fingerprints of the effective overrides, independent of Jcode's embedded
+/// prompt version. `None` means the corresponding file section is absent.
+pub type PromptFileVersions = [Option<String>; 3];
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StaticPromptSnapshot {
+    pub text: String,
+    /// Latest versions reflected either in the frozen text or in the transcript.
+    /// `None` when a custom system prompt replaces the normal instructions.
+    pub file_versions: Option<PromptFileVersions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills_chars: Option<usize>,
+    /// Matched `[[agents.model_prompts]]` rules when the text was rendered.
+    /// A model switch that changes this re-renders the prefix.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_prompt_key: String,
+    /// Model the text was rendered for. Empty in older snapshots, which are
+    /// never re-rendered.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rendered_for_model: String,
+}
+
+impl StaticPromptSnapshot {
+    pub fn skills_chars(&self, skills: &[SkillInfo]) -> Option<usize> {
+        self.skills_chars.or_else(|| {
+            if self.file_versions.is_none() {
+                return Some(0);
+            }
+            let Some(section) = build_available_skills_section(skills) else {
+                return Some(0);
+            };
+            // Legacy snapshots did not record the boundary. Attribute it only
+            // if the frozen prompt contains the captured list as a section.
+            self.text
+                .contains(&format!("\n\n{section}"))
+                .then_some(section.len())
+        })
+    }
+}
+
+pub struct PromptFiles {
+    base_override: Option<String>,
+    overlay: (Option<String>, usize),
+    preferred_tools: (Option<String>, usize),
+}
+
+impl PromptFiles {
+    pub fn load(working_dir: Option<&Path>) -> Self {
+        Self {
+            base_override: load_base_system_prompt_override(working_dir),
+            overlay: load_prompt_overlay_files_from_dir(working_dir),
+            preferred_tools: load_preferred_tools_files_from_dir(working_dir),
+        }
+    }
+
+    fn sections(&self) -> [(&'static str, Option<&str>); 3] {
+        [
+            ("system-prompt.md", self.base_override.as_deref()),
+            ("prompt-overlay.md", self.overlay.0.as_deref()),
+            ("preferred-tools.md", self.preferred_tools.0.as_deref()),
+        ]
+    }
+
+    pub fn versions(&self) -> PromptFileVersions {
+        use sha2::{Digest, Sha256};
+        self.sections()
+            .map(|(_, text)| text.map(|text| format!("{:x}", Sha256::digest(text))))
+    }
+
+    pub fn change_reminder(
+        &self,
+        previous: &PromptFileVersions,
+    ) -> Option<(String, PromptFileVersions)> {
+        let versions = self.versions();
+        if &versions == previous {
+            return None;
+        }
+        let mut reminder = String::from(
+            "<system-reminder>\nLocal prompt files changed. The sections below supersede their frozen counterparts and any earlier updates for the same files.\n",
+        );
+        for (index, (name, text)) in self.sections().into_iter().enumerate() {
+            if versions[index] == previous[index] {
+                continue;
+            }
+            reminder.push_str(&format!("\n## {name}\n\n"));
+            reminder.push_str(match (name, text) {
+                (_, Some(text)) => text,
+                ("system-prompt.md", None) => DEFAULT_SYSTEM_PROMPT,
+                _ => "This file section is no longer configured.",
+            });
+            reminder.push('\n');
+        }
+        reminder.push_str("</system-reminder>");
+        Some((reminder, versions))
+    }
+}
+
+/// Bootstrap inputs frozen along with AGENTS.md and the skill list.
+pub struct StaticPromptSources {
+    capabilities: PromptCapabilities,
+    pub files: PromptFiles,
+}
+
+impl StaticPromptSources {
+    pub fn load(working_dir: Option<&Path>) -> Self {
+        Self::with_capabilities(working_dir, PromptCapabilities::current())
+    }
+
+    fn with_capabilities(working_dir: Option<&Path>, capabilities: PromptCapabilities) -> Self {
+        Self {
+            capabilities,
+            files: PromptFiles::load(working_dir),
+        }
+    }
 }
 
 /// Built-in default swarm prompt: model-routing guidance for spawned swarm
@@ -159,19 +426,19 @@ impl SplitSystemPrompt {
         }
     }
 
-    pub fn estimated_tokens(&self) -> usize {
-        crate::util::estimate_tokens(&if self.static_part.is_empty() {
-            self.dynamic_part.clone()
-        } else if self.dynamic_part.is_empty() {
-            self.static_part.clone()
-        } else {
-            format!("{}\n\n{}", self.static_part, self.dynamic_part)
-        })
+    pub fn estimated_tokens(&self, family: jcode_message_types::TokenFamily) -> usize {
+        let mut estimator = jcode_message_types::Estimator::new(family);
+        // The two parts are one concatenated prompt on the wire.
+        for part in [&self.static_part, &self.dynamic_part] {
+            // Writing to the estimator cannot fail.
+            let _ = std::fmt::Write::write_str(&mut estimator, part);
+        }
+        estimator.tokens()
     }
 }
 
 /// Skill info for system prompt
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
@@ -265,9 +532,9 @@ pub struct ContextInfo {
 }
 
 impl ContextInfo {
-    /// Rough estimate of tokens (chars / 4 is a common approximation)
-    pub fn estimated_tokens(&self) -> usize {
-        self.total_chars / 4
+    /// Size-only token estimate; see [`jcode_message_types::TokenFamily::tokens_for_bytes`].
+    pub fn estimated_tokens(&self, family: jcode_message_types::TokenFamily) -> usize {
+        family.tokens_for_bytes(self.total_chars)
     }
 
     pub fn prompt_prefix_chars(&self) -> usize {
@@ -283,12 +550,12 @@ impl ContextInfo {
             + self.tool_defs_chars
     }
 
-    pub fn prompt_prefix_tokens(&self) -> usize {
-        self.prompt_prefix_chars() / 4
+    pub fn prompt_prefix_tokens(&self, family: jcode_message_types::TokenFamily) -> usize {
+        family.tokens_for_bytes(self.prompt_prefix_chars())
     }
 
-    pub fn tool_definition_tokens(&self) -> usize {
-        self.tool_defs_chars / 4
+    pub fn tool_definition_tokens(&self, family: jcode_message_types::TokenFamily) -> usize {
+        family.tokens_for_bytes(self.tool_defs_chars)
     }
 
     /// Get breakdown as (label, chars, icon) tuples for display
@@ -388,7 +655,7 @@ pub fn build_system_prompt_full_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> (String, ContextInfo) {
-    let mut parts = base_system_prompt_parts(capabilities, working_dir);
+    let mut parts = base_system_prompt_parts(capabilities, load_base_system_prompt(working_dir));
     let mut info = ContextInfo {
         system_prompt_chars: parts.join("\n\n").len(),
         ..Default::default()
@@ -480,13 +747,13 @@ pub fn build_system_prompt_split_with_capabilities(
     capabilities: PromptCapabilities,
 ) -> (SplitSystemPrompt, ContextInfo) {
     let agents_md = load_agents_md_files_from_dir(working_dir);
-    build_system_prompt_split_with_capabilities_and_agents_md(
+    build_system_prompt_split_with_sources(
         skill_prompt,
         available_skills,
         is_selfdev,
         memory_prompt,
         working_dir,
-        capabilities,
+        &StaticPromptSources::with_capabilities(working_dir, capabilities),
         agents_md,
     )
 }
@@ -504,27 +771,65 @@ pub fn build_system_prompt_split_with_agents_md(
     working_dir: Option<&Path>,
     agents_md: (Option<String>, ContextInfo),
 ) -> (SplitSystemPrompt, ContextInfo) {
-    build_system_prompt_split_with_capabilities_and_agents_md(
+    build_system_prompt_split_with_sources(
         skill_prompt,
         available_skills,
         is_selfdev,
         memory_prompt,
         working_dir,
-        PromptCapabilities::current(),
+        &StaticPromptSources::load(working_dir),
         agents_md,
     )
 }
 
-fn build_system_prompt_split_with_capabilities_and_agents_md(
+pub fn build_system_prompt_split_with_sources(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
     is_selfdev: bool,
     memory_prompt: Option<&str>,
     working_dir: Option<&Path>,
-    capabilities: PromptCapabilities,
+    sources: &StaticPromptSources,
     agents_md: (Option<String>, ContextInfo),
 ) -> (SplitSystemPrompt, ContextInfo) {
-    let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
+    build_system_prompt_split_composed(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        sources,
+        agents_md,
+        &PromptComposition::default(),
+    )
+}
+
+/// Build a split prompt for one session's tool policy and agent profile.
+///
+/// Order: base or model replacement (tool-gated), model appends, capability
+/// modules, agent profile, self-dev,
+/// AGENTS.md, overlay, preferred tools, skills. Everything here is static for
+/// the session and freezes with the provider-cache prefix.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors build_system_prompt_split_with_sources plus the session composition"
+)]
+pub fn build_system_prompt_split_composed(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    sources: &StaticPromptSources,
+    agents_md: (Option<String>, ContextInfo),
+    composition: &PromptComposition<'_>,
+) -> (SplitSystemPrompt, ContextInfo) {
+    let base = composition
+        .model_prompt
+        .and_then(|model_prompt| model_prompt.replace.as_deref())
+        .or(sources.files.base_override.as_deref())
+        .unwrap_or(DEFAULT_SYSTEM_PROMPT);
+    let mut static_parts =
+        base_system_prompt_parts_composed(sources.capabilities, base.into(), composition);
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
         system_prompt_chars: static_parts.join("\n\n").len(),
@@ -554,22 +859,23 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     info.global_agents_md_chars = md_info.global_agents_md_chars;
 
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
-    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
+    let (overlay_content, overlay_chars) = &sources.files.overlay;
     if let Some(content) = overlay_content {
-        info.prompt_overlay_chars = overlay_chars;
-        static_parts.push(content);
+        info.prompt_overlay_chars = *overlay_chars;
+        static_parts.push(content.clone());
     }
 
     // Add optional preferred-tool guidance (static per project/user)
-    let (preferred_tools_content, preferred_tools_chars) =
-        load_preferred_tools_files_from_dir(working_dir);
+    let (preferred_tools_content, preferred_tools_chars) = &sources.files.preferred_tools;
     if let Some(content) = preferred_tools_content {
-        info.preferred_tools_chars = preferred_tools_chars;
-        static_parts.push(content);
+        info.preferred_tools_chars = *preferred_tools_chars;
+        static_parts.push(content.clone());
     }
 
     // Add available skills list (fairly static)
-    if let Some(skills_section) = build_available_skills_section(available_skills) {
+    if composition.include_skills()
+        && let Some(skills_section) = build_available_skills_section(available_skills)
+    {
         info.skills_chars = skills_section.len();
         static_parts.push(skills_section);
     }

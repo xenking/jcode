@@ -48,7 +48,10 @@ fn stream_event_is_replay_visible(event: &StreamEvent) -> bool {
         | StreamEvent::MessageEnd { .. }
         | StreamEvent::Compaction { .. }
         | StreamEvent::NativeToolCall { .. }
-        | StreamEvent::ProviderNative { .. } => true,
+        | StreamEvent::ProviderNative { .. }
+        // Attribution must be rolled back even if no text arrived, otherwise
+        // an attempt lacking model metadata can inherit the failed model ID.
+        | StreamEvent::ResolvedModel { .. } => true,
         StreamEvent::ThinkingStart
         | StreamEvent::ThinkingEnd
         | StreamEvent::ThinkingDone { .. }
@@ -58,6 +61,7 @@ fn stream_event_is_replay_visible(event: &StreamEvent) -> bool {
         | StreamEvent::ConnectionPhase { .. }
         | StreamEvent::StatusDetail { .. }
         | StreamEvent::ServiceTier { .. }
+        | StreamEvent::SpeedReported { .. }
         | StreamEvent::Error { .. }
         | StreamEvent::SessionId(_)
         | StreamEvent::UpstreamProvider { .. } => false,
@@ -204,6 +208,15 @@ mod tests {
         ] {
             assert!(stream_event_is_replay_visible(&event), "{event:?}");
         }
+    }
+
+    #[test]
+    fn model_metadata_requires_rollback_even_without_text() {
+        assert!(stream_event_is_replay_visible(
+            &StreamEvent::ResolvedModel {
+                model: "actual-upstream-model".into(),
+            }
+        ));
     }
 
     #[test]

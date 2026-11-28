@@ -56,7 +56,9 @@ jcode mcp logout remote
 ```
 
 `test` connects to the configured server, initializes the protocol, lists its
-tools, and shuts down. It exits unsuccessfully when the connection or handshake
+tools, and shuts down. Each tool row says whether the server declared it
+read-only and whether it returns a typed result (see
+[MCP_TOOLS.md](MCP_TOOLS.md)). It exits unsuccessfully when the connection or handshake
 fails. It does not invoke an LLM or run the server's tools.
 
 `login` is explicit and interactive. It discovers OAuth metadata, registers a

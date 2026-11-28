@@ -66,6 +66,7 @@ A blocked command must not silently execute against the laptop.
 | Registered commands | SSH capability | Details and limitations |
 | --- | --- | --- |
 | `/help`, `/?`, `/commands` | UI | Help overlay and command topics describe the build, not proof of VM capability. |
+| `/mode` | Runtime | Show pinned session skills. `/mode toggle <skill>` adds or removes one, `/mode <skill>` replaces the set, and `/mode off` clears it. The host resolves skills and persists the selection. |
 | `/model`, `/models` | Wire + UI | Server catalog picker and explicit model selection. `/model refresh` requests a fresh server catalog. |
 | `/refresh-model-list` | Wire | Refresh provider catalogs on the server. |
 | `/provider-test-coverage`, `/model-status` | Runtime | Read persisted verification evidence from the VM, not the laptop. |
@@ -130,6 +131,7 @@ A blocked command must not silently execute against the laptop.
 | `/logout` | Runtime | Requires `/logout <provider> confirm`. Unconfirmed requests only explain the cleanup scope. Does not revoke external credentials, and live provider instances may retain in-memory credentials until reconnect. |
 | `/login` | Remote login | Dedicated SSH login flow. Never use the laptop provider login picker as fallback. |
 | `/account`, `/accounts` | Remote account flow | Host inventory/switches, doctor/settings/defaults and account removal use daemon APIs. Removal requires a review before confirmation. Named logins use the SSH bridge. Never enumerate laptop account storage. |
+| `/acct` | Wire request | Sends a routing intent to the daemon (`status`, `pin`, `switch`, `hold`, `ack`, `paid`, `unstick`) and prints its reply. Nothing is read from or written to the laptop. |
 | `/cache` | Runtime | VM provider usage and Anthropic TTL setting. No cache eviction/prewarming or precise expiry guarantee. |
 | `/debug-visual`, `/screenshot-mode`, `/screenshot`, `/record` | Client UI | Debug and capture the displaying terminal using the existing local capture facilities. Capture files intentionally stay on the client. |
 | `/continue`, `/resumeall`, `/resume-all` | Wire | Resume interrupted daemon sessions using `ResumeAllSessions`, not laptop session enumeration. |

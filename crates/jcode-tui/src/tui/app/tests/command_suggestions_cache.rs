@@ -12,7 +12,16 @@ fn cached_suggestions_match_uncached_across_input_mutations() {
     let mut app = create_test_app();
 
     for input in [
-        "", "/", "/m", "/mod", "/model", "/help", "/conifg", "/goals ", "/rewind ", "not a command",
+        "",
+        "/",
+        "/m",
+        "/mod",
+        "/model",
+        "/help",
+        "/conifg",
+        "/goals ",
+        "/rewind ",
+        "not a command",
         "/",
     ] {
         app.input = input.to_string();
@@ -72,18 +81,24 @@ fn advancing_the_epoch_forces_recomputation_for_identical_input() {
     let before = app.command_suggestions();
 
     // Mutate state the key deliberately does not track, then advance the frame.
-    app.session.messages.push(crate::session::StoredMessage {
-        id: "msg-rewind-target".to_string(),
-        role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: "a new rewind target".to_string(),
-            cache_control: None,
-        }],
-        display_role: None,
-        timestamp: None,
-        tool_duration_ms: None,
-        token_usage: None,
-    });
+    app.session
+        .messages_mut_for_tests()
+        .push(crate::session::StoredMessage {
+            codemode: None,
+            ask: None,
+            attachment_data: None,
+            id: "msg-rewind-target".to_string(),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "a new rewind target".to_string(),
+                cache_control: None,
+            }]
+            .into(),
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
     app.advance_command_suggestions_epoch();
 
     let after = app.command_suggestions();

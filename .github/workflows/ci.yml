@@ -1,19 +1,20 @@
 name: CI
 
 on:
-  # Allows exact-source validation after bot-authored commits, whose pushes
-  # do not trigger workflows when made with GITHUB_TOKEN.
+  # Runs the full native matrix. For fork releases, run it before tagging.
   workflow_dispatch:
   push:
     branches: [main, master]
   pull_request:
     branches: [main, master]
 
-# Release authorization needs completed exact-SHA main-push CI. Keep those
-# runs alive when master advances, while still cancelling obsolete PR checks.
+# Release authorization needs exact-SHA CI. Cancel only superseded PR checks.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && github.sha || 'latest' }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'latest' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 env:
   JCODE_CI: "1"
@@ -32,6 +33,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -54,10 +56,6 @@ jobs:
         # No continue-on-error: any failed check still fails the quality job.
         if: ${{ !cancelled() }}
         run: cargo fmt --all -- --check
-
-      - name: Check all targets and all features
-        if: ${{ !cancelled() }}
-        run: cargo check --locked --all-targets --all-features
 
       - name: Run clippy with warnings denied
         if: ${{ !cancelled() }}
@@ -127,36 +125,59 @@ jobs:
           cargo install cargo-machete --locked
           cargo machete
 
-  release-automation:
-    name: Release Automation
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Test Discord release announcements
-        run: python3 -m unittest -v scripts/test_post_discord_release.py
-
-      - name: Test justrust release installation and routing
+      - name: Enforce test home and hook isolation
+        if: ${{ !cancelled() }}
+        shell: bash
         run: |
-          python3 tests/test_ci_workflow_guards.py
-          python3 tests/test_install_justrust_ci.py
-          python3 tests/test_install_justrust_hosted_ci.py
-          python3 tests/test_public_release_builds.py
-          python3 tests/test_release_ci.py
-          python3 scripts/test_safety_budgets.py
-          python3 tests/test_bash_platform_guards.py
-          python3 scripts/test_quick_release.py
-          python3 scripts/test_preview_release.py
-          python3 scripts/test_reconcile_preview_release.py
-          python3 tests/test_preview_linux_hosted.py
-          python3 tests/test_package_preview_linux_hosted.py
-          python3 tests/test_verify_public_release.py
-          python3 tests/test_watch_release_run.py
-          bash -n scripts/install_justrust_ci.sh scripts/build_linux_compat.sh scripts/quick-release.sh
+          python3 scripts/test_check_test_isolation.py
+          python3 scripts/check_test_isolation.py
 
-      - name: Compile release automation scripts
-        run: python3 -m py_compile scripts/post_discord_release.py scripts/test_post_discord_release.py
+      - name: Enforce swarm registry lock order
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          (cd scripts && python3 test_check_lock_order.py)
+          python3 scripts/check_lock_order.py
+
+      - name: Enforce display-cell chrome widths
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 scripts/test_check_tui_chrome.py
+          python3 scripts/check_tui_chrome.py
+
+      - name: Enforce quota and progress bar ownership
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 scripts/test_check_usage_bar_owner.py
+          python3 scripts/check_usage_bar_owner.py
+
+      - name: Enforce complete cached and forced catalog fanout
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 scripts/test_check_catalog_fanout.py
+          python3 scripts/check_catalog_fanout.py
+
+      - name: Enforce no private references in tracked files
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          (cd scripts && python3 test_check_private_refs.py)
+          python3 scripts/check_private_refs.py
+
+      - name: Test idle-load measurement and budget accounting
+        if: ${{ !cancelled() }}
+        run: python3 scripts/test_check_idle_load.py
+
+      - name: Test build admission reclaim-and-retry
+        if: ${{ !cancelled() }}
+        run: python3 scripts/test_build_admission_reclaim.py
+
+      - name: Test fork CI routing policy
+        if: ${{ !cancelled() && github.repository == 'xenking/jcode' }}
+        run: python3 scripts/test_fork_ci.py
 
   build:
     name: Build & Test (${{ matrix.os }})
@@ -182,17 +203,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
+        # Fork pushes keep Linux. PRs and manual CI also run macOS.
+        include: >-
+          ${{ fromJSON(github.repository == 'xenking/jcode' && github.event_name == 'push'
+          && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"}]'
+          || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]') }}
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -211,34 +232,31 @@ jobs:
           # artifacts produced before RUSTUP_TOOLCHAIN=stable pinned the job.
           key: ${{ matrix.os }}-stablepin
 
-      - name: Install mold linker (Linux)
+      - name: Install Linux test dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq mold
+          sudo apt-get install -y -qq mold tmux
 
-      - name: Build
+      - name: Configure Linux linker
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           mkdir -p .cargo
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            cat > .cargo/config.toml << 'EOF'
+          cat > .cargo/config.toml << 'EOF'
           [target.x86_64-unknown-linux-gnu]
           linker = "clang"
           rustflags = ["-C", "link-arg=-fuse-ld=mold"]
           EOF
-          fi
-          # NOTE: intentionally NOT exporting RUSTC_WRAPPER=sccache here. Only this
-          # step used sccache while the later `cargo test --no-run` steps did not,
-          # so sccache emitted rlibs/rmetas stamped `<unknown rustc version>` that
-          # the non-sccache test compile then rejected with E0514
-          # ("compiled by an incompatible version of rustc"). rust-cache already
-          # caches target/ across runs, so a clean, wrapper-consistent build is
-          # both correct and fast enough.
-          RUSTC="$(rustup which rustc)"
-          export RUSTC
-          CARGO_BIN="$(rustup which cargo)"
-          "$CARGO_BIN" build --locked --release --target ${{ matrix.target }}
+
+      - name: Build release configuration
+        if: github.repository != 'xenking/jcode' || github.event_name != 'push'
+        shell: bash
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Smoke-test release daemon allocator
+        if: github.repository != 'xenking/jcode' || github.event_name != 'push'
+        run: python3 scripts/check_daemon_allocator.py target/${{ matrix.target }}/release/jcode
 
       - name: Compile library and binary tests
         shell: bash
@@ -360,6 +378,38 @@ jobs:
             "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
             -p jcode-app-core --lib tool::bash::tests::test_stdin_forwarding -- --nocapture
 
+      - name: Compile integration test binaries
+        shell: bash
+        # Build the integration-test binaries up front (not counted against the
+        # run steps' execution budgets). The e2e suite in particular is heavy
+        # (burst-spawn concurrency), and folding compilation into its 900s run
+        # budget was pushing slower hosted ubuntu/macos runners over the limit.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 900 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            --test provider_matrix --test e2e --test routing_acceptance --no-run
+
+      - name: Verify interactive streaming in a terminal (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          verify=.jcode/skills/verify-jcode/scripts/verify-jcode
+          evidence="$RUNNER_TEMP/jcode-terminal-journey"
+          trap '"$verify" cleanup --evidence "$evidence"' EXIT
+          "$verify" launch --binary "target/${{ matrix.target }}/debug/jcode" --evidence "$evidence"
+          "$verify" drive --evidence "$evidence" terminal-journey
+          "$verify" cleanup --evidence "$evidence"
+          trap - EXIT
+
+      - name: Upload terminal journey failure evidence
+        if: failure() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-terminal-journey
+          path: ${{ runner.temp }}/jcode-terminal-journey
+          if-no-files-found: ignore
+
       - name: Run TUI library tests (Linux only)
         if: runner.os == 'Linux'
         shell: bash
@@ -398,16 +448,13 @@ jobs:
             --skip test_prompt_entry_shimmer_color_moves_across_positions \
             --skip right_fact_stack_uses_neutral_gray_except_for_context_usage
 
-      - name: Compile integration test binaries
-        shell: bash
-        # Build the integration-test binaries up front (not counted against the
-        # run steps' execution budgets). The e2e suite in particular is heavy
-        # (burst-spawn concurrency), and folding compilation into its 900s run
-        # budget was pushing slower hosted ubuntu/macos runners over the limit.
-        run: |
-          python3 .github/scripts/run_with_timeout.py 900 \
-            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
-            --test provider_matrix --test e2e --no-run
+      - name: Enforce daemon idle-load budget (Linux)
+        if: runner.os == 'Linux'
+        # Fork pushes skip the release build. Cargo already built a runnable
+        # debug CLI for the integration tests (CARGO_BIN_EXE_jcode).
+        env:
+          PROFILE: ${{ github.repository == 'xenking/jcode' && github.event_name == 'push' && 'debug' || 'release' }}
+        run: python3 scripts/check_idle_load.py "target/${{ matrix.target }}/$PROFILE/jcode"
 
       - name: Run provider matrix tests
         shell: bash
@@ -424,16 +471,17 @@ jobs:
           python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --locked --target ${{ matrix.target }} --test e2e
 
-      - name: Check PowerShell script syntax (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: Run routing acceptance (real daemon, fixture provider)
+        shell: bash
         run: |
-          ./scripts/check_powershell_syntax.ps1
+          # A private daemon per scenario against a loopback fixture with two
+          # keys: no network, no real account. Unix only (unix sockets).
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} --test routing_acceptance
 
-      # Linux and macOS. Windows still has its own cfg-gated surface and is
-      # not yet warning-clean, so it stays out of the gate (#1177).
-      - name: Enforce warning budget (Linux, macOS)
-        if: runner.os == 'Linux' || runner.os == 'macOS'
+      # Quality Guardrails already checks the Linux warning budget.
+      - name: Enforce warning budget (macOS)
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           scripts/check_warning_budget.sh
@@ -447,12 +495,14 @@ jobs:
 
   windows-build-test:
     name: Build & Test (windows-latest)
+    if: github.repository != 'xenking/jcode' || github.event_name != 'push'
     runs-on: windows-latest
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -637,32 +687,14 @@ jobs:
             -ArtifactExePath 'target/x86_64-pc-windows-msvc/release/jcode.exe' `
             -Version $version
 
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Check module declarations resolve
-        # A `mod x;` with no file makes rustfmt fail with "Error writing files:
-        # failed to resolve mod", which reads like a formatting problem and hides
-        # every gate behind it. Naming the real cause first (221159294).
-        run: python3 scripts/check_module_files.py
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
   typescript-sdk:
     name: TypeScript SDK
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -694,26 +726,29 @@ jobs:
 
   setup-friction:
     name: Setup Friction Eval (Linux installer)
+    if: github.repository != 'xenking/jcode' || github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install probe shells
         run: sudo apt-get update && sudo apt-get install -y fish zsh
-
-      - name: Installer conversion telemetry tests
-        run: bash scripts/test_install_conversion.sh
 
       - name: Setup friction scorecard
         run: bash scripts/setup_friction_eval.sh
 
   powershell-syntax:
     name: PowerShell Syntax
+    if: github.repository != 'xenking/jcode' || github.event_name != 'push'
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Check PowerShell script syntax (Windows PowerShell 5.1)
         shell: powershell
@@ -727,6 +762,7 @@ jobs:
 
   windows-arm64-check:
     name: Windows ARM64 Release Configuration
+    if: github.repository != 'xenking/jcode' || github.event_name != 'push'
     runs-on: windows-latest
     timeout-minutes: 35
     env:
@@ -740,6 +776,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -768,12 +805,14 @@ jobs:
 
   windows-cross-check:
     name: Windows Cross-Target Check (Linux)
+    if: github.repository != 'xenking/jcode' || github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:

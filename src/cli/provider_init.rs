@@ -1247,8 +1247,32 @@ fn maybe_enable_copilot_auth_for_auto(has_other_provider: bool) -> Result<bool> 
     Ok(false)
 }
 
+fn ensure_grok_build_auth_allowed_for_explicit_choice() -> Result<()> {
+    if auth::grok_build::has_cached_login() {
+        return Ok(());
+    }
+    let Some(path) = auth::grok_build::auth_json_path().filter(|path| path.exists()) else {
+        return Ok(());
+    };
+    if !can_prompt_for_external_auth() {
+        anyhow::bail!(external_auth_blocked_message(
+            "Grok Build",
+            "Grok CLI",
+            &path,
+            "jcode login --provider grok-build"
+        ));
+    }
+    if prompt_to_trust_external_auth("Grok Build", "Grok CLI", &path)? {
+        auth::grok_build::trust_cli_auth_for_future_use()?;
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Skipped trusting Grok CLI credentials. Run `jcode login --provider grok-build` to authenticate jcode directly."
+    )
+}
+
 fn ensure_cursor_auth_allowed_for_explicit_choice() -> Result<()> {
-    if auth::cursor::has_cursor_native_auth() || auth::cursor::has_cursor_api_key() {
+    if auth::cursor::has_cursor_native_auth() {
         return Ok(());
     }
     let Some(source) = auth::cursor::has_unconsented_external_auth() else {
@@ -1273,7 +1297,7 @@ fn ensure_cursor_auth_allowed_for_explicit_choice() -> Result<()> {
 }
 
 fn maybe_enable_cursor_auth_for_auto(has_other_provider: bool) -> Result<bool> {
-    if auth::cursor::has_cursor_native_auth() || auth::cursor::has_cursor_api_key() {
+    if auth::cursor::has_cursor_native_auth() {
         return Ok(true);
     }
     let Some(source) = auth::cursor::has_unconsented_external_auth() else {
@@ -1627,6 +1651,7 @@ async fn init_provider_with_model_policy(
             Arc::new(jcode_provider_gemini_runtime::GeminiProvider::new())
         }
         ProviderChoice::GrokBuild => {
+            ensure_grok_build_auth_allowed_for_explicit_choice()?;
             disable_subscription_runtime_mode();
             init_notice("Using Grok Build subscription (Grok CLI login, direct HTTPS)");
             clear_initial_model_provider();

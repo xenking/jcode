@@ -52,13 +52,14 @@ fn run_session<R: BufRead, W: Write>(mut client: HarnessClient<R, W>, message: &
     let session_id = loop {
         let frame = client.recv().expect("recv");
         print_event(&frame);
-        if let ApiEvent::Attached { session } = &frame.event {
+        if let ApiEvent::Attached { session, .. } = &frame.event {
             break session.session_id.clone();
         }
     };
 
     client
         .send(ApiRequest::SendMessage {
+            attachments: Vec::new(),
             session_id: session_id.clone(),
             content: message.to_string(),
             images: vec![],
@@ -111,6 +112,7 @@ fn run_demo() {
                 "hello" => reply(&ServerFrame::reply(
                     id,
                     ApiEvent::HelloOk {
+                        runtime_identity: None,
                         version: API_VERSION_MAJOR,
                         server: "jcode-demo/0".into(),
                         capabilities: vec!["sessions".into()],
@@ -119,8 +121,10 @@ fn run_demo() {
                 "create_session" => reply(&ServerFrame::reply(
                     id,
                     ApiEvent::Attached {
+                        pending_ask_ids: None,
                         session: jcode_harness_api::SessionInfo {
                             edit_stats: None,
+                            context: None,
                             user_connected: false,
                             parent_session_id: None,
                             agent_label: None,

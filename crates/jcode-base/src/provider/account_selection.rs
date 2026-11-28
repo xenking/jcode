@@ -37,13 +37,24 @@ impl MultiProvider {
             return Ok(());
         }
         // A freshly spawned session inherits the process-wide account. If that
-        // login is known to be spent (local cooldown, no network IO), start on
-        // the next ready pool member instead of failing the first request.
+        // login is known to be spent (local cooldown or cached quota, no network
+        // IO), start on the next ready pool member instead of failing the first
+        // request. Use the same exact-account usage check as the request guard:
+        // usage reports can establish exhaustion before a request records 429.
         let label = match models::provider_unavailability_detail_for_account_label(
             Self::provider_key(target),
             Some(&label),
-        ) {
-            Some(reason) if same_provider_account_failover_enabled() => {
+        )
+        .or_else(|| {
+            account_failover::multi_account_provider_kind(target)
+                .filter(|kind| crate::usage::account_known_exhausted(*kind, &label))
+                .map(|_| "OAuth usage exhausted".to_string())
+        }) {
+            // With routing in auto the session keeps the account routing chose.
+            Some(reason)
+                if same_provider_account_failover_enabled()
+                    && !account_failover::routing_decides(target, &self.model()) =>
+            {
                 match account_failover::same_provider_account_candidates(target)
                     .into_iter()
                     .next()
@@ -92,8 +103,8 @@ impl MultiProvider {
     }
 
     /// Select a saved login without rewriting the process-wide account preference.
-    /// Build the replacement off to the side so validation errors leave the old
-    /// runtime, model and account untouched.
+    /// Keep the runtime when selecting a model on its current login. Validate
+    /// a different login on a fork before replacing the runtime.
     pub(super) fn set_model_on_saved_account(
         &self,
         method: &str,
@@ -127,16 +138,23 @@ impl MultiProvider {
             _ => unreachable!(),
         }
         .ok_or_else(|| anyhow!("{} runtime is not configured", Self::provider_label(target)))?;
-        let replacement = runtime.fork();
-        replacement.set_oauth_account(Some(label))?;
-        replacement.set_credential_mode(CredentialMode::OAuth)?;
-        replacement.set_model(&model_name_for_provider(target, model.trim()))?;
-        let slot = match target {
-            ActiveProvider::Claude => &self.anthropic,
-            ActiveProvider::OpenAI => &self.openai,
-            _ => unreachable!(),
-        };
-        *slot.write().unwrap_or_else(|p| p.into_inner()) = Some(replacement);
+        let model = model_name_for_provider(target, model.trim());
+        if runtime.credential_mode() == CredentialMode::OAuth
+            && runtime.oauth_account_label().as_deref() == Some(label)
+        {
+            runtime.set_model(&model)?;
+        } else {
+            let replacement = runtime.fork();
+            replacement.set_oauth_account(Some(label))?;
+            replacement.set_credential_mode(CredentialMode::OAuth)?;
+            replacement.set_model(&model)?;
+            let slot = match target {
+                ActiveProvider::Claude => &self.anthropic,
+                ActiveProvider::OpenAI => &self.openai,
+                _ => unreachable!(),
+            };
+            *slot.write().unwrap_or_else(|p| p.into_inner()) = Some(replacement);
+        }
         self.set_active_provider(target);
         self.invalidate_routes_memo();
         Ok(())

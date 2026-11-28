@@ -4,7 +4,10 @@ use crate::tui::cloud_git::{bounded_output, script_command};
 #[test]
 fn workspace_operations_are_static_and_all_production_paths_are_assigned() {
     use crate::tui::cloud_git::WorkspaceOperation::*;
-    assert!(include_str!("cloud_git.rs").contains("timing.operation(operation.label())"));
+    assert!(
+        include_str!("cloud_git.rs")
+            .contains("Span::new(\"workspace_command\").during(operation.label())")
+    );
     assert_eq!(
         [
             GitProbe,

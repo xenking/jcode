@@ -1,0 +1,968 @@
+//! Runtime-backed slash command execution. No command becomes an agent prompt.
+use crate::agent::Agent;
+use anyhow::{Result, bail};
+use jcode_harness_api::RuntimeCommand;
+use serde_json::{Value, json};
+
+pub(super) async fn background_output(
+    manager: &crate::background::BackgroundTaskManager,
+    session_id: &str,
+    args: &[String],
+) -> Result<(Value, String)> {
+    let [task_id] = args else {
+        bail!("Expected a task identifier")
+    };
+    if task_id.is_empty()
+        || !task_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        bail!("Invalid task identifier");
+    }
+    let task = manager
+        .status(task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Background task not found"))?;
+    if task.session_id != session_id {
+        bail!("Background task not found");
+    }
+    let output = manager
+        .output(task_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Background output unavailable"))?;
+    Ok((json!({"task_id": task_id, "output": output}), String::new()))
+}
+
+#[cfg(test)]
+mod background_output_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn full_output_is_scoped_to_the_attached_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            crate::background::BackgroundTaskManager::with_output_dir(dir.path().to_owned());
+        let status = json!({"task_id":"abc", "tool_name":"bash", "session_id":"owner", "status":"completed", "exit_code":0, "error":null, "started_at":"2026-01-01T00:00:00Z", "completed_at":null, "duration_secs":1.0});
+        tokio::fs::write(manager.status_path_for("abc"), status.to_string())
+            .await
+            .unwrap();
+        let output = format!("{}last line", "line\n".repeat(300));
+        tokio::fs::write(manager.output_path_for("abc"), &output)
+            .await
+            .unwrap();
+        let (result, _) = background_output(&manager, "owner", &["abc".into()])
+            .await
+            .unwrap();
+        assert_eq!(result["output"], output);
+        assert!(
+            background_output(&manager, "other", &["abc".into()])
+                .await
+                .is_err()
+        );
+        assert!(
+            background_output(&manager, "owner", &["../abc".into()])
+                .await
+                .is_err()
+        );
+    }
+}
+
+pub(super) fn boolean_action(
+    args: &[String],
+    current: bool,
+    toggle_empty: bool,
+) -> Result<Option<bool>> {
+    match args {
+        [] if toggle_empty => Ok(Some(!current)),
+        [] => Ok(None),
+        [arg] => match arg.to_ascii_lowercase().as_str() {
+            "status" | "show" => Ok(None),
+            "on" | "enable" | "enabled" => Ok(Some(true)),
+            "off" | "disable" | "disabled" => Ok(Some(false)),
+            "toggle" => Ok(Some(!current)),
+            _ => bail!("Expected on, off, toggle, or status"),
+        },
+        _ => bail!("Expected at most one argument"),
+    }
+}
+
+fn status_only(args: &[String]) -> Result<()> {
+    match args {
+        [] => Ok(()),
+        [arg] if matches!(arg.as_str(), "status" | "show" | "stats") => Ok(()),
+        _ => bail!("This command accepts only status, show, or stats"),
+    }
+}
+
+pub(super) async fn execute(
+    agent: &mut Agent,
+    command: RuntimeCommand,
+    args: &[String],
+    swarm_enabled: bool,
+    swarm_data: Value,
+) -> Result<(Value, String)> {
+    let config = crate::config::Config::load();
+    let data = match command {
+        RuntimeCommand::BackgroundOutput => {
+            bail!("Background output must be handled by the session runtime")
+        }
+        RuntimeCommand::Mode => {
+            let message = if let [flag, name, arguments] = args
+                && flag == "--invoke-skill"
+            {
+                agent.invoke_pinned_skill(name, arguments)?;
+                String::new()
+            } else {
+                agent.mode_command(&args.join(" "))?
+            };
+            let pinned = Agent::read_session(agent, |session| {
+                json!({"pinned_skill": session.pinned_skill(), "pinned_skills": session.pinned_skill_names()})
+            });
+            return Ok((
+                pinned,
+                if args.first().is_some_and(|arg| arg == "toggle") {
+                    String::new()
+                } else {
+                    message
+                },
+            ));
+        }
+        RuntimeCommand::Review | RuntimeCommand::Judge | RuntimeCommand::Subagent => {
+            let role = match command {
+                RuntimeCommand::Review => "review",
+                RuntimeCommand::Judge => "judge",
+                _ => "swarm",
+            };
+            let (explicit_model, label, requested) = role_args(args, role)?;
+            let prompt = match command {
+                RuntimeCommand::Review => format!(
+                    "Independently review the current working tree changes. Inspect the diff, correctness, regressions, security and tests. Report concrete findings with file references. Do not edit files. User focus: {requested}"
+                ),
+                RuntimeCommand::Judge => format!(
+                    "Independently judge the current implementation against the user request. Inspect actual changes and verification evidence, identify unmet acceptance criteria and missing tests. Do not edit files. User focus: {requested}"
+                ),
+                _ if requested.trim().is_empty() => bail!("Usage: /subagent <task>"),
+                _ => requested,
+            };
+            let global = match command {
+                RuntimeCommand::Review => config.autoreview.model.clone(),
+                RuntimeCommand::Judge => config.autojudge.model.clone(),
+                _ => agent.subagent_model().or(config.agents.swarm_model.clone()),
+            };
+            let model = explicit_model.or_else(|| {
+                Agent::read_session(agent, |session| session.effective_agent_model(role, global))
+            });
+            let output = agent
+                .registry()
+                .execute(
+                    "swarm",
+                    json!({"action": "spawn", "label": label, "prompt": prompt, "model": model}),
+                    crate::tool::ToolContext {
+                        session_id: agent.session_id().into(),
+                        message_id: crate::id::new_id("msg"),
+                        tool_call_id: crate::id::new_id("call"),
+                        working_dir: agent.working_dir().map(std::path::PathBuf::from),
+                        stdin_request_tx: None,
+                        graceful_shutdown_signal: None,
+                        execution_mode: crate::tool::ToolExecutionMode::Direct,
+                    },
+                )
+                .await?;
+            let metadata = output
+                .metadata
+                .ok_or_else(|| anyhow::anyhow!("Spawn returned no structured session metadata"))?;
+            return Ok((
+                json!({"spawned_session_id": metadata["session_id"], "role": role, "model": model}),
+                output.output,
+            ));
+        }
+        RuntimeCommand::ProviderTestCoverage => {
+            let report = if args.is_empty() {
+                let (coverage, path) = crate::live_tests::load_coverage(None)?;
+                let summary = crate::live_tests::strict_live_provider_model_coverage_summary(
+                    &coverage,
+                    path.display().to_string(),
+                );
+                crate::live_tests::format_strict_live_provider_model_coverage_summary(&summary, 0)
+            } else {
+                let model = if args.len() > 1 {
+                    args[1..].join(" ")
+                } else {
+                    agent.provider_model()
+                };
+                crate::live_tests::format_provider_test_coverage_report(&args[0], &model, None)
+            };
+            return Ok((
+                json!({"report": report, "source": "persisted_verification"}),
+                report,
+            ));
+        }
+        RuntimeCommand::RefreshModelList
+        | RuntimeCommand::Continue
+        | RuntimeCommand::ResumeAll
+        | RuntimeCommand::ServerReload => {
+            bail!("Command must be routed through the server control handler")
+        }
+        RuntimeCommand::Skills => {
+            status_only(args)?;
+            agent.registry().skills().write().await.reload_global()?;
+            let data = agent.runtime_skills_snapshot();
+            return Ok((data.clone(), skills_report(&data)));
+        }
+        RuntimeCommand::Context => {
+            status_only(args)?;
+            agent.runtime_context_snapshot().await
+        }
+        RuntimeCommand::Info => {
+            status_only(args)?;
+            let compaction = agent.effective_compaction_config().await.summary();
+            let compaction_budget = agent.effective_context_budget().await;
+            json!({"compaction": {"mode": compaction.mode,
+                    "reactive_threshold": compaction.reactive_threshold,
+                    "reactive_threshold_tokens": compaction.reactive_threshold_tokens,
+                    "proactive_floor": compaction.proactive_floor,
+                    "max_context_tokens": compaction.max_context_tokens,
+                    "budget": compaction_budget},"session_id": agent.session_id(), "working_dir": agent.working_dir(),
+                "provider": agent.provider_name(), "model": agent.provider_model(),
+                "reasoning_effort": agent.provider_reasoning_effort(),
+                "context_window": agent.provider_context_window(),
+                "last_usage": agent.last_usage_json(), "token_usage_totals": agent.token_usage_totals(),
+                "memory_enabled": agent.memory_enabled(), "swarm_enabled": swarm_enabled,
+                "autoreview_enabled": agent.autoreview_enabled().unwrap_or(config.autoreview.enabled),
+                "autojudge_enabled": agent.autojudge_enabled().unwrap_or(config.autojudge.enabled),
+                "subagent_model": agent.subagent_model(), "transport": agent.provider_handle().transport(),
+                "service_tier": agent.provider_handle().service_tier()})
+        }
+        RuntimeCommand::Cache => {
+            match args {
+                [] => {}
+                [arg] if matches!(arg.as_str(), "stats" | "status" | "show") => {}
+                [arg] if arg == "resume" => {
+                    let resumed = agent.resume_cache_protection()?;
+                    let message = if resumed {
+                        "Cache protection cleared. No request was sent; explicitly continue when ready."
+                    } else {
+                        "This session is not paused by cache protection."
+                    };
+                    return Ok((json!({"resumed": resumed}), message.into()));
+                }
+                [arg] if matches!(arg.as_str(), "extend" | "1h" | "5m") => {
+                    crate::config::Config::set_anthropic_cache_ttl_1h(arg != "5m")?;
+                }
+                _ => bail!(
+                    "Usage: /cache [stats|status|resume|extend|1h|5m]. Cache eviction/prewarming is not available through this runtime API."
+                ),
+            }
+            json!({"anthropic_cache_ttl": if crate::provider::anthropic::is_cache_ttl_1h() { "1h" } else { "5m" },
+                "setting_scope": "Anthropic, subsequent requests only", "provider": agent.provider_name(),
+                "last_usage": agent.last_usage_json(), "token_usage_totals": agent.token_usage_totals(),
+                "cache_pause": agent.cache_pause_status()?,
+                "expiry": null, "expiry_available": false})
+        }
+        RuntimeCommand::Memory => {
+            if args == ["extract"] {
+                if !agent.memory_enabled() {
+                    bail!("Memory is disabled for this session");
+                }
+                let transcript = agent.build_transcript_for_extraction();
+                if transcript.len() < 200 {
+                    bail!("Not enough transcript for memory extraction");
+                }
+                crate::memory_agent::trigger_final_extraction_with_dir(
+                    transcript,
+                    agent.session_id().into(),
+                    agent.working_dir().map(str::to_string),
+                );
+                return Ok((
+                    json!({"scheduled": true}),
+                    "Memory extraction scheduled, not yet completed.".into(),
+                ));
+            }
+            if let Some(enabled) = boolean_action(args, agent.memory_enabled(), true)? {
+                agent.set_memory_enabled(enabled);
+                if !enabled {
+                    crate::memory::clear_pending_memory(agent.session_id());
+                }
+            }
+            json!({"enabled": agent.memory_enabled(), "activity": agent.debug_memory_profile(), "pipeline_active": crate::memory_agent::is_active()})
+        }
+        RuntimeCommand::Swarm => {
+            status_only(args)?;
+            json!({"enabled": swarm_enabled, "default_enabled": config.features.swarm, "members": swarm_data})
+        }
+        RuntimeCommand::Agents => {
+            let (global, args) = match args.split_first() {
+                Some((scope, rest)) if matches!(scope.as_str(), "global" | "default") => {
+                    (true, rest)
+                }
+                _ => (false, args),
+            };
+            match args {
+                [] => {}
+                [arg]
+                    if matches!(
+                        arg.as_str(),
+                        "show" | "status" | "swarm" | "review" | "judge" | "memory" | "ambient"
+                    ) => {}
+                [target, model] => {
+                    let model = if model == "default" {
+                        None
+                    } else {
+                        Some(model.clone())
+                    };
+                    if global {
+                        crate::config::Config::set_agent_model_default(target, model.as_deref())?;
+                    } else {
+                        agent.set_agent_model_override(target, model)?;
+                    }
+                }
+                _ => bail!(
+                    "Usage: /agents [global] [swarm|review|judge|memory|ambient] [model|inherit]."
+                ),
+            }
+            let config = crate::config::Config::load();
+            json!({"scope": if global { "global" } else { "session" }, "defaults": {"swarm": config.agents.swarm_model, "memory": config.agents.memory_model, "review": config.autoreview.model, "judge": config.autojudge.model, "ambient": config.ambient.model}, "overrides": agent.runtime_agent_model_overrides(), "models": agent.available_models_for_switching()})
+        }
+        RuntimeCommand::SubagentModel => {
+            match args {
+                [] => {}
+                [arg] if matches!(arg.as_str(), "status" | "show") => {}
+                [model] => agent.set_subagent_model(if model == "default" {
+                    None
+                } else {
+                    Some(model.clone())
+                })?,
+                _ => bail!("Usage: /subagent-model [show|inherit|model]"),
+            }
+            json!({"model": agent.subagent_model(), "configured_default": config.agents.swarm_model, "inherit_model": agent.provider_model()})
+        }
+        RuntimeCommand::Autoreview => {
+            let current = agent
+                .autoreview_enabled()
+                .unwrap_or(config.autoreview.enabled);
+            if let Some(enabled) = boolean_action(args, current, false)? {
+                agent.set_autoreview_enabled(enabled)?;
+            }
+            json!({"enabled": agent.autoreview_enabled().unwrap_or(config.autoreview.enabled), "default_enabled": config.autoreview.enabled})
+        }
+        RuntimeCommand::Autojudge => {
+            let current = agent
+                .autojudge_enabled()
+                .unwrap_or(config.autojudge.enabled);
+            if let Some(enabled) = boolean_action(args, current, false)? {
+                agent.set_autojudge_enabled(enabled)?;
+            }
+            json!({"enabled": agent.autojudge_enabled().unwrap_or(config.autojudge.enabled), "default_enabled": config.autojudge.enabled})
+        }
+        RuntimeCommand::Transport => {
+            let provider = agent.provider_handle();
+            match args {
+                [] => {}
+                [arg] if matches!(arg.as_str(), "status" | "show") => {}
+                [transport] if matches!(transport.as_str(), "auto" | "https" | "websocket") => {
+                    provider.set_transport(transport)?
+                }
+                _ => bail!("Usage: /transport [status|auto|https|websocket]"),
+            }
+            json!({"transport": provider.transport(), "provider": provider.display_name()})
+        }
+        RuntimeCommand::Fast => {
+            let provider = agent.provider_handle();
+            let current = provider.service_tier();
+            let action = match args {
+                [] => Some(if current.as_deref() == Some("priority") {
+                    "off"
+                } else {
+                    "priority"
+                }),
+                [arg] if matches!(arg.as_str(), "status" | "show") => None,
+                [arg] if matches!(arg.as_str(), "on" | "fast" | "priority") => Some("priority"),
+                [arg] if matches!(arg.as_str(), "ultra" | "ultrafast" | "ultra-fast") => {
+                    Some("ultrafast")
+                }
+                [arg] if matches!(arg.as_str(), "off" | "flex" | "auto") => Some(arg.as_str()),
+                _ => bail!("Usage: /fast [on|ultra|off|priority|flex|auto|status]"),
+            };
+            if let Some(tier) = action {
+                agent.set_legacy_session_speed(tier)?;
+            }
+            json!({"service_tier": provider.service_tier(), "speed_mode": provider.speed_mode(), "provider": provider.display_name()})
+        }
+        RuntimeCommand::Telemetry => {
+            json!({"enabled": false, "message": "Telemetry is disabled in this build. Nothing is collected or sent."})
+        }
+        RuntimeCommand::Subscription => {
+            status_only(args)?;
+            let configured = crate::subscription_catalog::has_credentials();
+            if configured {
+                let me = crate::subscription_api::fetch_subscription_me().await?;
+                json!({"configured": true, "source": "live", "account": me})
+            } else {
+                json!({"configured": false, "source": "local", "cached_tier": crate::subscription_catalog::cached_tier().map(|tier| tier.as_str()), "message": "Log in to Jcode to fetch live hosted usage and spending limit."})
+            }
+        }
+        RuntimeCommand::Overnight
+        | RuntimeCommand::Productivity
+        | RuntimeCommand::Initiatives
+        | RuntimeCommand::Premium
+        | RuntimeCommand::Remote
+        | RuntimeCommand::Auth
+        | RuntimeCommand::Logout => {
+            return super::runtime_special_commands::execute(agent, command, args).await;
+        }
+    };
+    let message = serde_json::to_string_pretty(&data)?;
+    Ok((data, message))
+}
+
+fn role_args(args: &[String], default_label: &str) -> Result<(Option<String>, String, String)> {
+    let mut model = None;
+    let mut label = default_label.to_string();
+    let mut index = 0;
+    if let Some(first) = args.first()
+        && let Some((provider, _)) = first.split_once(':')
+        && matches!(
+            provider,
+            "openai"
+                | "openai-api"
+                | "claude"
+                | "anthropic"
+                | "openrouter"
+                | "gemini"
+                | "copilot"
+                | "cursor"
+                | "bedrock"
+                | "azure"
+                | "grok"
+        )
+    {
+        model = Some(first.clone());
+        index = 1;
+    }
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "--model" | "--type" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?;
+                if arg == "--model" {
+                    model = Some(value.clone());
+                } else {
+                    label = value.clone();
+                }
+                index += 2;
+            }
+            "--continue" => bail!(
+                "Resuming an existing subagent is unavailable here. Use the swarm resume command for that session."
+            ),
+            flag if flag.starts_with("--") => bail!("Unknown role launch option {flag}"),
+            _ => break,
+        }
+    }
+    Ok((model, label, args[index..].join(" ")))
+}
+
+fn skills_report(data: &Value) -> String {
+    let mut report = String::from("## Loaded skills\n\n");
+    let loaded = data["skills"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    if loaded.is_empty() {
+        report.push_str("No skills loaded. Add skills under `~/.jcode/skills/<name>/SKILL.md` or the workspace `.jcode/skills`.\n");
+    }
+    for skill in loaded {
+        let name = skill["name"].as_str().unwrap_or("");
+        let active = if data["pinned_skills"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|active| active == name))
+        {
+            " (active)"
+        } else {
+            ""
+        };
+        let mode = if skill["mode"] == true { " [mode]" } else { "" };
+        report.push_str(&format!(
+            "- **/{name}{mode}{active}**: {}\n  Path: `{}`\n",
+            skill["description"].as_str().unwrap_or(""),
+            skill["path"].as_str().unwrap_or("")
+        ));
+    }
+    report.push_str("\n## Endorsed skills (recommended by Jcode)\n\n");
+    for skill in data["endorsed"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        report.push_str(&format!(
+            "- **/{}** [{}]: {}\n  Category: {}. Source: {}\n",
+            skill["name"].as_str().unwrap_or(""),
+            if skill["installed"] == true {
+                "installed"
+            } else {
+                "not installed"
+            },
+            skill["description"].as_str().unwrap_or(""),
+            skill["category"].as_str().unwrap_or(""),
+            skill["source"].as_str().unwrap_or("")
+        ));
+        if skill["installed"] != true
+            && let Some(install) = skill["install"].as_str()
+        {
+            report.push_str(&format!("  Install: `{install}`\n"));
+        }
+    }
+    report.push_str("\nActivate a loaded skill using its slash command. Manage skills with the `skill_manage` tool.\n");
+    report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct NoInferenceProvider {
+        tier: std::sync::Mutex<Option<String>>,
+        speed: std::sync::Mutex<jcode_provider_core::SpeedMode>,
+        speed_route: &'static str,
+    }
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for NoInferenceProvider {
+        async fn complete(
+            &self,
+            _: &[crate::message::Message],
+            _: &[crate::message::ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            panic!("Runtime status commands must never invoke a provider");
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn fork(&self) -> Arc<dyn crate::provider::Provider> {
+            Arc::new(Self::default())
+        }
+        fn service_tier(&self) -> Option<String> {
+            self.tier.lock().unwrap().clone()
+        }
+        fn set_service_tier(&self, tier: &str) -> Result<()> {
+            *self.tier.lock().unwrap() = if tier == "off" {
+                None
+            } else {
+                Some(tier.into())
+            };
+            Ok(())
+        }
+
+        fn speed_mode(&self) -> jcode_provider_core::SpeedMode {
+            *self.speed.lock().unwrap()
+        }
+
+        fn speed_route_identity(&self) -> Option<String> {
+            Some(self.speed_route.into())
+        }
+
+        fn set_speed_mode(&self, mode: jcode_provider_core::SpeedMode) -> Result<()> {
+            anyhow::ensure!(
+                mode != jcode_provider_core::SpeedMode::Ultrafast,
+                "fixture route does not support Ultrafast"
+            );
+            *self.speed.lock().unwrap() = mode;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn session_speed_is_persisted_before_ack_and_restored_only_on_the_same_route() {
+        use jcode_provider_core::SpeedMode;
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let provider = |speed_route| {
+            Arc::new(NoInferenceProvider {
+                speed_route,
+                ..Default::default()
+            })
+        };
+        let mut agent = Agent::new(provider("account-a"), crate::tool::Registry::empty());
+        assert_eq!(
+            agent.set_speed_mode(SpeedMode::Fast).unwrap(),
+            SpeedMode::Fast
+        );
+        assert!(agent.set_speed_mode(SpeedMode::Ultrafast).is_err());
+        let session_id = agent.session_id().to_owned();
+        let load = || crate::session::Session::load_for_resume(&session_id).unwrap();
+        assert_eq!(
+            load().speed_state().selection.unwrap().mode,
+            SpeedMode::Fast
+        );
+        drop(agent);
+
+        let same_route = provider("account-a");
+        let mut restored = Agent::new_with_session(
+            same_route.clone(),
+            crate::tool::Registry::empty(),
+            load(),
+            None,
+        );
+        assert_eq!(restored.provider_handle().speed_mode(), SpeedMode::Fast);
+        let other = Agent::new_with_session(
+            provider("account-b"),
+            crate::tool::Registry::empty(),
+            load(),
+            None,
+        );
+        assert_eq!(other.provider_handle().speed_mode(), SpeedMode::Standard);
+        drop(other);
+        assert_eq!(
+            restored.set_speed_mode(SpeedMode::Standard).unwrap(),
+            SpeedMode::Standard
+        );
+        assert!(load().speed_state().selection.is_none());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn runtime_commands_read_actual_state_without_inference() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::TempDir::new().unwrap();
+        let old = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(value) = &self.0 {
+                    crate::env::set_var("JCODE_HOME", value);
+                } else {
+                    crate::env::remove_var("JCODE_HOME");
+                }
+            }
+        }
+        let _restore = Restore(old);
+        let provider: Arc<dyn crate::provider::Provider> = Arc::new(NoInferenceProvider::default());
+        let registry = crate::tool::Registry::new(provider.clone()).await;
+        let mut agent =
+            Agent::new_with_initial_working_dir(provider, registry, home.path().to_str());
+        for command in [
+            RuntimeCommand::Skills,
+            RuntimeCommand::Context,
+            RuntimeCommand::Info,
+            RuntimeCommand::Cache,
+            RuntimeCommand::Memory,
+            RuntimeCommand::Agents,
+            RuntimeCommand::SubagentModel,
+            RuntimeCommand::Autoreview,
+            RuntimeCommand::Autojudge,
+            RuntimeCommand::Transport,
+            RuntimeCommand::Fast,
+            RuntimeCommand::Telemetry,
+        ] {
+            let (data, message) =
+                execute(&mut agent, command, &["status".into()], true, Value::Null)
+                    .await
+                    .unwrap();
+            assert!(data.is_object(), "{command:?}");
+            assert!(!message.is_empty(), "{command:?}");
+            if command == RuntimeCommand::Skills {
+                assert!(
+                    data["endorsed"]
+                        .as_array()
+                        .is_some_and(|skills| !skills.is_empty())
+                );
+                assert!(message.contains("Endorsed skills"));
+            }
+            if command == RuntimeCommand::Context {
+                assert!(data.get("messages").is_some());
+                assert!(data["system_prompt"]["pending_memory_included"] == false);
+            }
+        }
+        execute(
+            &mut agent,
+            RuntimeCommand::Autoreview,
+            &["on".into()],
+            true,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent.autoreview_enabled(), Some(true));
+        execute(
+            &mut agent,
+            RuntimeCommand::Autojudge,
+            &["off".into()],
+            true,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent.autojudge_enabled(), Some(false));
+        execute(
+            &mut agent,
+            RuntimeCommand::Agents,
+            &["review".into(), "inherit".into()],
+            true,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent.runtime_agent_model_overrides()["review"], "inherit");
+        for alias in ["ultra", "ultrafast", "ultra-fast"] {
+            let (data, _) = execute(
+                &mut agent,
+                RuntimeCommand::Fast,
+                &[alias.into()],
+                true,
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            assert_eq!(data["service_tier"], "ultrafast");
+            assert_eq!(
+                agent.provider_handle().service_tier().as_deref(),
+                Some("ultrafast")
+            );
+        }
+        agent.provider_handle().set_service_tier("off").unwrap();
+        execute(&mut agent, RuntimeCommand::Fast, &[], true, Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(
+            agent.provider_handle().service_tier().as_deref(),
+            Some("priority")
+        );
+        execute(&mut agent, RuntimeCommand::Fast, &[], true, Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(agent.provider_handle().service_tier(), None);
+        assert!(
+            execute(&mut agent, RuntimeCommand::Subagent, &[], true, Value::Null)
+                .await
+                .is_err()
+        );
+        assert!(
+            execute(
+                &mut agent,
+                RuntimeCommand::Transport,
+                &["typo".into()],
+                true,
+                Value::Null
+            )
+            .await
+            .is_err()
+        );
+    }
+    #[test]
+    fn toggle_and_status_are_distinct() {
+        assert_eq!(boolean_action(&[], true, true).unwrap(), Some(false));
+        assert_eq!(
+            boolean_action(&["status".into()], true, true).unwrap(),
+            None
+        );
+        assert_eq!(boolean_action(&[], false, false).unwrap(), None);
+        assert!(boolean_action(&["typo".into()], false, false).is_err());
+        assert!(boolean_action(&["on".into(), "off".into()], false, false).is_err());
+    }
+
+    #[tokio::test]
+    async fn pinned_mode_runtime_command_persists_without_inference() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let dir = project.path().join(".jcode/skills/mode-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: mode-probe\ndescription: Runtime mode\n---\nMODE_PROBE_BODY\n",
+        )
+        .unwrap();
+        let mut agent = Agent::new_with_initial_working_dir(
+            Arc::new(NoInferenceProvider::default()),
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        for args in [vec!["mode-probe".into()], Vec::new()] {
+            let (data, message) =
+                execute(&mut agent, RuntimeCommand::Mode, &args, false, Value::Null)
+                    .await
+                    .unwrap();
+            assert_eq!(data["pinned_skill"], "mode-probe");
+            assert!(message.contains("mode-probe"));
+            assert_eq!(
+                crate::session::Session::load(agent.session_id())
+                    .unwrap()
+                    .pinned_skill(),
+                Some("mode-probe")
+            );
+        }
+        let count = agent.message_count();
+        execute(
+            &mut agent,
+            RuntimeCommand::Mode,
+            &["mode-probe".into()],
+            false,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent.message_count(), count);
+        assert!(
+            execute(
+                &mut agent,
+                RuntimeCommand::Mode,
+                &["missing-mode-probe".into()],
+                false,
+                Value::Null
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown skill: /missing-mode-probe")
+        );
+        assert_eq!(
+            agent.runtime_skills_snapshot()["active_skill"],
+            "mode-probe"
+        );
+        let (data, _) = execute(
+            &mut agent,
+            RuntimeCommand::Mode,
+            &["off".into()],
+            false,
+            Value::Null,
+        )
+        .await
+        .unwrap();
+        assert!(data["pinned_skill"].is_null());
+        assert!(
+            crate::session::Session::load(agent.session_id())
+                .unwrap()
+                .pinned_skill()
+                .is_none()
+        );
+    }
+    #[tokio::test]
+    async fn mode_invocation_persists_rendered_arguments_without_duplicate_reminders() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let dir = project.path().join(".jcode/skills/mode-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: mode-probe\ndescription: Runtime mode\narguments: repo, issue\n---\nHandle $repo/$issue\n").unwrap();
+        let mut agent = Agent::new_with_initial_working_dir(
+            Arc::new(NoInferenceProvider::default()),
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        for arguments in ["'my repo' 17", "\"my repo\" 17", "other 18"] {
+            let (data, _) = execute(
+                &mut agent,
+                RuntimeCommand::Mode,
+                &[
+                    "--invoke-skill".into(),
+                    "mode-probe".into(),
+                    arguments.into(),
+                ],
+                false,
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            assert_eq!(data["pinned_skill"], "mode-probe");
+        }
+        let saved = crate::session::Session::load(agent.session_id()).unwrap();
+        let rendered: Vec<_> = saved
+            .iter_messages()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                crate::message::ContentBlock::Text { text, .. }
+                    if text.contains("# Active Skill") =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered[0].contains("Handle my repo/17"));
+        assert!(rendered[1].contains("Handle other/18"));
+        assert_eq!(saved.pinned_skill_arguments("mode-probe"), "other 18");
+    }
+
+    #[tokio::test]
+    async fn mode_toggles_roundtrip_through_session_storage() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        for name in ["alpha-mode", "beta-mode", "gamma-mode"] {
+            let dir = project.path().join(".jcode/skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), format!(
+                "---\nname: {name}\ndescription: Runtime mode\nicon: '⚙'\n---\n{name} instructions\n"
+            )).unwrap();
+        }
+        let mut agent = Agent::new_with_initial_working_dir(
+            Arc::new(NoInferenceProvider::default()),
+            crate::tool::Registry::empty(),
+            project.path().to_str(),
+        );
+        for (name, expected) in [
+            ("alpha-mode", json!(["alpha-mode"])),
+            ("beta-mode", json!(["alpha-mode", "beta-mode"])),
+            (
+                "gamma-mode",
+                json!(["alpha-mode", "beta-mode", "gamma-mode"]),
+            ),
+            ("beta-mode", json!(["alpha-mode", "gamma-mode"])),
+        ] {
+            let (data, _) = execute(
+                &mut agent,
+                RuntimeCommand::Mode,
+                &["toggle".into(), name.into()],
+                false,
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            assert_eq!(data["pinned_skills"], expected);
+            assert_eq!(data["pinned_skill"], "alpha-mode");
+        }
+        let loaded = crate::session::Session::load(agent.session_id()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap()["pinned_skills"],
+            json!(["alpha-mode", "gamma-mode"])
+        );
+        let snapshot = agent.runtime_skills_snapshot();
+        assert_eq!(
+            snapshot["pinned_skills"],
+            json!(["alpha-mode", "gamma-mode"])
+        );
+        let alpha = snapshot["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|skill| skill["name"] == "alpha-mode")
+            .unwrap();
+        assert_eq!(alpha["icon"], "⚙");
+    }
+
+    #[test]
+    fn role_arguments_preserve_model_and_task_and_reject_unsupported_resume() {
+        let args = [
+            "--model",
+            "openai:gpt-5",
+            "--type",
+            "research",
+            "inspect",
+            "code",
+        ]
+        .map(str::to_string);
+        assert_eq!(
+            role_args(&args, "swarm").unwrap(),
+            (
+                Some("openai:gpt-5".into()),
+                "research".into(),
+                "inspect code".into()
+            )
+        );
+        let args = ["openai:gpt-5", "inspect", "code"].map(str::to_string);
+        assert_eq!(
+            role_args(&args, "review").unwrap().0.as_deref(),
+            Some("openai:gpt-5")
+        );
+        assert!(role_args(&["--model".into()], "swarm").is_err());
+        assert!(role_args(&["--continue".into(), "session".into()], "swarm").is_err());
+    }
+}

@@ -3,6 +3,13 @@ use super::*;
 use crate::sse_types::UsageInfo;
 
 pub(super) fn update_usage(state: &mut SseStreamState, usage: UsageInfo) {
+    if let Some(speed) = usage
+        .speed
+        .as_deref()
+        .and_then(fast_mode::ServedSpeed::from_usage)
+    {
+        state.served_speed = Some(speed);
+    }
     state.output_tokens = usage.output_tokens.map(u64::from).or(state.output_tokens);
     state.input_tokens = usage.input_tokens.map(u64::from).or(state.input_tokens);
     state.cache_read_input_tokens = usage
@@ -105,21 +112,17 @@ pub(super) async fn record(label: Option<&str>, requested_model: &str, state: &S
         state.cache_read_input_tokens,
         state.cache_creation_input_tokens,
     );
-    let tier = state.service_tier.clone();
+    let speed = match (state.served_speed, state.fast_requested) {
+        (Some(fast_mode::ServedSpeed::Fast), _) => Some("fast"),
+        (Some(fast_mode::ServedSpeed::Standard), _) | (None, false) => Some("standard"),
+        (None, true) => Some("unknown"),
+    };
     let (cache_5m, cache_1h) = (state.cache_creation_5m, state.cache_creation_1h);
     // Complete the durable write before forwarding terminal usage, independently
     // of the TUI consumer. Never charge incremental message_start/delta twice.
     if let Err(error) = tokio::task::spawn_blocking(move || {
         jcode_base::provider_activity::record_anthropic_oauth_usage(
-            &label,
-            &model,
-            input,
-            output,
-            read,
-            created,
-            tier.as_deref(),
-            cache_5m,
-            cache_1h,
+            &label, &model, input, output, read, created, speed, cache_5m, cache_1h,
         );
     })
     .await
@@ -194,6 +197,13 @@ mod tests {
                             })
                             .unwrap();
                         if request.len() >= end + 4 + length {
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&request[end + 4..end + 4 + length])
+                                    .unwrap();
+                            assert_eq!(body["model"], "unpriced-requested-alias");
+                            assert_eq!(body["max_tokens"], 1024);
+                            assert_eq!(body["messages"], serde_json::json!([]));
+                            assert_eq!(body["stream"], true);
                             break;
                         }
                     }
@@ -234,13 +244,16 @@ mod tests {
                     output_config: None,
                     temperature: None,
                     service_tier: None,
+                    speed: None,
                     stream: true,
+                    effort_record: None,
                 };
+                let original_request = serde_json::to_value(&request).unwrap();
                 let result = stream_response(
                     Client::builder().no_proxy().build().unwrap(),
                     "token".into(),
                     label.is_some(),
-                    request,
+                    &request,
                     tx,
                     "unpriced-requested-alias",
                     "test-session",
@@ -249,6 +262,9 @@ mod tests {
                     label,
                 )
                 .await;
+                // An attempt borrows the payload, leaving the owner's request
+                // intact for retry reshaping after either success or failure.
+                assert_eq!(serde_json::to_value(&request).unwrap(), original_request);
                 if limited {
                     assert!(result.unwrap_err().to_string().contains("429"));
                 } else {

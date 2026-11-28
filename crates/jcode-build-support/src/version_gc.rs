@@ -158,7 +158,7 @@ fn prune_due(dir: &Path) -> bool {
 }
 
 fn mark_pruned(dir: &Path) {
-    let _ = std::fs::write(dir.join(PRUNE_MARKER), b"");
+    let _ = jcode_storage::touch_stamp(&dir.join(PRUNE_MARKER));
 }
 
 /// Core of [`prune_old_versions`], parameterized for unit tests.
@@ -219,6 +219,25 @@ mod tests {
     use std::fs::{self, File};
 
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    #[test]
+    fn refreshing_an_expired_prune_stamp_writes_a_nonempty_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join(PRUNE_MARKER);
+        File::create(&marker)
+            .unwrap()
+            .set_modified(SystemTime::now() - DAY * 2)
+            .unwrap();
+        assert!(prune_due(temp.path()));
+
+        mark_pruned(temp.path());
+
+        assert!(!prune_due(temp.path()), "the new pass must close the slot");
+        assert!(
+            fs::metadata(marker).unwrap().len() > 0,
+            "the refresh must perform a real write even if the old marker was empty"
+        );
+    }
 
     fn make_version(dir: &Path, name: &str, age: Duration) {
         let version = dir.join(name);

@@ -6,6 +6,9 @@ named formatting, warning-budget, size and dependency-hygiene step failures.
 It still requires all other steps and jobs to succeed, including Clippy, tests,
 safety ratchets and lockfile checks. Missing evidence is never a waiver.
 
+The xenking fork runs Linux on pushes and the native matrix on manual CI.
+Both runs must be green on the exact release commit.
+
 Requires gh on PATH and an inherited GH_TOKEN with Actions read permission.
 Exit 0: authorized, 1: rejected/API error, 2: wait expired or invalid CLI input.
 This gate deliberately does not authorize historical-tag recovery releases.
@@ -18,13 +21,18 @@ import subprocess
 import sys
 import time
 
-MANDATORY_JOBS = (
+FORK = "xenking/jcode"
+PUSH_JOBS = (
     "Quality Guardrails",
     "Build & Test (ubuntu-latest)",
+)
+PLATFORM_JOBS = (
     "Build & Test (macos-latest)",
     "Build & Test (windows-latest)",
     "Windows ARM64 Release Configuration",
 )
+MANDATORY_JOBS = PUSH_JOBS + PLATFORM_JOBS
+FORK_PUSH_JOBS = PUSH_JOBS + ("TypeScript SDK",)
 PENDING = {"queued", "in_progress", "waiting", "pending", "requested"}
 
 # Preview-only maintenance debt. Compilation, Clippy, lockfile consistency,
@@ -41,7 +49,9 @@ PREVIEW_ADVISORY_JOBS = {
     "Quality Guardrails": PREVIEW_ADVISORY_STEPS,
     "Format": frozenset({"Check formatting"}),
     "Build & Test (ubuntu-latest)": frozenset({"Enforce warning budget (Linux, macOS)"}),
-    "Build & Test (macos-latest)": frozenset({"Enforce warning budget (Linux, macOS)"}),
+    "Build & Test (macos-latest)": frozenset({
+        "Enforce warning budget (Linux, macOS)", "Enforce warning budget (macOS)",
+    }),
 }
 
 # A failed advisory job still contains platform-inapplicable steps and a cache
@@ -55,6 +65,7 @@ PREVIEW_OPTIONAL_SKIPS = {
     }),
     "Build & Test (macos-latest)": frozenset({
         "Install mold linker (Linux)",
+        "Configure Linux linker",
         "Run automatic model discovery regressions (Linux only)",
         "Run embedding numeric-stability cohort (Linux only)",
         "Run TUI library tests (Linux only)",
@@ -145,13 +156,16 @@ def objects(api, endpoint, key):
     return result
 
 
-def run_identity(run, sha):
-    if (run.get("head_sha", "").lower() != sha or run.get("event") != "push"
-            or run.get("head_branch") not in {"main", "master"}
-            or run.get("path") not in {".github/workflows/ci.yml",
-                                       ".github/workflows/ci.yml@main",
-                                       ".github/workflows/ci.yml@master"}):
-        raise Rejected("CI run identity does not match exact SHA/main push ci.yml")
+def run_identity(run, sha, event):
+    branch = run.get("head_branch")
+    path = run.get("path")
+    if (run.get("head_sha", "").lower() != sha or run.get("event") != event
+            or not isinstance(branch, str) or not branch
+            or (event == "push" and branch not in {"main", "master"})
+            or path not in {".github/workflows/ci.yml",
+                            f".github/workflows/ci.yml@{branch}",
+                            f".github/workflows/ci.yml@refs/heads/{branch}"}):
+        raise Rejected(f"CI run identity does not match exact SHA/{event} ci.yml")
     for field in ("id", "run_number", "run_attempt"):
         if type(run.get(field)) is not int or run[field] < 1:
             raise Rejected(f"Invalid CI run {field}")
@@ -170,28 +184,28 @@ def status_reason(item, label):
     raise Rejected(f"{label} has invalid status/conclusion")
 
 
-def check_once(repository, sha, api, preview=False):
-    base = f"repos/{repository}/actions"
-    runs = objects(api, f"{base}/workflows/ci.yml/runs?head_sha={sha}&event=push&per_page=100", "workflow_runs")
+def check_event(base, sha, event, mandatory_jobs, api, preview=False):
+    runs = objects(api, f"{base}/workflows/ci.yml/runs?head_sha={sha}&event={event}&per_page=100", "workflow_runs")
     # Reject different-SHA green evidence rather than trusting API query filtering.
     candidates = [run for run in runs if run.get("head_sha", "").lower() == sha
-                  and run.get("event") == "push" and run.get("head_branch") in {"main", "master"}]
+                  and run.get("event") == event
+                  and (event != "push" or run.get("head_branch") in {"main", "master"})]
     if not candidates:
-        return "missing exact-SHA main push CI run"
+        return f"missing exact-SHA {'main push' if event == 'push' else 'manual platform'} CI run"
     for run in candidates:
-        run_identity(run, sha)
+        run_identity(run, sha, event)
     latest = max(candidates, key=lambda run: (run["run_number"], run["id"], run["run_attempt"]))
     run = api(f"{base}/runs/{latest['id']}")
     if not isinstance(run, dict):
         raise Rejected("Malformed CI run response")
-    run_identity(run, sha)
+    run_identity(run, sha, event)
     if run["id"] != latest["id"] or run["run_attempt"] < latest["run_attempt"]:
         raise Rejected("CI run detail does not match latest run/attempt")
     run_status = preview_run_status if preview else status_reason
     reason = run_status(run, f"CI run {run['id']} attempt {run['run_attempt']}")
     jobs = objects(api, f"{base}/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100", "jobs")
     pending = []
-    for name in MANDATORY_JOBS:
+    for name in mandatory_jobs:
         matches = [job for job in jobs if job.get("name") == name]
         if not matches:
             if run["status"] == "completed":
@@ -217,7 +231,7 @@ def check_once(repository, sha, api, preview=False):
             raise Rejected("Failed CI run has no failed-job evidence")
         # Do not hide unrelated workflow failures behind an advisory quality job.
         for job in jobs:
-            if job.get("name") not in MANDATORY_JOBS:
+            if job.get("name") not in mandatory_jobs:
                 job_reason = preview_job_status(job, job.get("name", "unnamed job"))
                 if job_reason:
                     pending.append(job_reason)
@@ -227,13 +241,23 @@ def check_once(repository, sha, api, preview=False):
     current = api(f"{base}/runs/{run['id']}")
     if not isinstance(current, dict):
         raise Rejected("Malformed CI run confirmation")
-    run_identity(current, sha)
+    run_identity(current, sha, event)
     if current["id"] != run["id"]:
         raise Rejected("CI run changed identity")
     confirmation = run_status(current, "CI run confirmation")
     if current["run_attempt"] != run["run_attempt"]:
         return "CI run attempt changed during verification"
     return confirmation
+
+
+def check_once(repository, sha, api, preview=False):
+    base = f"repos/{repository}/actions"
+    if repository.casefold() != FORK or preview:
+        return check_event(base, sha, "push", MANDATORY_JOBS, api, preview)
+    reason = check_event(base, sha, "push", FORK_PUSH_JOBS, api)
+    if reason:
+        return reason
+    return check_event(base, sha, "workflow_dispatch", FORK_PUSH_JOBS + PLATFORM_JOBS, api)
 
 
 def authorize(repository, sha, timeout=7200, poll_interval=30, api=gh_api,

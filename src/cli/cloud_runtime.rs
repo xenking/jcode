@@ -138,7 +138,7 @@ exit 1
 }
 
 fn run_remote(script: &str, input: Option<File>) -> Result<std::process::ExitStatus> {
-    let args = cloud_managed::ssh_args()?;
+    let args = cloud_managed::ssh_args(cloud_managed::HOST)?;
     Command::new("ssh")
         .args(args)
         .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30"])
@@ -263,7 +263,7 @@ fn package(path: &Path) -> Result<(File, String)> {
 
 fn invoke(verb: &str, value: Option<&str>, input: Option<File>) -> Result<()> {
     let remote = remote_command(verb, value)?;
-    let args = cloud_managed::ssh_args()?;
+    let args = cloud_managed::ssh_args(cloud_managed::HOST)?;
     let status = Command::new("ssh")
         .args(args)
         .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30"])

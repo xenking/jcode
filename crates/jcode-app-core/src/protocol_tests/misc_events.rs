@@ -201,6 +201,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         system_prompt: None,
         supports_pdf_panels: false,
         supports_user_response: false,
+        supports_applets: None,
         supports_server_failover: false,
         supports_turn_identity: false,
         id: 89,
@@ -221,6 +222,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         system_prompt: _,
         supports_pdf_panels: _,
         supports_user_response: _,
+        supports_applets: _,
         supports_server_failover: _,
         supports_turn_identity: _,
         id,
@@ -261,6 +263,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         system_prompt: _,
         supports_pdf_panels: _,
         supports_user_response: _,
+        supports_applets: _,
         supports_server_failover: _,
         supports_turn_identity: _,
         id,
@@ -362,6 +365,7 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         native_ssh_protocol: Some(1),
         capabilities: vec!["session_tools".into()],
         user_connected_session_ids: None,
+        daemon_identity: None,
     };
     let json = serde_json::to_value(&modern)?;
     assert_eq!(json["native_ssh_protocol"], 1);

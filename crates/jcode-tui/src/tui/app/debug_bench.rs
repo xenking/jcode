@@ -1,62 +1,83 @@
 use super::*;
 
-impl App {
-    pub(in crate::tui::app) fn build_scroll_test_content(
-        diagrams: usize,
-        padding: usize,
-        override_diagram: Option<&str>,
-    ) -> String {
-        let mut out = String::new();
-        let intro_lines = padding.max(4);
-        for i in 0..intro_lines {
-            out.push_str(&format!(
-                "Intro line {:02} - quick brown fox jumps over the lazy dog.\n",
-                i + 1
-            ));
+fn percentile_ms(samples_ms: &[f64], percentile: f64) -> f64 {
+    if samples_ms.is_empty() {
+        return 0.0;
+    }
+    let percentile = percentile.clamp(0.0, 1.0);
+    let rank = ((samples_ms.len() - 1) as f64 * percentile).round() as usize;
+    samples_ms[rank.min(samples_ms.len() - 1)]
+}
+
+fn summarize_mermaid_ui_bench(
+    samples: &[MermaidUiBenchSample],
+    protocol_supported: bool,
+    protocol: Option<String>,
+) -> MermaidUiBenchSummary {
+    let mut elapsed_ms = 0.0;
+    let mut first_worker_render_frame = None;
+    let mut first_protocol_render_frame = None;
+    let mut first_deferred_idle_frame = None;
+    let mut pending_frames = 0usize;
+    let mut protocol_render_frames = 0usize;
+    let mut protocol_rebuild_frames = 0usize;
+    let mut saw_pending = false;
+    let mut time_to_first_worker_render_ms = None;
+    let mut time_to_first_protocol_render_ms = None;
+    let mut time_to_deferred_idle_ms = None;
+
+    for sample in samples {
+        elapsed_ms += sample.frame_ms;
+        if sample.deferred_pending_after > 0 {
+            saw_pending = true;
+            pending_frames += 1;
         }
-
-        let diagram_templates = [
-            r#"flowchart TD
-    A[Start] --> B{Decision}
-    B -->|Yes| C[Process 1]
-    B -->|No| D[Process 2]
-    C --> E[Merge]
-    D --> E
-    E --> F[End]"#,
-            r#"sequenceDiagram
-    participant U as User
-    participant A as App
-    participant S as Service
-    U->>A: Scroll request
-    A->>S: Render diagram
-    S-->>A: PNG
-    A-->>U: Draw frame"#,
-            r#"stateDiagram-v2
-    [*] --> Idle
-    Idle --> Scrolling: input
-    Scrolling --> Rendering: diagram
-    Rendering --> Idle: frame drawn"#,
-        ];
-
-        for idx in 0..diagrams {
-            let diagram =
-                override_diagram.unwrap_or(diagram_templates[idx % diagram_templates.len()]);
-            out.push_str("```mermaid\n");
-            out.push_str(diagram);
-            out.push_str("\n```\n");
-
-            for j in 0..padding {
-                out.push_str(&format!(
-                    "After diagram {} line {:02} - stretch content for scrolling.\n",
-                    idx + 1,
-                    j + 1
-                ));
+        if first_worker_render_frame.is_none() && sample.deferred_worker_renders > 0 {
+            first_worker_render_frame = Some(sample.frame);
+            time_to_first_worker_render_ms = Some(elapsed_ms);
+        }
+        let protocol_rendered = sample.image_state_hits > 0
+            || sample.image_state_misses > 0
+            || sample.fit_state_reuse_hits > 0
+            || sample.fit_protocol_rebuilds > 0
+            || sample.viewport_state_reuse_hits > 0
+            || sample.viewport_protocol_rebuilds > 0;
+        if protocol_rendered {
+            protocol_render_frames += 1;
+            if first_protocol_render_frame.is_none() {
+                first_protocol_render_frame = Some(sample.frame);
+                time_to_first_protocol_render_ms = Some(elapsed_ms);
             }
         }
-
-        out
+        if sample.fit_protocol_rebuilds > 0 || sample.viewport_protocol_rebuilds > 0 {
+            protocol_rebuild_frames += 1;
+        }
+        if saw_pending && first_deferred_idle_frame.is_none() && sample.deferred_pending_after == 0
+        {
+            first_deferred_idle_frame = Some(sample.frame);
+            time_to_deferred_idle_ms = Some(elapsed_ms);
+        }
     }
 
+    MermaidUiBenchSummary {
+        protocol_supported,
+        protocol,
+        pending_frames,
+        protocol_render_frames,
+        protocol_rebuild_frames,
+        first_worker_render_frame,
+        first_protocol_render_frame,
+        first_deferred_idle_frame,
+        time_to_first_worker_render_ms,
+        time_to_first_protocol_render_ms,
+        time_to_deferred_idle_ms,
+    }
+}
+
+#[path = "debug_bench_scroll_content.rs"]
+mod scroll_content;
+
+impl App {
     fn build_side_panel_latency_snapshot(
         diagrams: usize,
         padding: usize,
@@ -119,7 +140,7 @@ impl App {
         let diagrams = cfg.diagrams.unwrap_or(2).clamp(1, 3);
         let include_samples = cfg.include_samples.unwrap_or(true);
 
-        let saved_state = ScrollTestState::capture(self);
+        let saved_state = ScrollTestState::capture(self, None);
         let saved_diagram_override = crate::tui::markdown::get_diagram_mode_override();
         let saved_active_diagrams = crate::tui::mermaid::snapshot_active_diagrams();
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
@@ -133,6 +154,8 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
+                ask: None,
             },
             DisplayMessage {
                 role: "assistant".to_string(),
@@ -141,6 +164,8 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
+                ask: None,
             },
         ];
         self.bump_display_messages_version();
@@ -154,13 +179,14 @@ impl App {
         self.is_processing = false;
         self.clear_streaming_render_state();
         self.queued_messages.clear();
+        self.queued_images.clear();
         self.interleave_message = None;
         self.interleave_images.clear();
         self.pending_soft_interrupts.clear();
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
         self.status_notice = None;
-        crate::tui::markdown::set_diagram_mode_override(Some(self.diagram_mode));
+        crate::tui::markdown::set_diagram_mode_override(Some(self.diagram.view().mode));
 
         use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
@@ -358,7 +384,7 @@ impl App {
         let keep_mermaid_cache = cfg.keep_mermaid_cache.unwrap_or(false);
         let sleep_between_frames_ms = cfg.sleep_between_frames_ms.unwrap_or(0).min(1_000);
 
-        let saved_state = ScrollTestState::capture(self);
+        let saved_state = ScrollTestState::capture(self, None);
         let saved_diagram_override = crate::tui::markdown::get_diagram_mode_override();
         let saved_active_diagrams = crate::tui::mermaid::snapshot_active_diagrams();
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
@@ -373,6 +399,8 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
+                ask: None,
             },
             DisplayMessage {
                 role: "assistant".to_string(),
@@ -382,6 +410,8 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
+                ask: None,
             },
         ];
         self.bump_display_messages_version();
@@ -395,13 +425,14 @@ impl App {
         self.is_processing = false;
         self.clear_streaming_render_state();
         self.queued_messages.clear();
+        self.queued_images.clear();
         self.interleave_message = None;
         self.interleave_images.clear();
         self.pending_soft_interrupts.clear();
         self.status = ProcessingStatus::Idle;
         self.processing_started = None;
         self.status_notice = None;
-        crate::tui::markdown::set_diagram_mode_override(Some(self.diagram_mode));
+        crate::tui::markdown::set_diagram_mode_override(Some(self.diagram.view().mode));
         crate::tui::clear_side_panel_render_caches();
         crate::tui::reset_side_panel_debug_stats();
         crate::tui::markdown::reset_debug_stats();
@@ -610,10 +641,10 @@ impl App {
                     .state
                     .diagram_mode
                     .clone()
-                    .unwrap_or_else(|| format!("{:?}", self.diagram_mode));
+                    .unwrap_or_else(|| format!("{:?}", self.diagram.view().mode));
                 (frame.layout.diagram_area, widget_present, mode)
             }
-            None => (None, false, format!("{:?}", self.diagram_mode)),
+            None => (None, false, format!("{:?}", self.diagram.view().mode)),
         };
 
         let diagram_area_rect =
@@ -758,7 +789,7 @@ impl App {
             }
         };
 
-        let diagram_mode = cfg.diagram_mode.unwrap_or(self.diagram_mode);
+        let diagram_mode = cfg.diagram_mode.unwrap_or(self.diagram.view().mode);
         let expectations = ScrollTestExpectations {
             // Diagrams flow inline (via the inline-image fit pipeline) in every
             // mode; Pinned additionally mirrors them into the side pane.
@@ -780,13 +811,11 @@ impl App {
         let include_paused = cfg.include_paused.unwrap_or(true);
         let diagram_override = cfg.diagram.as_deref();
 
-        let saved_state = ScrollTestState::capture(self);
+        let saved_state = ScrollTestState::capture(self, Some(diagram_mode));
         let saved_diagram_override = crate::tui::markdown::get_diagram_mode_override();
         let saved_active_diagrams = crate::tui::mermaid::snapshot_active_diagrams();
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
         crate::tui::visual_debug::enable();
-
-        self.diagram_mode = diagram_mode;
         crate::tui::markdown::set_diagram_mode_override(Some(diagram_mode));
 
         let test_content = Self::build_scroll_test_content(diagrams, padding, diagram_override);
@@ -798,6 +827,8 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
+                ask: None,
             },
             DisplayMessage {
                 role: "assistant".to_string(),
@@ -806,6 +837,8 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
+                ask: None,
             },
         ];
         self.bump_display_messages_version();
@@ -813,6 +846,7 @@ impl App {
         self.is_processing = false;
         self.clear_streaming_render_state();
         self.queued_messages.clear();
+        self.queued_images.clear();
         self.interleave_message = None;
         self.interleave_images.clear();
         self.pending_soft_interrupts.clear();
@@ -1047,7 +1081,9 @@ impl App {
 
         let widths = cfg.widths.unwrap_or_else(|| vec![80, 100, 120]);
         let heights = cfg.heights.unwrap_or_else(|| vec![24, 40]);
-        let diagram_modes = cfg.diagram_modes.unwrap_or_else(|| vec![self.diagram_mode]);
+        let diagram_modes = cfg
+            .diagram_modes
+            .unwrap_or_else(|| vec![self.diagram.view().mode]);
         let diagrams = cfg.diagrams.unwrap_or(2).clamp(1, 3);
         let step = cfg.step.unwrap_or(5).max(1);
         let max_steps = cfg.max_steps.unwrap_or(12).clamp(4, 100);
@@ -1153,7 +1189,7 @@ impl App {
         let max_frames = cfg.max_frames.unwrap_or(160).clamp(4, 2000);
         let include_frames = cfg.include_frames.unwrap_or(false);
 
-        let saved_state = ScrollTestState::capture(self);
+        let saved_state = ScrollTestState::capture(self, None);
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
         crate::tui::visual_debug::enable();
 

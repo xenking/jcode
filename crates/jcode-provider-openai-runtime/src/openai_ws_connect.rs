@@ -2,8 +2,8 @@
 //!
 //! `tokio_tungstenite::connect_async` cannot negotiate compression (tungstenite
 //! has no extension support and rejects RSV1 frames). This connector does the
-//! TCP + TLS setup itself, with the same rustls + native-roots configuration
-//! tokio-tungstenite used, then runs the WebSocket handshake over a
+//! TCP + TLS setup itself, sharing the provider HTTP trust configuration,
+//! then runs the WebSocket handshake over a
 //! [`DeflateStream`] wrapped around the TLS stream so the compression layer
 //! sees plaintext WebSocket frames.
 //!
@@ -12,11 +12,11 @@
 //! offered and the layer is a byte-for-byte pass-through.
 
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
 use std::task::{Context as TaskContext, Poll};
 
 use anyhow::Result;
 use jcode_provider_core::request_compression::CompressionMode;
+use jcode_provider_core::websocket_tls_config;
 use jcode_provider_core::ws_deflate::{DeflateStream, PERMESSAGE_DEFLATE_OFFER};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
@@ -78,34 +78,6 @@ impl AsyncWrite for WsTransport {
     }
 }
 
-/// Native-root rustls config, built once (loading the system store is slow).
-fn tls_config() -> Result<Arc<rustls::ClientConfig>> {
-    static CONFIG: OnceLock<std::result::Result<Arc<rustls::ClientConfig>, String>> =
-        OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let loaded = rustls_native_certs::load_native_certs();
-            if !loaded.errors.is_empty() {
-                jcode_base::logging::warn(&format!(
-                    "openai websocket: native root certificate load errors: {:?}",
-                    loaded.errors
-                ));
-            }
-            let mut roots = rustls::RootCertStore::empty();
-            let (added, _) = roots.add_parsable_certificates(loaded.certs);
-            if added == 0 {
-                return Err("no native root CA certificates found".to_string());
-            }
-            Ok(Arc::new(
-                rustls::ClientConfig::builder()
-                    .with_root_certificates(roots)
-                    .with_no_client_auth(),
-            ))
-        })
-        .clone()
-        .map_err(anyhow::Error::msg)
-}
-
 /// Connect a WebSocket, offering `permessage-deflate` unless `mode` is `Off`.
 ///
 /// Errors are tungstenite's own [`WsError`] so callers keep classifying
@@ -114,6 +86,7 @@ fn tls_config() -> Result<Arc<rustls::ClientConfig>> {
 pub(crate) async fn connect_ws_with_mode<R>(
     request: R,
     mode: CompressionMode,
+    egress: &jcode_base::egress::Transport,
 ) -> Result<(OpenAIWs, Response), WsError>
 where
     R: IntoClientRequest + Unpin,
@@ -136,13 +109,12 @@ where
         _ => return Err(WsError::Url(UrlError::UnsupportedUrlScheme)),
     };
     let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
-    let tcp = TcpStream::connect((host.as_str(), port)).await?;
+    // A credential with egress dials through its proxy and never directly.
+    let tcp = egress.connect_tcp(host.as_str(), port).await?;
     let transport = if tls {
         let server_name = rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|_| WsError::Tls(TlsError::InvalidDnsName))?;
-        let config = tls_config()
-            .map_err(|err| WsError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, err)))?;
-        let stream = tokio_rustls::TlsConnector::from(config)
+        let stream = tokio_rustls::TlsConnector::from(websocket_tls_config())
             .connect(server_name, tcp)
             .await?;
         WsTransport::Tls(Box::new(stream))
@@ -160,10 +132,28 @@ where
 }
 
 /// Connect a WebSocket using the configured `[provider] request_compression`.
+#[cfg(test)]
 #[allow(clippy::result_large_err)] // tungstenite's WsError, matched by callers
 pub(crate) async fn connect_ws<R>(request: R) -> Result<(OpenAIWs, Response), WsError>
 where
     R: IntoClientRequest + Unpin,
 {
-    connect_ws_with_mode(request, jcode_base::provider::request_compression_mode()).await
+    connect_ws_via(request, &jcode_base::egress::Transport::default()).await
+}
+
+/// Connect through the credential's egress transport.
+#[allow(clippy::result_large_err)] // tungstenite's WsError, matched by callers
+pub(crate) async fn connect_ws_via<R>(
+    request: R,
+    egress: &jcode_base::egress::Transport,
+) -> Result<(OpenAIWs, Response), WsError>
+where
+    R: IntoClientRequest + Unpin,
+{
+    connect_ws_with_mode(
+        request,
+        jcode_base::provider::request_compression_mode(),
+        egress,
+    )
+    .await
 }

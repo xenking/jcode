@@ -21,6 +21,22 @@ fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static 
     "Hint: check network connectivity, DNS/TLS, that the base URL includes the API version (usually /v1), and that the model exists on the provider."
 }
 
+fn is_content_filter_error(body: &str) -> bool {
+    fn names_filter(message: &str) -> bool {
+        message
+            .to_ascii_lowercase()
+            .contains("blocked by content filter")
+    }
+    match serde_json::from_str::<Value>(body) {
+        Ok(body) => {
+            let error = &body["error"];
+            error["code"].as_str() == Some("content_filter")
+                || error["message"].as_str().is_some_and(names_filter)
+        }
+        Err(_) => names_filter(body),
+    }
+}
+
 /// Hint for a request the server answered with an error status. The network
 /// is working (a response came back), so connectivity advice would mislead:
 /// point at the key, the account balance, or the model instead.
@@ -33,6 +49,9 @@ fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
         }
         402 => {
             "Hint: this is a billing limit, not a network problem. The key's balance or token allowance is used up: raise the limit or top up in the provider's dashboard, use another key, or switch to another provider with /model."
+        }
+        429 => {
+            "Hint: the provider rate limit or usage allowance was reached. Check the reset time or switch to another model or provider with /model."
         }
         // Local servers (Ollama, LM Studio) answer 404 for a model that is
         // not installed or loaded, which their own hint already explains.
@@ -58,6 +77,7 @@ fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
 )]
 pub(super) async fn run_stream_with_retries(
     client: Client,
+    transport: jcode_base::egress::Transport,
     api_base: String,
     auth: ProviderAuth,
     send_openrouter_headers: bool,
@@ -84,7 +104,11 @@ pub(super) async fn run_stream_with_retries(
                 next_retry_delay.take(),
             )
             .min(retry_backoff_cap);
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                biased;
+                _ = tx.closed() => return,
+                _ = tokio::time::sleep(delay) => {}
+            }
             jcode_base::logging::info(&format!(
                 "Retrying API request using {} (attempt {}/{})",
                 auth.label(),
@@ -116,24 +140,28 @@ pub(super) async fn run_stream_with_retries(
         let attempt_client = if attempt == 0 {
             client.clone()
         } else {
-            jcode_provider_core::fresh_transport_client()
+            transport.retry_client()
         };
 
-        match stream_response(
+        let response = stream_response(
             attempt_client,
             api_base.clone(),
             auth.clone(),
             send_openrouter_headers,
             &conversation_id,
-            request.clone(),
+            &request,
             azure_responses,
             attempt_tx,
             Arc::clone(&provider_pin),
             model.clone(),
             responses_api,
-        )
-        .await
-        {
+        );
+        let result = tokio::select! {
+            biased;
+            _ = tx.closed() => return,
+            result = response => result,
+        };
+        match result {
             Ok(()) => {
                 let _ = attempt_guard.finish().await;
                 return;
@@ -142,6 +170,26 @@ pub(super) async fn run_stream_with_retries(
                 let saw_output = attempt_guard.finish().await;
                 // Full anyhow chain ({:#}) so a `.context(...)`-wrapped transport
                 // cause (e.g. TLS BadRecordMac) is visible to the classifier.
+                let server_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
+                // Routing has another account for this turn and this one is
+                // spent (or rejected): hand it over now. A throttle that clears
+                // shortly is not matched, so the retry below keeps the account
+                // and its prompt cache.
+                if jcode_provider_core::account_limit_fail_fast()
+                    && jcode_provider_core::is_exhausted_account_limit(
+                        &format!("{e:#}"),
+                        server_delay,
+                    )
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+                if jcode_provider_core::retry_after::retry_after_exceeds_max(&e)
+                    || server_delay.is_some_and(|delay| delay > retry_backoff_cap)
+                {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
                 if retryable_stream_failure(&e) && attempt + 1 < max_retries {
                     if saw_output {
                         // Partial output already reached the consumer; tell it
@@ -163,7 +211,7 @@ pub(super) async fn run_stream_with_retries(
                             e
                         ));
                     }
-                    next_retry_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
+                    next_retry_delay = server_delay;
                     last_error = Some(e);
                     continue;
                 }
@@ -195,7 +243,7 @@ async fn stream_response(
     auth: ProviderAuth,
     send_openrouter_headers: bool,
     conversation_id: &str,
-    request: Value,
+    request: &Value,
     azure_responses: bool,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
@@ -243,7 +291,7 @@ async fn stream_response(
     req = apply_grok_cli_turn_headers(req, &auth, &model, conversation_id);
 
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(
-        req.json(&request),
+        req.json(request),
         stream_idle_timeout,
     )
     .await
@@ -273,7 +321,11 @@ async fn stream_response(
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
         let body = jcode_base::util::http_error_body(response, "HTTP error").await;
-        let hint = if azure_responses {
+        let hint = if status == reqwest::StatusCode::FORBIDDEN && is_content_filter_error(&body) {
+            "Hint: the provider's content filter blocked this request text. Remove or rewrite the flagged text before retrying."
+        } else if matches!(status.as_u16(), 401 | 403) && auth.sends_no_credential() {
+            "Hint: the endpoint refused the request. Check its access policy, authentication settings, and route."
+        } else if azure_responses {
             match status.as_u16() {
                 401 | 402 | 403 | 500..=599 => http_status_hint(status.as_u16(), &api_base, &model),
                 429 => {
@@ -487,6 +539,23 @@ fn parsed_http_status(error_str: &str) -> Option<u16> {
     }
 }
 
+/// Whether a (lowercased) 429 body says the account's allowance is used up,
+/// as opposed to asking the client to slow down.
+fn is_exhausted_quota_error(error_str: &str) -> bool {
+    [
+        "freeusagelimiterror",
+        "gousagelimiterror",
+        "opencode go usage limit",
+        "free usage limit",
+        "insufficient_quota",
+        "insufficient quota",
+        "exceeded your current quota",
+        "billing",
+    ]
+    .iter()
+    .any(|marker| error_str.contains(marker))
+}
+
 fn is_retryable_error(error_str: &str) -> bool {
     // Explicit non-retryable HTTP statuses take precedence over the loose
     // substring heuristics below. These are deterministic client-side failures
@@ -498,6 +567,10 @@ fn is_retryable_error(error_str: &str) -> bool {
         // 429 rate limit, and every 5xx: the server answered but is overloaded
         // or failing on its side. This includes non-standard codes such as the
         // 529 "overloaded" some OpenAI-compatible providers send (#1596).
+        // A 429 that reports an exhausted allowance is not a rate limit: the
+        // same request fails identically until the plan changes. Retrying it
+        // left `jcode run` silent for minutes on a free-tier limit.
+        Some(429) if is_exhausted_quota_error(error_str) => return false,
         Some(429 | 500..=599) => return true,
         _ => {}
     }
@@ -517,6 +590,116 @@ fn is_retryable_error(error_str: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn forbidden_response_error(body: &'static str, auth: ProviderAuth) -> String {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            socket.read_exact(&mut vec![0; length]).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            socket
+                .get_mut()
+                .write_all(response.as_bytes())
+                .await
+                .unwrap();
+        });
+        let (tx, _rx) = mpsc::channel(8);
+        let error = stream_response(
+            Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()
+                .unwrap(),
+            base,
+            auth,
+            false,
+            "fixture",
+            &serde_json::json!({"model":"fixture","messages":[],"stream":true}),
+            false,
+            tx,
+            Arc::new(Mutex::new(None)),
+            "fixture".into(),
+            false,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        server.await.unwrap();
+        assert!(error.contains("status: 403"), "{error}");
+        error
+    }
+
+    fn fake_bearer_auth() -> ProviderAuth {
+        ProviderAuth::AuthorizationBearer {
+            token: "fixture".into(),
+            label: "fixture bearer".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn content_filter_403_explains_refusal_not_api_key() {
+        for body in [
+            r#"{"error":{"message":"Request blocked by content filter: [CREDIT_CARD]"}}"#,
+            r#"{"error":{"message":"Request denied","code":"content_filter"}}"#,
+        ] {
+            let error = forbidden_response_error(body, fake_bearer_auth()).await;
+            let hint = error.lines().last().unwrap();
+            assert!(
+                hint.contains("content filter") && hint.contains("request text"),
+                "{error}"
+            );
+            assert!(!hint.contains("API key"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_403_diagnosis_respects_auth_mode() {
+        let body = r#"{"error":{"message":"Forbidden"}}"#;
+        let authenticated = forbidden_response_error(body, fake_bearer_auth()).await;
+        assert!(
+            authenticated.lines().last().unwrap().contains("API key"),
+            "{authenticated}"
+        );
+
+        let local = forbidden_response_error(
+            body,
+            ProviderAuth::None {
+                label: "local endpoint (no auth)".into(),
+            },
+        )
+        .await;
+        let hint = local.lines().last().unwrap();
+        assert!(
+            hint.contains("access policy") && !hint.contains("API key"),
+            "{local}"
+        );
+    }
+
+    #[test]
+    fn opencode_go_exhausted_five_hour_allowance_does_not_retry() {
+        let error = r#"openai-compatible chat request failed
+  status: 429 too many requests
+  response: {"type":"error","error":{"type":"gousagelimiterror","message":"opencode go usage limit reached (5-hour, resets in 3h 40m)."}}"#;
+        assert!(!is_retryable_error(error));
+    }
 
     #[test]
     fn local_endpoint_hint_mentions_ollama_actions() {
@@ -581,6 +764,19 @@ mod tests {
             {\"error\":{\"message\":\"this request requires more credits, or fewer \
             max_tokens. you requested up to 65536 tokens, but can only afford 34424\"}}";
         assert!(!is_retryable_error(err));
+    }
+
+    /// Field report: OpenCode Zen free models answer 429 FreeUsageLimitError.
+    /// That was retried 8 times with backoff, so `jcode run` printed nothing.
+    #[test]
+    fn exhausted_quota_429_fails_fast_but_rate_limit_429_retries() {
+        let quota = "openai-compatible chat request failed\n  status: 429 Too Many Requests\n  response: {\"type\":\"error\",\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"Free usage limit reached.\"}}"
+            .to_lowercase();
+        assert!(!is_retryable_error(&quota));
+        let openai = "status: 429 too many requests\n  response: {\"error\":{\"code\":\"insufficient_quota\"}}";
+        assert!(!is_retryable_error(openai));
+        let rate = "status: 429 too many requests\n  response: {\"error\":{\"message\":\"rate limit exceeded, retry in 2s\"}}";
+        assert!(is_retryable_error(rate));
     }
 
     #[test]

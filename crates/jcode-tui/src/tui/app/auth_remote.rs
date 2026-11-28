@@ -249,7 +249,7 @@ impl App {
         self.clear_input_undo_history();
     }
 
-    pub(super) fn cancel_ssh_login(&mut self) {
+    fn cancel_ssh_login(&mut self) {
         let Some(login) = self.remote_login.as_mut() else {
             return;
         };
@@ -547,10 +547,8 @@ impl App {
         let Some(task) = login.task.as_mut() else {
             return false;
         };
-        let reply = match task.reply.try_recv() {
-            Ok(reply) => reply,
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return false,
-            Err(_) => Err("Remote login task stopped"),
+        let Some(reply) = task.try_reply("Remote login task stopped") else {
+            return false;
         };
         login.task = None;
         let provider = login.provider.clone();

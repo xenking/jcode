@@ -114,7 +114,9 @@ fn reflection_prompt(assessment: &RiskAssessment) -> String {
          - If you inferred it, is a narrower target enough?\n\
          - If this is wrong, nothing here can be recovered.\n\n\
          If it is genuinely what the user asked for, re-issue the same call \
-         with a `justification` field explaining which request it serves. If \
+         with a `justification` field explaining which request it serves. The \
+         justification must be at least {MIN_JUSTIFICATION_LEN} UTF-8 bytes after trimming \
+         and cannot be a bare affirmation. If \
          you are not sure, ask the user instead: that costs one message, and \
          being wrong costs their data.",
         assessment.explanation()

@@ -10,6 +10,7 @@ fn bundle_fixture(root: &Path, stage: &Path) -> (RepoManifest, String) {
     git(root, &["init", "--quiet"]).unwrap();
     git(root, &["config", "user.name", "Latency Test"]).unwrap();
     git(root, &["config", "user.email", "latency@example.invalid"]).unwrap();
+    git(root, &["config", "commit.gpgsign", "false"]).unwrap();
     git(root, &["commit", "--quiet", "--allow-empty", "-m", "base"]).unwrap();
     let base = git(root, &["rev-parse", "HEAD"]).unwrap();
     git(root, &["commit", "--quiet", "--allow-empty", "-m", "head"]).unwrap();
@@ -98,7 +99,8 @@ fn isolated_preflight_and_parallel_preparation_regressions() {
         "history",
         "history-unknown",
     ] {
-        let root = tempfile::tempdir().unwrap();
+        // The credential store rejects symlinked paths; macOS TMPDIR is under /var.
+        let root = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let bin = root.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         // Fake SSH accepts the same final shell-command argument as real SSH.
@@ -232,9 +234,15 @@ fn isolated_latency_child() {
     }
     if mode == "overlap" || mode == "join-error" {
         let mut sess = session::Session::create_with_id("latency-session".into(), None, None);
-        sess.working_dir = Some(root.to_string_lossy().into_owned());
+        sess.apply_workspace(crate::session::Workspace {
+            working_dir: Some(root.to_string_lossy().into_owned()),
+            ..sess.workspace()
+        });
         if mode == "join-error" {
-            sess.route_api_method = Some("openai-oauth@".into());
+            sess.apply_route(crate::session::Route {
+                route_api_method: Some("openai-oauth@".into()),
+                ..sess.route()
+            });
         }
         sess.save_prepared().unwrap();
         let error = format!("{:#}", run_move(None, &target, true, true).unwrap_err());
@@ -264,7 +272,10 @@ fn isolated_latency_child() {
     }
     let result = if mode.starts_with("prepare") {
         let mut sess = session::Session::create_with_id("latency-session".into(), None, None);
-        sess.working_dir = Some(root.to_string_lossy().into_owned());
+        sess.apply_workspace(crate::session::Workspace {
+            working_dir: Some(root.to_string_lossy().into_owned()),
+            ..sess.workspace()
+        });
         sess.save_prepared().unwrap();
         storage::mark_streaming("latency-session");
         assert!(storage::streaming_session_ids().contains(&"latency-session".to_string()));

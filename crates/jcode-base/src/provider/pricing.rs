@@ -206,6 +206,120 @@ pub fn metered_pricing_for_source_with_tier(
     model: &str,
     service_tier: Option<&str>,
 ) -> Option<RouteCheapnessEstimate> {
+    let base = catalog_pricing_for_source(source_key, model, service_tier);
+    match configured_cost_override(source_key, model) {
+        Some(cost) => apply_cost_override(base, cost),
+        None => base,
+    }
+}
+
+/// Price override from `config.toml` for `model` on an API-key source, in USD
+/// per 1M tokens. Looks at `[api_key_profiles.<id>.costs]` for a built-in
+/// profile (`openai-compatible:<id>`) and `[providers.<name>.costs]` for a
+/// named provider. A key is a model id or a `*` glob, and the most specific
+/// match wins.
+pub fn configured_cost_override(
+    source_key: &str,
+    model: &str,
+) -> Option<crate::config::ApiKeyModelCost> {
+    configured_cost_override_with(crate::config::config(), source_key, model)
+}
+
+pub(crate) fn configured_cost_override_with(
+    config: &crate::config::Config,
+    source_key: &str,
+    model: &str,
+) -> Option<crate::config::ApiKeyModelCost> {
+    if matches!(
+        source_key,
+        "claude:api-key" | "openai:api-key" | "openrouter"
+    ) {
+        return None;
+    }
+    // A labelled account id (`opencode-go:second`) prices like its provider.
+    let provider = source_key
+        .strip_prefix("openai-compatible:")
+        .unwrap_or(source_key);
+    let provider = provider.split(':').next().unwrap_or(provider);
+    let costs = if source_key.starts_with("openai-compatible:") || {
+        crate::provider_catalog::openai_compatible_profile_by_id(provider).is_some()
+    } {
+        config.api_key_profile_costs(provider)?
+    } else {
+        // The ledger slugs a named provider's name, so match either form.
+        let slug = |name: &str| {
+            name.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>()
+        };
+        &config
+            .providers
+            .iter()
+            .find(|(name, _)| name.as_str() == provider || slug(name) == provider)?
+            .1
+            .costs
+    };
+    let model = model.trim();
+    costs
+        .iter()
+        .filter_map(|(pattern, cost)| {
+            let glob = jcode_routing_policy::ModelGlob::parse(pattern)?;
+            glob.matches(model).then_some((
+                pattern.trim().len(),
+                pattern.eq_ignore_ascii_case(model),
+                *cost,
+            ))
+        })
+        .max_by_key(|(len, exact, _)| (*exact, *len))
+        .map(|(_, _, cost)| cost)
+}
+
+fn apply_cost_override(
+    base: Option<RouteCheapnessEstimate>,
+    cost: crate::config::ApiKeyModelCost,
+) -> Option<RouteCheapnessEstimate> {
+    let valid = |price: Option<f64>| price.filter(|price| price.is_finite() && *price >= 0.0);
+    let input = valid(cost.input).map(usd_to_micros).or_else(|| {
+        base.as_ref()
+            .and_then(|base| base.input_price_per_mtok_micros)
+    })?;
+    let output = valid(cost.output).map(usd_to_micros).or_else(|| {
+        base.as_ref()
+            .and_then(|base| base.output_price_per_mtok_micros)
+    })?;
+    let cache_read = valid(cost.cache_read).map(usd_to_micros).or_else(|| {
+        base.as_ref()
+            .and_then(|base| base.cache_read_price_per_mtok_micros)
+    });
+    let fully_configured = valid(cost.input).is_some() && valid(cost.output).is_some();
+    let (source, confidence) = match &base {
+        Some(base) if !fully_configured => (base.source, base.confidence),
+        _ => (
+            RouteCostSource::PublicApiPricing,
+            RouteCostConfidence::Exact,
+        ),
+    };
+    Some(RouteCheapnessEstimate::metered(
+        source,
+        confidence,
+        input,
+        output,
+        cache_read,
+        Some("price override from config.toml".to_string()),
+    ))
+}
+
+fn catalog_pricing_for_source(
+    source_key: &str,
+    model: &str,
+    service_tier: Option<&str>,
+) -> Option<RouteCheapnessEstimate> {
     // 1. Curated static tables.
     let static_estimate = match source_key {
         "claude:api-key" => core_pricing::anthropic_api_pricing_with_tier(model, service_tier),
@@ -294,10 +408,16 @@ pub fn metered_usage_cost_usd(
     } else {
         1.0
     };
+    // An explicit cache-write price replaces the multiplier on input.
+    let write_price = configured_cost_override(source_key, model)
+        .and_then(|cost| cost.cache_write)
+        .filter(|price| price.is_finite() && *price >= 0.0)
+        .map(|price| price / 1_000_000.0)
+        .unwrap_or(input_price * write_multiplier);
     let cost = fresh as f64 * input_price
         + output as f64 * output_price
         + cache_read as f64 * read_price
-        + cache_creation as f64 * input_price * write_multiplier;
+        + cache_creation as f64 * write_price;
     cost.is_finite().then_some(cost)
 }
 
@@ -588,3 +708,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "pricing_override_tests.rs"]
+mod pricing_override_tests;

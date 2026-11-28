@@ -401,6 +401,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         system_prompt: None,
         supports_pdf_panels: true,
         supports_user_response: true,
+        supports_applets: None,
         supports_server_failover: false,
         supports_turn_identity: false,
         id: 89,
@@ -423,6 +424,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         system_prompt: _,
         supports_pdf_panels,
         supports_user_response,
+        supports_applets: _,
         supports_server_failover: _,
         supports_turn_identity: _,
         id,
@@ -467,6 +469,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         system_prompt: _,
         supports_pdf_panels,
         supports_user_response,
+        supports_applets: _,
         supports_server_failover: _,
         supports_turn_identity: _,
         id,
@@ -570,11 +573,13 @@ fn test_resume_all_result_event_roundtrip() -> Result<()> {
 fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Result<()> {
     let req = Request::Message {
         id: 88,
+        jarvis_voice: false,
         content: "inspect this".to_string(),
         images: vec![
             ("image/png".to_string(), "AAA".to_string()),
             ("image/jpeg".to_string(), "BBB".to_string()),
         ],
+        attachments: vec![],
         system_reminder: Some("be concise".to_string()),
         active_skill: Some("verification".to_string()),
         no_reply: true,
@@ -583,11 +588,13 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
     let decoded = parse_request_json(&json)?;
     let Request::Message {
         id,
+        jarvis_voice: false,
         content,
         images,
         system_reminder,
         active_skill,
         no_reply,
+        ..
     } = decoded
     else {
         return Err(anyhow!("expected Message"));
@@ -663,6 +670,33 @@ fn test_message_end_carries_provider_stop_reason() -> Result<()> {
 }
 
 #[test]
+fn daemon_identity_pong_is_optional_and_roundtrips() -> Result<()> {
+    let legacy: ServerEvent = serde_json::from_str(r#"{"type":"pong","id":7}"#)?;
+    assert!(matches!(
+        &legacy,
+        ServerEvent::Pong {
+            daemon_identity: None,
+            ..
+        }
+    ));
+    assert!(
+        serde_json::to_value(legacy)?
+            .get("daemon_identity")
+            .is_none()
+    );
+    let modern = serde_json::json!({
+        "type": "pong", "id": 8,
+        "daemon_identity": {"pid": 123, "binary_path": "/target/release/jcode", "git_hash": "483d7848f"}
+    });
+    let decoded: ServerEvent = serde_json::from_value(modern.clone())?;
+    // Legacy identities deserialize with generation zero.
+    let mut expected = modern["daemon_identity"].clone();
+    expected["generation"] = 0.into();
+    assert_eq!(serde_json::to_value(decoded)?["daemon_identity"], expected);
+    Ok(())
+}
+
+#[test]
 fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
     let legacy: ServerEvent = serde_json::from_str(r#"{"type":"pong","id":7}"#)?;
     assert!(matches!(
@@ -678,6 +712,7 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         native_ssh_protocol: Some(1),
         capabilities: vec!["session_tools".into()],
         user_connected_session_ids: None,
+        daemon_identity: None,
     };
     let json = serde_json::to_value(&modern)?;
     assert_eq!(json["native_ssh_protocol"], 1);
@@ -761,7 +796,13 @@ fn context_cap_wire_roundtrip() -> Result<()> {
 #[test]
 fn subscribe_and_resume_client_name_is_optional_and_compatible() {
     let old: Request = serde_json::from_str(r#"{"type":"subscribe","id":1}"#).unwrap();
-    assert!(matches!(old, Request::Subscribe { client_name: None, .. }));
+    assert!(matches!(
+        old,
+        Request::Subscribe {
+            client_name: None,
+            ..
+        }
+    ));
     let new: Request =
         serde_json::from_str(r#"{"type":"subscribe","id":1,"client_name":"jcode-ios/1.0"}"#)
             .unwrap();
@@ -772,7 +813,127 @@ fn subscribe_and_resume_client_name_is_optional_and_compatible() {
         r#"{"type":"resume_session","id":2,"session_id":"s","client_name":"jcode-ios/1.0"}"#,
     )
     .unwrap();
-    assert!(matches!(resume, Request::ResumeSession { client_name: Some(_), .. }));
+    assert!(matches!(
+        resume,
+        Request::ResumeSession {
+            client_name: Some(_),
+            ..
+        }
+    ));
     let json = serde_json::to_string(&old).unwrap();
     assert!(!json.contains("client_name"));
+}
+
+#[test]
+fn routing_gate_events_and_answers_roundtrip() -> Result<()> {
+    let gate = ServerEvent::RoutingGate {
+        gate_id: "gate-1".into(),
+        reason: "claude:team reached 95%".into(),
+        options: vec![
+            RoutingGateOption::Switch {
+                account: "openai:fox".into(),
+                detail: "priority 2".into(),
+            },
+            RoutingGateOption::WaitUntil { resets_at: 1_700_000_000 },
+            RoutingGateOption::Ack { account: "claude:team".into() },
+        ],
+    };
+    let json = encode_event(&gate);
+    assert!(json.contains("\"type\":\"routing_gate\""));
+    assert!(json.contains("\"kind\":\"wait_until\""));
+    let ServerEvent::RoutingGate { gate_id, options, .. } = parse_event_json(json.trim())? else {
+        return Err(anyhow!("expected RoutingGate"));
+    };
+    assert_eq!(gate_id, "gate-1");
+    assert_eq!(options.len(), 3);
+
+    let decision = ServerEvent::RoutingDecision {
+        account: "claude:team".into(),
+        reason: "priority 1".into(),
+        warnings: Vec::new(),
+        pending: None,
+    };
+    let json = encode_event(&decision);
+    assert!(!json.contains("warnings") && !json.contains("pending"), "empty extras stay off the wire: {json}");
+    assert!(matches!(
+        parse_event_json(json.trim())?,
+        ServerEvent::RoutingDecision { pending: None, .. }
+    ));
+
+    for choice in [
+        RoutingGateChoice::Switch { account: "openai:fox".into() },
+        RoutingGateChoice::Wait,
+        RoutingGateChoice::Ack { minutes: 30 },
+        RoutingGateChoice::Cancel,
+    ] {
+        let req = Request::RoutingGateAnswer { id: 3, gate_id: "gate-1".into(), choice: choice.clone() };
+        let json = serde_json::to_string(&req)?;
+        let decoded = parse_request_json(&json)?;
+        assert_eq!(decoded.id(), 3);
+        let Request::RoutingGateAnswer { choice: back, .. } = decoded else {
+            return Err(anyhow!("expected RoutingGateAnswer"));
+        };
+        assert_eq!(back, choice);
+    }
+    Ok(())
+}
+
+#[test]
+fn routing_intent_request_roundtrips_every_action() -> Result<()> {
+    let actions = vec![
+        RoutingIntentAction::Status,
+        RoutingIntentAction::Pin { account: Some("claude:team".into()) },
+        RoutingIntentAction::Pin { account: None },
+        RoutingIntentAction::Switch { account: Some("openai:fox".into()) },
+        RoutingIntentAction::Hold { account: Some("claude:team".into()), minutes: Some(90) },
+        RoutingIntentAction::Ack { account: "claude:team".into(), minutes: None },
+        RoutingIntentAction::Paid { mode: "2h".into() },
+        RoutingIntentAction::Unstick,
+    ];
+    for action in actions {
+        let json = serde_json::to_string(&Request::RoutingIntent { id: 8, action: action.clone() })?;
+        assert!(json.contains("\"type\":\"routing_intent\""));
+        let Request::RoutingIntent { id, action: back } = parse_request_json(&json)? else {
+            return Err(anyhow!("expected RoutingIntent"));
+        };
+        assert_eq!(id, 8);
+        assert_eq!(back, action);
+    }
+    // Hand-written clients may leave the optional fields out.
+    let decoded = parse_request_json(r#"{"type":"routing_intent","id":1,"action":{"action":"hold","account":"a"}}"#)?;
+    assert!(matches!(
+        decoded,
+        Request::RoutingIntent { action: RoutingIntentAction::Hold { minutes: None, .. }, .. }
+    ));
+    Ok(())
+}
+
+#[test]
+fn routing_view_request_is_lightweight_and_its_answer_roundtrips() -> Result<()> {
+    let request = parse_request_json(r#"{"type":"routing_view","id":4}"#)?;
+    assert_eq!(request.id(), 4);
+    assert!(
+        request.is_lightweight_control_request(),
+        "a settings page reads the view before any session exists"
+    );
+
+    let event = ServerEvent::RoutingView {
+        id: 4,
+        view: RoutingView {
+            mode: "shadow".into(),
+            paid: "auto".into(),
+            ..RoutingView::default()
+        },
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"routing_view\""));
+    assert!(
+        !json.contains("accounts") && !json.contains("problems"),
+        "empty lists stay off the wire: {json}"
+    );
+    let ServerEvent::RoutingView { id, view } = parse_event_json(json.trim())? else {
+        return Err(anyhow!("expected RoutingView"));
+    };
+    assert_eq!((id, view.mode.as_str()), (4, "shadow"));
+    Ok(())
 }

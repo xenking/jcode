@@ -3,8 +3,8 @@
 
 fn long_transcript_app(messages: usize) -> crate::tui::app::App {
     let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diagram_pane_enabled = false;
+    app.diagram.mode = crate::config::DiagramDisplayMode::None;
+    app.diagram.enabled = false;
     let mut msgs = Vec::with_capacity(messages);
     for i in 0..messages {
         msgs.push(match i % 4 {
@@ -130,6 +130,7 @@ fn long_transcript_streaming_while_scrolled_perf() {
         label: Some("img".to_string()),
         source: crate::session::RenderedImageSource::UserInput,
         anchor: None,
+        session_image: None,
         history_message_index: None,
     }];
     app.invalidate_side_pane_images_signature();

@@ -1,12 +1,18 @@
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolOutput {
     pub output: String,
     pub title: Option<String>,
     pub metadata: Option<serde_json::Value>,
     pub images: Vec<ToolImage>,
+    /// Typed result for in-process callers such as codemode: an MCP tool's
+    /// `structuredContent`. The model-facing result stays `output`. Dropped by
+    /// any step that replaces `output` (for example the context guard), so a
+    /// caller never sees a typed value that disagrees with the text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolImage {
     pub media_type: String,
     pub data: String,
@@ -20,7 +26,13 @@ impl ToolOutput {
             title: None,
             metadata: None,
             images: Vec::new(),
+            structured: None,
         }
+    }
+
+    pub fn with_structured(mut self, structured: serde_json::Value) -> Self {
+        self.structured = Some(structured);
+        self
     }
 
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
@@ -96,9 +108,6 @@ pub fn resolve_tool_name(name: &str) -> &str {
         // work as-is.
         "grep" | "file_grep" => "agentgrep",
         "skill" | "Skill" => "skill_manage",
-        // The integration catalog tool was renamed from `discover_tools`;
-        // models trained on or resuming from the old vocabulary still emit it.
-        "discover_tools" => "integration_tools",
         "todoread" | "todowrite" | "todo_read" | "todo_write" | "todos" => "todo",
         // The Anthropic OAuth surface advertises PascalCase tool names and
         // reverse-maps them provider-side for top-level calls, but nested

@@ -10,6 +10,51 @@
 // reload snapshot must therefore fold it back into the queue.
 
 #[test]
+fn test_reload_soft_interrupt_recovery_preserves_order_across_verdict_groups() {
+    use crate::protocol::ServerEvent;
+    use crate::tui::backend::soft_interrupt_client_id;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for duplicate_content in [false, true] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        let first = "original request";
+        let second = if duplicate_content {
+            first
+        } else {
+            "correction"
+        };
+        app.track_pending_soft_interrupt(41, first.into());
+        app.track_pending_soft_interrupt(42, second.into());
+        app.track_pending_soft_interrupt(43, "final correction".into());
+        app.queued_messages.push("later queued request".into());
+
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+        let (cancel_id, _) = app.soft_interrupt_recovery.unwrap();
+        app.handle_server_event(
+            ServerEvent::SoftInterruptsCancelled {
+                id: cancel_id,
+                // Deliberately reversed within the group, with the first send
+                // in the other group because its receipt was lost on reload.
+                cancelled: vec![soft_interrupt_client_id(43), soft_interrupt_client_id(42)],
+                not_queued: vec![soft_interrupt_client_id(41)],
+            },
+            &mut remote,
+        );
+        assert_eq!(
+            app.queued_messages,
+            [first, second, "final correction", "later queued request"]
+        );
+        assert!(app.pending_soft_interrupts.is_empty());
+        assert!(app.pending_soft_interrupt_requests.is_empty());
+        assert!(app.sent_soft_interrupts.is_empty());
+    }
+}
+
+#[test]
 fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
     for auto_retry in [false, true] {
         let mut app = create_test_app();
@@ -31,6 +76,15 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         ))
         .unwrap();
         let rejected_id = app.current_message_id.unwrap();
+        let retry_reminder = app
+            .rate_limit_pending_message
+            .as_ref()
+            .unwrap()
+            .system_reminder
+            .clone()
+            .unwrap();
+        assert!(retry_reminder.contains("Retry the interrupted execution"));
+        assert!(retry_reminder.ends_with("Continue the pending task"));
         app.handle_server_event(
             crate::protocol::ServerEvent::Error {
                 id: rejected_id,
@@ -45,8 +99,8 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         assert!(app.rate_limit_pending_message.is_none());
         assert!(app.rate_limit_reset.is_none());
         assert_eq!(
-            app.hidden_queued_system_messages,
-            ["Continue the pending task"]
+            app.hidden_queued_system_messages.as_slice(),
+            std::slice::from_ref(&retry_reminder)
         );
         assert!(!app.display_messages().iter().any(|m| m.role == "error"));
         assert!(app.pending_fallback_offer.is_none());
@@ -65,8 +119,8 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         assert!(app.is_processing);
         assert!(app.current_message_id.is_none());
         assert_eq!(
-            app.hidden_queued_system_messages,
-            ["Continue the pending task"]
+            app.hidden_queued_system_messages.as_slice(),
+            std::slice::from_ref(&retry_reminder)
         );
 
         app.handle_server_event(
@@ -89,7 +143,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
                 .unwrap()
                 .system_reminder
                 .as_deref(),
-            Some("Continue the pending task")
+            Some(retry_reminder.as_str())
         );
     }
 }
@@ -130,6 +184,7 @@ fn test_disconnect_recovers_inflight_queued_continuation_to_queue() {
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(12);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "queued follow-up in flight".to_string(),
         images: vec![],
         is_system: true,
@@ -163,6 +218,7 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
     // clear it rather than re-queueing as a system continuation.
     app.is_processing = true;
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "user retry message".to_string(),
         images: vec![],
         is_system: false,
@@ -183,39 +239,43 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
 
 #[test]
 fn test_save_input_for_reload_persists_inflight_queued_continuation() {
-    let mut app = create_test_app();
-    let session_id = format!("test-391-inflight-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-391-inflight-{}", std::process::id());
 
-    // Simulate the reload racing the dispatch: one message still queued, one
-    // already dequeued into the in-flight pending slot.
-    app.queued_messages.push("still queued".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "dispatched but unfinished".to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: Some("hidden reminder".to_string()),
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
+        // Simulate the reload racing the dispatch: one message still queued, one
+        // already dequeued into the in-flight pending slot.
+        app.queued_messages.push("still queued".to_string());
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
+            content: "dispatched but unfinished".to_string(),
+            images: vec![],
+            is_system: true,
+            system_reminder: Some("hidden reminder".to_string()),
+            auto_retry: false,
+            retry_attempts: 0,
+            retry_at: None,
+        });
+        app.rate_limit_reset = None;
+
+        app.save_input_for_reload(&session_id);
+
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        assert_eq!(
+            restored.queued_messages,
+            vec!["dispatched but unfinished", "still queued"],
+            "the in-flight continuation must be persisted at the front of the queue"
+        );
+        assert_eq!(
+            restored.hidden_queued_system_messages,
+            vec!["hidden reminder"]
+        );
+        assert!(
+            restored.rate_limit_pending_message.is_none(),
+            "the continuation must not also restore as an unreachable pending message"
+        );
     });
-    app.rate_limit_reset = None;
-
-    app.save_input_for_reload(&session_id);
-
-    let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
-    assert_eq!(
-        restored.queued_messages,
-        vec!["dispatched but unfinished", "still queued"],
-        "the in-flight continuation must be persisted at the front of the queue"
-    );
-    assert_eq!(
-        restored.hidden_queued_system_messages,
-        vec!["hidden reminder"]
-    );
-    assert!(
-        restored.rate_limit_pending_message.is_none(),
-        "the continuation must not also restore as an unreachable pending message"
-    );
 }
 
 #[test]
@@ -233,20 +293,20 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
         assert!(reloaded_app.todo_confidence_spike_challenged);
 
         crate::todo::save_todos(
-            &reloaded_app.session.id,
+            reloaded_app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Validate release result".to_string(),
                 status: "completed".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence: Some(crate::todo::ConfidenceState::Verified),
+                completion_confidence: Some(crate::todo::ConfidenceState::Verified),
                 waiting_reason: None,
                 requires_user_auth: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::Speculative,
-                    crate::todo::ConfidenceState::from_legacy_score(100),
+                    crate::todo::ConfidenceState::Verified,
                 ],
                 ..Default::default()
             }],
@@ -254,7 +314,7 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
         .expect("save completed todo");
 
         crate::todo::save_goals(
-            &reloaded_app.session.id,
+            reloaded_app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -292,18 +352,18 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
         // A completed todo with confidence below the gate threshold keeps the
         // completion gate failing on every check.
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Ship the fix".to_string(),
                 status: "completed".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
-                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
+                confidence: Some(crate::todo::ConfidenceState::Speculative),
+                completion_confidence: Some(crate::todo::ConfidenceState::Speculative),
                 waiting_reason: None,
                 requires_user_auth: None,
                 waiting_on: Vec::new(),
-                confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(50)],
+                confidence_history: vec![crate::todo::ConfidenceState::Speculative],
                 ..Default::default()
             }],
         )
@@ -311,7 +371,7 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
         // Isolate the confidence retry budget from the ownership gate, which
         // deliberately does not retry unchanged assessments.
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -358,30 +418,30 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
         app.auto_poke_incomplete_todos = true;
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Ship the complete workflow".to_string(),
                 status: "completed".to_string(),
                 priority: "high".to_string(),
                 group: Some("release".to_string()),
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence: Some(crate::todo::ConfidenceState::Verified),
+                completion_confidence: Some(crate::todo::ConfidenceState::Verified),
                 waiting_reason: None,
                 requires_user_auth: None,
                 waiting_on: Vec::new(),
-                confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(100)],
+                confidence_history: vec![crate::todo::ConfidenceState::Verified],
                 ..Default::default()
             }],
         )
         .expect("save completed todo");
 
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 group: Some("release".to_string()),
                 delivery_state: Some(crate::todo::DeliveryState::Integrated),
-                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(100)),
+                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
                 feedback_loop: Some("run the end-to-end release check".to_string()),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
                 feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
@@ -398,13 +458,13 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
         assert_eq!(app.queued_messages.len(), 1);
         assert!(app.queued_messages[0].contains("complete workflow"));
 
-        let saved = crate::todo::load_todos(&app.session.id).expect("load saved todo");
+        let saved = crate::todo::load_todos(app.session.id()).expect("load saved todo");
         assert_eq!(saved[0].status, "completed");
     });
 }
 
 #[test]
-fn remote_ownership_gate_reads_the_remote_goal_assessment() {
+fn remote_ownership_gate_is_not_evaluated_by_client() {
     with_temp_jcode_home(|| {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
@@ -446,14 +506,10 @@ fn remote_ownership_gate_reads_the_remote_goal_assessment() {
         )
         .expect("save remote goal assessment");
 
-        assert!(app.schedule_auto_poke_followup_if_needed());
-        assert_eq!(
-            app.queued_messages,
-            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
-        );
-        app.queued_messages.clear();
-        app.pending_queued_dispatch = false;
         assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(app.queued_messages.is_empty());
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.auto_poke_incomplete_todos);
     });
 }
 
@@ -506,8 +562,8 @@ fn ownership_gate_stops_on_unchanged_assessment_without_claiming_success() {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
         app.todo_final_response_requested = false;
-        save_unfinished_ownership_fixture(&app.session.id);
-        let goals = crate::todo::load_goals(&app.session.id).unwrap();
+        save_unfinished_ownership_fixture(app.session.id());
+        let goals = crate::todo::load_goals(app.session.id()).unwrap();
         dispatch_ownership_followup(&mut app);
         for _ in 0..5 {
             assert!(!app.schedule_auto_poke_followup_if_needed());
@@ -516,7 +572,7 @@ fn ownership_gate_stops_on_unchanged_assessment_without_claiming_success() {
         assert!(app.auto_poke_incomplete_todos);
         assert!(!app.todo_final_response_requested);
         assert!(app.queued_messages.is_empty());
-        assert_eq!(crate::todo::load_goals(&app.session.id).unwrap(), goals);
+        assert_eq!(crate::todo::load_goals(app.session.id()).unwrap(), goals);
     });
 }
 
@@ -526,14 +582,14 @@ fn ownership_gate_ignores_cosmetic_assessment_changes() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
-        save_unfinished_ownership_fixture(&app.session.id);
+        save_unfinished_ownership_fixture(app.session.id());
         dispatch_ownership_followup(&mut app);
         for attempt in 0..App::TODO_COMPLETION_GATE_MAX_ATTEMPTS + 1 {
-            let mut goals = crate::todo::load_goals(&app.session.id).unwrap();
+            let mut goals = crate::todo::load_goals(app.session.id()).unwrap();
             goals[0].stopping_evidence =
                 Some(format!("Checked available hardware, attempt {attempt}"));
             goals[0].feedback_loop = Some(format!("Read-back check wording revision {attempt}"));
-            crate::todo::save_goals(&app.session.id, &goals).unwrap();
+            crate::todo::save_goals(app.session.id(), &goals).unwrap();
             assert!(!app.schedule_auto_poke_followup_if_needed());
             assert_eq!(app.todo_completion_gate_attempts, 1);
             assert!(app.queued_messages.is_empty());
@@ -549,10 +605,10 @@ fn ownership_gate_rechecks_actual_gap_changes_and_respects_budget() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
-        save_unfinished_ownership_fixture(&app.session.id);
+        save_unfinished_ownership_fixture(app.session.id());
         let mut previous_message = None;
         for attempt in 0..=App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
-            let mut goals = crate::todo::load_goals(&app.session.id).unwrap();
+            let mut goals = crate::todo::load_goals(app.session.id()).unwrap();
             // Alternate a delivery gap with an iteration gap, not just wording.
             let delivery_gap = attempt % 2 == 0;
             goals[0].delivery_state = Some(if delivery_gap {
@@ -565,7 +621,7 @@ fn ownership_gate_rechecks_actual_gap_changes_and_respects_budget() {
             } else {
                 crate::todo::IterationMaturity::Improving
             });
-            crate::todo::save_goals(&app.session.id, &goals).unwrap();
+            crate::todo::save_goals(app.session.id(), &goals).unwrap();
             if attempt == App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
                 assert!(!app.schedule_auto_poke_followup_if_needed());
             } else {
@@ -600,11 +656,11 @@ fn scheduling_and_remote_done_accept_documented_stops_and_requested_only_results
                 app.auto_poke_default_on = false;
                 app.is_remote = remote_done;
                 let session_id = if remote_done {
-                    let id = format!("ownership-accepted-{}", app.session.id);
+                    let id = format!("ownership-accepted-{}", app.session.id());
                     app.remote_session_id = Some(id.clone());
                     id
                 } else {
-                    app.session.id.clone()
+                    app.session.id().to_owned()
                 };
                 save_unfinished_ownership_fixture(&session_id);
                 let mut goals = crate::todo::load_goals(&session_id).unwrap();
@@ -634,7 +690,7 @@ fn scheduling_and_remote_done_accept_documented_stops_and_requested_only_results
                     } else {
                         assert_eq!(app.schedule_auto_poke_followup_if_needed(), id == 42);
                     }
-                    if id == 42 {
+                    if id == 42 && !remote_done {
                         assert_eq!(
                             app.queued_messages,
                             vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
@@ -647,7 +703,7 @@ fn scheduling_and_remote_done_accept_documented_stops_and_requested_only_results
                     app.queued_messages.clear();
                     app.pending_queued_dispatch = false;
                 }
-                assert!(!app.auto_poke_incomplete_todos);
+                assert_eq!(app.auto_poke_incomplete_todos, remote_done);
                 assert!(!app.todo_confidence_spike_challenged);
                 assert!(app.hidden_queued_system_messages.is_empty());
                 assert!(!app.display_messages().iter().any(|message| {
@@ -667,16 +723,16 @@ fn ownership_gate_rearms_after_reopened_work_or_explicit_poke() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
-        save_unfinished_ownership_fixture(&app.session.id);
+        save_unfinished_ownership_fixture(app.session.id());
         dispatch_ownership_followup(&mut app);
-        let mut todos = crate::todo::load_todos(&app.session.id).unwrap();
+        let mut todos = crate::todo::load_todos(app.session.id()).unwrap();
         todos[0].status = "in_progress".into();
-        crate::todo::save_todos(&app.session.id, &todos).unwrap();
+        crate::todo::save_todos(app.session.id(), &todos).unwrap();
         assert!(app.schedule_auto_poke_followup_if_needed());
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         todos[0].status = "completed".into();
-        crate::todo::save_todos(&app.session.id, &todos).unwrap();
+        crate::todo::save_todos(app.session.id(), &todos).unwrap();
         dispatch_ownership_followup(&mut app);
         assert!(!app.schedule_auto_poke_followup_if_needed());
         super::commands::disable_auto_poke(&mut app);
@@ -691,17 +747,20 @@ fn ownership_gate_survives_reload_and_is_scoped_to_session() {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
-        save_unfinished_ownership_fixture(&app.session.id);
+        save_unfinished_ownership_fixture(app.session.id());
         dispatch_ownership_followup(&mut app);
-        app.save_input_for_reload(&app.session.id);
-        let restored = App::restore_input_for_reload(&app.session.id).unwrap();
+        app.save_input_for_reload(app.session.id());
+        let restored = App::restore_input_for_reload(app.session.id()).unwrap();
         let mut reloaded = create_test_app();
-        reloaded.session.id = app.session.id.clone();
+        reloaded
+            .session
+            .set_id_for_tests(app.session.id().to_owned());
         reloaded.auto_poke_incomplete_todos = true;
         reloaded.apply_restored_reload_input(restored);
         assert!(!reloaded.schedule_auto_poke_followup_if_needed());
-        reloaded.session.id.push_str("-different-session");
-        save_unfinished_ownership_fixture(&reloaded.session.id);
+        let different_id = format!("{}-different-session", reloaded.session.id());
+        reloaded.session.set_id_for_tests(different_id);
+        save_unfinished_ownership_fixture(reloaded.session.id());
         dispatch_ownership_followup(&mut reloaded);
     });
 }
@@ -715,7 +774,7 @@ fn remote_done_does_not_repeat_ownership_notice() {
         let _guard = rt.enter();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         app.is_remote = true;
-        app.remote_session_id = Some(format!("ownership-remote-{}", app.session.id));
+        app.remote_session_id = Some(format!("ownership-remote-{}", app.session.id()));
         app.auto_poke_incomplete_todos = true;
         save_unfinished_ownership_fixture(app.remote_session_id.as_deref().unwrap());
         for id in 42..45 {
@@ -723,7 +782,7 @@ fn remote_done_does_not_repeat_ownership_notice() {
             app.status = ProcessingStatus::Streaming;
             app.current_message_id = Some(id);
             app.handle_server_event(crate::protocol::ServerEvent::Done { id }, &mut remote);
-            assert_eq!(app.queued_messages.len(), usize::from(id == 42));
+            assert!(app.queued_messages.is_empty());
             app.queued_messages.clear();
             app.pending_queued_dispatch = false;
         }
@@ -736,68 +795,70 @@ fn remote_done_does_not_repeat_ownership_notice() {
                         .contains("Checking end-to-end ownership before finishing")
                 })
                 .count(),
-            1
+            0
         );
     });
 }
 
 #[test]
 fn test_save_input_for_reload_removes_stale_file_when_state_is_empty() {
-    let mut app = create_test_app();
-    let session_id = format!("test-391-stale-{}", std::process::id());
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-391-stale-{}", std::process::id());
 
-    // First reload snapshot holds a queued message.
-    app.queued_messages.push("old queued".to_string());
-    app.save_input_for_reload(&session_id);
+        // First reload snapshot holds a queued message.
+        app.queued_messages.push("old queued".to_string());
+        app.save_input_for_reload(&session_id);
 
-    let path = crate::storage::jcode_dir()
-        .expect("jcode dir")
-        .join(format!("client-input-{}", session_id));
-    assert!(path.exists(), "first save should write the reload file");
+        let path = crate::storage::jcode_dir()
+            .expect("jcode dir")
+            .join(format!("client-input-{}", session_id));
+        assert!(path.exists(), "first save should write the reload file");
 
-    // An empty save while the file is FRESH must preserve it: another client
-    // attached to the same session may have just saved its own queued
-    // messages during the same reload handoff.
-    app.queued_messages.clear();
-    app.save_input_for_reload(&session_id);
-    assert!(
-        path.exists(),
-        "an empty save must not delete a fresh reload file (multi-client safety)"
-    );
-
-    // Backdate the file past the staleness window; now an empty save must
-    // remove it so a long-stale queue cannot resurrect on a later restore.
-    #[cfg(unix)]
-    {
-        let stale_age_secs = 400; // > 300s staleness cutoff
-        let target = std::time::SystemTime::now() - Duration::from_secs(stale_age_secs);
-        let since_epoch = target
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .expect("clock before epoch");
-        let times = [
-            libc::timespec {
-                tv_sec: since_epoch.as_secs() as libc::time_t,
-                tv_nsec: 0,
-            },
-            libc::timespec {
-                tv_sec: since_epoch.as_secs() as libc::time_t,
-                tv_nsec: 0,
-            },
-        ];
-        let c_path = std::ffi::CString::new(path.to_str().expect("utf8 path")).expect("c path");
-        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
-        assert_eq!(rc, 0, "backdating the reload file mtime should succeed");
-
+        // An empty save while the file is FRESH must preserve it: another client
+        // attached to the same session may have just saved its own queued
+        // messages during the same reload handoff.
+        app.queued_messages.clear();
         app.save_input_for_reload(&session_id);
         assert!(
-            !path.exists(),
-            "an empty save must remove a stale reload file so old queued messages cannot resurrect"
+            path.exists(),
+            "an empty save must not delete a fresh reload file (multi-client safety)"
         );
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = std::fs::remove_file(&path);
-    }
+
+        // Backdate the file past the staleness window; now an empty save must
+        // remove it so a long-stale queue cannot resurrect on a later restore.
+        #[cfg(unix)]
+        {
+            let stale_age_secs = 400; // > 300s staleness cutoff
+            let target = std::time::SystemTime::now() - Duration::from_secs(stale_age_secs);
+            let since_epoch = target
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .expect("clock before epoch");
+            let times = [
+                libc::timespec {
+                    tv_sec: since_epoch.as_secs() as libc::time_t,
+                    tv_nsec: 0,
+                },
+                libc::timespec {
+                    tv_sec: since_epoch.as_secs() as libc::time_t,
+                    tv_nsec: 0,
+                },
+            ];
+            let c_path = std::ffi::CString::new(path.to_str().expect("utf8 path")).expect("c path");
+            let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+            assert_eq!(rc, 0, "backdating the reload file mtime should succeed");
+
+            app.save_input_for_reload(&session_id);
+            assert!(
+                !path.exists(),
+                "an empty save must remove a stale reload file so old queued messages cannot resurrect"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    });
 }
 
 /// Repeated provider guardrail refusals must trip the circuit breaker and
@@ -817,7 +878,7 @@ fn test_repeated_guardrail_refusals_stop_auto_poke_loop() {
         app.auto_poke_incomplete_todos = true;
 
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Never-finishing task".to_string(),
@@ -898,20 +959,20 @@ fn test_gate_digest_is_disabled_at_turn_end() {
         // Completed work with validated confidence satisfies the completion gate.
         // A stale observation must not delay the normal final-response handoff.
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "todo-1".to_string(),
                 content: "Speed up the parser".to_string(),
                 status: "completed".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence: Some(crate::todo::ConfidenceState::Verified),
+                completion_confidence: Some(crate::todo::ConfidenceState::Verified),
                 waiting_reason: None,
                 requires_user_auth: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![
-                    crate::todo::ConfidenceState::from_legacy_score(97),
-                    crate::todo::ConfidenceState::from_legacy_score(100),
+                    crate::todo::ConfidenceState::Validated,
+                    crate::todo::ConfidenceState::Verified,
                 ],
                 ..Default::default()
             }],
@@ -919,7 +980,7 @@ fn test_gate_digest_is_disabled_at_turn_end() {
         .expect("save completed todo");
 
         crate::todo::save_goals(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoGoal {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
@@ -934,12 +995,12 @@ fn test_gate_digest_is_disabled_at_turn_end() {
 
         // A point that was flagged during the turn and never resolved.
         crate::todo::append_gate_observations(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::GateObservation {
                 kind: crate::todo::GateObservationKind::IntentUnderstanding,
                 group: None,
                 state: Some(
-                    crate::todo::IntentUnderstanding::from_legacy_score(70)
+                    crate::todo::IntentUnderstanding::Partial
                         .as_str()
                         .to_string(),
                 ),
@@ -963,7 +1024,7 @@ fn test_gate_digest_is_disabled_at_turn_end() {
         }));
         // Discarded without delivering a review.
         assert!(
-            crate::todo::load_gate_observations(&app.session.id)
+            crate::todo::load_gate_observations(app.session.id())
                 .expect("reload")
                 .is_empty()
         );
@@ -984,7 +1045,7 @@ fn test_gate_digest_explicit_opt_in_runs_once_before_completion() {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
         crate::todo::save_todos(
-            &app.session.id,
+            app.session.id(),
             &[crate::todo::TodoItem {
                 id: "digest-opt-in".into(),
                 content: "Ship the fix".into(),
@@ -1000,7 +1061,7 @@ fn test_gate_digest_explicit_opt_in_runs_once_before_completion() {
             group: None,
             state: Some("partial".into()),
         }];
-        crate::todo::append_gate_observations(&app.session.id, &observations).unwrap();
+        crate::todo::append_gate_observations(app.session.id(), &observations).unwrap();
         // /poke off still displays the completion report, but never sends a digest.
         app.auto_poke_incomplete_todos = false;
         app.auto_poke_default_on = false;
@@ -1016,14 +1077,14 @@ fn test_gate_digest_explicit_opt_in_runs_once_before_completion() {
         assert_eq!(app.queued_messages.len(), 1);
         assert!(app.queued_messages[0].starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
         assert!(
-            crate::todo::load_gate_observations(&app.session.id)
+            crate::todo::load_gate_observations(app.session.id())
                 .unwrap()
                 .is_empty()
         );
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         // Repeated observations cannot buy another aggregate turn this cycle.
-        crate::todo::append_gate_observations(&app.session.id, &observations).unwrap();
+        crate::todo::append_gate_observations(app.session.id(), &observations).unwrap();
         assert!(app.schedule_auto_poke_followup_if_needed());
         assert_eq!(
             app.queued_messages,

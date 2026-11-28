@@ -92,7 +92,7 @@ fn metadata_footers_add_distinct_compact_facts() {
         is_compacting: false,
         compacted_messages: 20,
         active_messages: 4,
-        summary_chars: 4_000,
+        summary_tokens: 1_000,
         mode: "semantic".into(),
     });
     let framed = super::super::render_compaction_widget(&data, Rect::new(0, 0, 40, 6));
@@ -455,4 +455,31 @@ fn narrow_overview_background_row_keeps_progress_visible() {
         out.contains("20%"),
         "progress must fit at overview width:\n{out}"
     );
+}
+
+#[test]
+fn overview_footer_shows_compaction_threshold_when_known() {
+    let data = InfoWidgetData {
+        observed_context_tokens: Some(233_000),
+        context_limit: Some(1_000_000),
+        compaction_threshold_tokens: Some(500_000),
+        ..Default::default()
+    };
+    assert_eq!(super::super::overview_footer(&data), "233K/500K to compact");
+}
+
+#[test]
+fn overview_footer_prefers_persisted_provider_context_over_char_estimate() {
+    let data = InfoWidgetData {
+        observed_context_tokens: None,
+        last_reported_context_tokens: Some(231_000),
+        context_limit: Some(1_000_000),
+        compaction_threshold_tokens: Some(400_000),
+        context_info: Some(crate::prompt::ContextInfo {
+            total_chars: 1_724_000,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(super::super::overview_footer(&data), "231K/400K to compact");
 }

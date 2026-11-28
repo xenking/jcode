@@ -45,12 +45,15 @@ fn key_status_from_response(status: reqwest::StatusCode) -> String {
 
 /// Free `GET {base}/models` probe used for OpenAI-compatible profiles that do
 /// not expose a balance API. Returns a human-readable key status.
-async fn probe_openai_compatible_key(api_base: &str, api_key: &str) -> String {
+async fn probe_openai_compatible_key(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+) -> String {
     let base = api_base.trim_end_matches('/');
     if base.is_empty() {
         return "configured (no endpoint to probe)".to_string();
     }
-    let client = crate::provider::shared_http_client();
     let request = crate::provider_catalog::apply_openai_compatible_catalog_auth(
         client.get(format!("{}/models", base)),
         base,
@@ -65,6 +68,84 @@ async fn probe_openai_compatible_key(api_base: &str, api_key: &str) -> String {
         Ok(response) => key_status_from_response(response.status()),
         Err(e) => format!("check failed ({})", e),
     }
+}
+
+/// Window keys OpenCode answers on `GET {base}/usage`, in the order the
+/// service lists them. The label is what `/usage` and the Desktop pill show.
+const OPENCODE_USAGE_WINDOWS: [(&str, &str); 3] = [
+    ("rolling", "Rolling window"),
+    ("weekly", "Weekly window"),
+    ("monthly", "Monthly window"),
+];
+
+/// Parse an OpenCode (Zen / Go) quota payload:
+/// `{"usage":{"rolling":{"status":"ok","percent":23,"resetsAt":"..."}, ...}}`.
+///
+/// Unavailable windows must not read as a healthy zero.
+pub(super) fn opencode_usage_limits(payload: &serde_json::Value) -> Vec<UsageLimit> {
+    let Some(usage) = payload.get("usage") else {
+        return Vec::new();
+    };
+    OPENCODE_USAGE_WINDOWS
+        .iter()
+        .filter_map(|(key, label)| {
+            let window = usage.get(*key)?;
+            if !matches!(
+                window.get("status").and_then(|status| status.as_str()),
+                Some("ok" | "rate-limited")
+            ) {
+                return None;
+            }
+            let percent = window.get("percent")?.as_f64()? as f32;
+            if !percent.is_finite() {
+                return None;
+            }
+            Some(UsageLimit {
+                name: (*label).to_string(),
+                usage_percent: percent,
+                resets_at: window
+                    .get("resetsAt")
+                    .and_then(|reset| reset.as_str())
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// Live quota windows for an OpenCode Zen / OpenCode Go API key. The service
+/// exposes real percentages, so the report never has to guess from spend.
+async fn fetch_opencode_usage_limits(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+) -> Result<Vec<UsageLimit>> {
+    let base = api_base.trim_end_matches('/');
+    if base.is_empty() {
+        return Err(anyhow::anyhow!("no API endpoint"));
+    }
+    let response = client
+        .get(format!("{base}/usage"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Accept", "application/json")
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await
+        .context("request the OpenCode usage endpoint")?;
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "usage endpoint answered {}",
+            response.status()
+        ));
+    }
+    let payload: serde_json::Value = response
+        .json()
+        .await
+        .context("parse the OpenCode usage payload")?;
+    let limits = opencode_usage_limits(&payload);
+    if limits.is_empty() {
+        return Err(anyhow::anyhow!("no quota windows returned"));
+    }
+    Ok(limits)
 }
 
 fn month_start_utc() -> chrono::DateTime<chrono::Utc> {
@@ -106,13 +187,32 @@ pub(super) fn enqueue_api_key_usage_tasks(
             crate::auth::muse::has_cached_auth()
         } else {
             configured_key(profile.api_key_env, profile.env_file).is_some()
+                || crate::provider_catalog::api_key_provider_has_labelled_accounts(profile.id)
         };
         if !configured {
             continue;
         }
 
         let source_key = format!("openai-compatible:{}", profile.id);
-        let has_balance_api = matches!(profile.id, "deepseek" | "moonshotai" | "kimi" | "zai");
+        // Every labelled key is its own report with its own windows or balance.
+        let labelled: Vec<_> = crate::provider_catalog::api_key_accounts(profile.id)
+            .into_iter()
+            .filter(|account| account.label.is_some())
+            .collect();
+        for account in &labelled {
+            let account_id = account.id.clone();
+            let profile = *profile;
+            tasks.spawn(
+                async move { Some(fetch_labelled_profile_report(profile, account_id).await) },
+            );
+            total += 1;
+        }
+        // Profiles with a real quota or balance endpoint always report: they
+        // do not need a prior local call to say something useful.
+        let has_balance_api = matches!(
+            profile.id,
+            "deepseek" | "moonshotai" | "kimi" | "zai" | "opencode" | "opencode-go"
+        );
         // Only surface profiles jcode has actually used (or that expose a real
         // balance API); listing every configured-but-idle key is noise.
         let used_before = provider_activity::last_used_unix_secs(&source_key).is_some()
@@ -121,6 +221,10 @@ pub(super) fn enqueue_api_key_usage_tasks(
             continue;
         }
 
+        // Labelled keys with no unlabelled key left nothing to report here.
+        if configured_key(profile.api_key_env, profile.env_file).is_none() {
+            continue;
+        }
         let profile = *profile;
         tasks.spawn(async move { Some(fetch_compatible_profile_report(profile).await) });
         total += 1;
@@ -135,7 +239,17 @@ async fn fetch_anthropic_api_key_report() -> ProviderUsage {
     let mut extra_info = Vec::new();
 
     if let Some(api_key) = configured_key("ANTHROPIC_API_KEY", "anthropic.env") {
-        let client = crate::provider::shared_http_client();
+        let client = match crate::egress::client("claude", None).await {
+            Ok(client) => client,
+            Err(error) => {
+                extra_info.push(("Key status".to_string(), format!("unavailable ({error})")));
+                return ProviderUsage {
+                    provider_name: display_name,
+                    extra_info,
+                    ..Default::default()
+                };
+            }
+        };
         let response = client
             .get("https://api.anthropic.com/v1/models?limit=1")
             .header("x-api-key", &api_key)
@@ -150,7 +264,7 @@ async fn fetch_anthropic_api_key_report() -> ProviderUsage {
         extra_info.push(("Key status".to_string(), status));
 
         if let Some(admin_key) = configured_key("ANTHROPIC_ADMIN_API_KEY", "anthropic.env")
-            && let Some(cost) = fetch_anthropic_org_cost(&admin_key).await
+            && let Some(cost) = fetch_anthropic_org_cost(&client, &admin_key).await
         {
             extra_info.push((
                 "Org cost this month (admin API)".to_string(),
@@ -176,7 +290,17 @@ async fn fetch_openai_api_key_report() -> ProviderUsage {
     let mut extra_info = Vec::new();
 
     if let Some(api_key) = configured_key("OPENAI_API_KEY", "openai.env") {
-        let client = crate::provider::shared_http_client();
+        let client = match crate::egress::client("openai", None).await {
+            Ok(client) => client,
+            Err(error) => {
+                extra_info.push(("Key status".to_string(), format!("unavailable ({error})")));
+                return ProviderUsage {
+                    provider_name: display_name,
+                    extra_info,
+                    ..Default::default()
+                };
+            }
+        };
         let response = client
             .get("https://api.openai.com/v1/models")
             .header("Authorization", format!("Bearer {}", api_key))
@@ -190,7 +314,7 @@ async fn fetch_openai_api_key_report() -> ProviderUsage {
         extra_info.push(("Key status".to_string(), status));
 
         if let Some(admin_key) = configured_key("OPENAI_ADMIN_API_KEY", "openai.env")
-            && let Some(cost) = fetch_openai_org_cost(&admin_key).await
+            && let Some(cost) = fetch_openai_org_cost(&client, &admin_key).await
         {
             extra_info.push((
                 "Org cost this month (admin API)".to_string(),
@@ -213,15 +337,88 @@ async fn fetch_openai_api_key_report() -> ProviderUsage {
 async fn fetch_compatible_profile_report(
     profile: crate::provider_catalog::OpenAiCompatibleProfile,
 ) -> ProviderUsage {
-    let source_key = format!("openai-compatible:{}", profile.id);
+    fetch_compatible_profile_report_for(profile, None).await
+}
+
+/// One report for a labelled key: the same balance or quota fetch as the
+/// unlabelled key, run with that key and listed under its own name.
+async fn fetch_labelled_profile_report(
+    profile: crate::provider_catalog::OpenAiCompatibleProfile,
+    account: jcode_routing_policy::AccountId,
+) -> ProviderUsage {
+    let label = account.label().unwrap_or_default().to_string();
+    let lookup = account.clone();
+    let credential = tokio::task::spawn_blocking(move || {
+        crate::provider_catalog::api_key_credential_for_account(&lookup)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|result| result);
+    match credential {
+        Ok(Some(credential)) => {
+            fetch_compatible_profile_report_for(profile, Some(credential)).await
+        }
+        failed => {
+            let mut report = ProviderUsage {
+                provider_name: format!("{} (API key) [{label}]", profile.display_name),
+                error: Some(match failed {
+                    Err(error) => format!("{error:#}"),
+                    _ => "no key stored for this label".to_string(),
+                }),
+                ..Default::default()
+            };
+            attach_activity(
+                &mut report,
+                &crate::provider_catalog::ledger_key_for_account(&account),
+            );
+            report
+        }
+    }
+}
+
+async fn fetch_compatible_profile_report_for(
+    profile: crate::provider_catalog::OpenAiCompatibleProfile,
+    credential: Option<crate::provider_catalog::ApiKeyCredential>,
+) -> ProviderUsage {
+    // A labelled key replaces the unlabelled one for every fetch below.
+    let labelled_key = credential
+        .as_ref()
+        .filter(|credential| credential.account_id.label().is_some());
+    let label =
+        labelled_key.and_then(|credential| credential.account_id.label().map(str::to_string));
+    let key_override = labelled_key.map(|credential| credential.api_key.clone());
+    let key_for = |env_key: &str, env_file: &str| {
+        key_override
+            .clone()
+            .or_else(|| configured_key(env_key, env_file))
+    };
+    // Balance and quota meters leave from the key's own egress.
+    let client = match crate::egress::client(profile.id, label.as_deref()).await {
+        Ok(client) => client,
+        Err(error) => {
+            let provider_name = match &label {
+                Some(label) => format!("{} (API key) [{label}]", profile.display_name),
+                None => format!("{} (API key)", profile.display_name),
+            };
+            return ProviderUsage {
+                provider_name,
+                error: Some(error.to_string()),
+                ..Default::default()
+            };
+        }
+    };
+    let source_key = match labelled_key {
+        Some(credential) => crate::provider_catalog::ledger_key_for_account(&credential.account_id),
+        None => format!("openai-compatible:{}", profile.id),
+    };
     let mut extra_info = Vec::new();
     let mut limits: Vec<UsageLimit> = Vec::new();
     let mut error: Option<String> = None;
 
     match profile.id {
         "deepseek" => {
-            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
-                match fetch_deepseek_balance(&api_key).await {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
+                match fetch_deepseek_balance(&client, &api_key).await {
                     Ok(lines) => extra_info.extend(lines),
                     Err(e) => {
                         extra_info.push(("Balance".to_string(), format!("unavailable ({})", e)))
@@ -230,9 +427,9 @@ async fn fetch_compatible_profile_report(
             }
         }
         "moonshotai" => {
-            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-                match fetch_moonshot_balance(&api_key, &resolved.api_base).await {
+                match fetch_moonshot_balance(&client, &api_key, &resolved.api_base).await {
                     Ok(lines) => extra_info.extend(lines),
                     Err(e) => {
                         extra_info.push(("Balance".to_string(), format!("unavailable ({})", e)))
@@ -241,8 +438,8 @@ async fn fetch_compatible_profile_report(
             }
         }
         "kimi" => {
-            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
-                match fetch_kimi_usage_limits(&api_key).await {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
+                match fetch_kimi_usage_limits(&client, &api_key).await {
                     Ok(fetched) if !fetched.is_empty() => limits.extend(fetched),
                     Ok(_) => {
                         // Unknown capacity must not look healthy in the
@@ -259,16 +456,34 @@ async fn fetch_compatible_profile_report(
             // meaningless here; skip push_local_spend.
         }
         "zai" => {
-            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-                match fetch_zai_coding_plan_limits(&resolved.api_base, &api_key).await {
+                match fetch_zai_coding_plan_limits(&client, &resolved.api_base, &api_key).await {
                     Ok(fetched) if !fetched.is_empty() => limits.extend(fetched),
                     _ => {
                         // Not a Coding Plan key (or quota API unavailable):
                         // fall back to the pay-as-you-go key probe below.
                         let status =
-                            probe_openai_compatible_key(&resolved.api_base, &api_key).await;
+                            probe_openai_compatible_key(&client, &resolved.api_base, &api_key)
+                                .await;
                         extra_info.push(("Key status".to_string(), status));
+                    }
+                }
+            }
+        }
+        "opencode" | "opencode-go" => {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
+                let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+                match fetch_opencode_usage_limits(&client, &resolved.api_base, &api_key).await {
+                    Ok(fetched) => limits.extend(fetched),
+                    Err(e) => {
+                        // Older Zen deployments expose no quota endpoint. The
+                        // free key probe still proves the credential works.
+                        let status =
+                            probe_openai_compatible_key(&client, &resolved.api_base, &api_key)
+                                .await;
+                        extra_info.push(("Key status".to_string(), status));
+                        extra_info.push(("Quota".to_string(), format!("unavailable ({e})")));
                     }
                 }
             }
@@ -302,9 +517,10 @@ async fn fetch_compatible_profile_report(
             // No provider-specific balance API: do a free `GET /models` probe
             // against the profile's own endpoint so the key status is real
             // rather than just "configured".
-            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+            if let Some(api_key) = key_for(profile.api_key_env, profile.env_file) {
                 let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-                let status = probe_openai_compatible_key(&resolved.api_base, &api_key).await;
+                let status =
+                    probe_openai_compatible_key(&client, &resolved.api_base, &api_key).await;
                 extra_info.push(("Key status".to_string(), status));
             }
         }
@@ -315,13 +531,46 @@ async fn fetch_compatible_profile_report(
     // subscription, which is a flat-rate plan and not metered per token here).
     let plan_quota_shown = profile.id == "kimi"
         || profile.id == "muse-subscription"
-        || (profile.id == "zai" && !limits.is_empty());
+        || (matches!(profile.id, "zai" | "opencode" | "opencode-go") && !limits.is_empty());
     if !plan_quota_shown {
         push_local_spend(&mut extra_info, &source_key);
     }
 
+    // With several keys, say which account each report is and which one serves.
+    let account_id = match labelled_key {
+        Some(credential) => Some(credential.account_id.clone()),
+        None if crate::provider_catalog::api_key_provider_has_labelled_accounts(profile.id) => {
+            jcode_routing_policy::AccountId::parse(profile.id)
+        }
+        None => None,
+    };
+    if let Some(account_id) = account_id {
+        let active = crate::provider_catalog::active_api_key_account(profile.id)
+            .is_some_and(|active| active == account_id);
+        extra_info.insert(
+            0,
+            (
+                "Account".to_string(),
+                format!("{account_id}{}", if active { " (active)" } else { "" }),
+            ),
+        );
+    }
+    if matches!(profile.id, "opencode" | "opencode-go")
+        && let Some(account) = labelled_key
+            .map(|credential| credential.account_id.clone())
+            .or_else(|| jcode_routing_policy::AccountId::parse(profile.id))
+    {
+        // Routing reads this meter by account id, so every labelled key keeps
+        // its own windows. A failed fetch has no limits, which forgets the last
+        // numbers instead of keeping them as current.
+        crate::routing_meters::publish_opencode_limits(&account, &limits);
+    }
+    let provider_name = match &label {
+        Some(label) => format!("{} (API key) [{label}]", profile.display_name),
+        None => format!("{} (API key)", profile.display_name),
+    };
     let mut report = ProviderUsage {
-        provider_name: format!("{} (API key)", profile.display_name),
+        provider_name,
         limits,
         extra_info,
         error,
@@ -332,8 +581,10 @@ async fn fetch_compatible_profile_report(
 }
 
 /// DeepSeek exposes a real balance endpoint for plain API keys.
-async fn fetch_deepseek_balance(api_key: &str) -> Result<Vec<(String, String)>> {
-    let client = crate::provider::shared_http_client();
+async fn fetch_deepseek_balance(
+    client: &reqwest::Client,
+    api_key: &str,
+) -> Result<Vec<(String, String)>> {
     let response = client
         .get("https://api.deepseek.com/user/balance")
         .header("Authorization", format!("Bearer {}", api_key))
@@ -381,14 +632,17 @@ async fn fetch_deepseek_balance(api_key: &str) -> Result<Vec<(String, String)>> 
 }
 
 /// Moonshot exposes `GET /v1/users/me/balance` for plain API keys.
-async fn fetch_moonshot_balance(api_key: &str, api_base: &str) -> Result<Vec<(String, String)>> {
+async fn fetch_moonshot_balance(
+    client: &reqwest::Client,
+    api_key: &str,
+    api_base: &str,
+) -> Result<Vec<(String, String)>> {
     let base = api_base.trim_end_matches('/');
     let currency = if base.contains("moonshot.cn") {
         "CNY"
     } else {
         "USD"
     };
-    let client = crate::provider::shared_http_client();
     let response = client
         .get(format!("{}/users/me/balance", base))
         .header("Authorization", format!("Bearer {}", api_key))
@@ -436,8 +690,10 @@ async fn fetch_moonshot_balance(api_key: &str, api_base: &str) -> Result<Vec<(St
 }
 
 /// Kimi Code exposes per-window quota through the coding usage endpoint.
-async fn fetch_kimi_usage_limits(api_key: &str) -> Result<Vec<UsageLimit>> {
-    let client = crate::provider::shared_http_client();
+async fn fetch_kimi_usage_limits(
+    client: &reqwest::Client,
+    api_key: &str,
+) -> Result<Vec<UsageLimit>> {
     let response = client
         .get("https://api.kimi.com/coding/v1/usages")
         .header("Authorization", format!("Bearer {}", api_key))
@@ -606,8 +862,11 @@ pub(super) fn zai_quota_url(api_base: &str) -> String {
 /// Z.ai GLM Coding Plan exposes plan quota windows (5-hour, weekly, and MCP
 /// monthly) through the monitor quota endpoint. Pay-as-you-go keys are
 /// rejected, which the caller uses as the fallback signal.
-async fn fetch_zai_coding_plan_limits(api_base: &str, api_key: &str) -> Result<Vec<UsageLimit>> {
-    let client = crate::provider::shared_http_client();
+async fn fetch_zai_coding_plan_limits(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+) -> Result<Vec<UsageLimit>> {
     let response = client
         .get(zai_quota_url(api_base))
         .header("Authorization", format!("Bearer {}", api_key))
@@ -691,9 +950,8 @@ pub(super) fn parse_zai_coding_plan_limits(json: &serde_json::Value) -> Vec<Usag
 
 /// Anthropic org-wide cost for the current month. Requires an *admin* API key
 /// (`sk-ant-admin...`); regular keys cannot read cost reports.
-async fn fetch_anthropic_org_cost(admin_key: &str) -> Option<f64> {
+async fn fetch_anthropic_org_cost(client: &reqwest::Client, admin_key: &str) -> Option<f64> {
     let starting_at = month_start_utc().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let client = crate::provider::shared_http_client();
     let response = client
         .get(format!(
             "https://api.anthropic.com/v1/organizations/cost_report?starting_at={}&limit=31",
@@ -730,9 +988,8 @@ async fn fetch_anthropic_org_cost(admin_key: &str) -> Option<f64> {
 }
 
 /// OpenAI org-wide cost for the current month. Requires an admin API key.
-async fn fetch_openai_org_cost(admin_key: &str) -> Option<f64> {
+async fn fetch_openai_org_cost(client: &reqwest::Client, admin_key: &str) -> Option<f64> {
     let start_time = month_start_utc().timestamp();
-    let client = crate::provider::shared_http_client();
     let response = client
         .get(format!(
             "https://api.openai.com/v1/organization/costs?start_time={}&limit=31",
@@ -765,4 +1022,335 @@ async fn fetch_openai_org_cost(admin_key: &str) -> Option<f64> {
         }
     }
     saw_any.then_some(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// The live `GET /zen/go/v1/usage` answer captured from a configured
+    /// OpenCode Go key. Every window carries its own reset timestamp.
+    const OPENCODE_USAGE: &str = r#"{"usage":{
+        "rolling":{"status":"ok","percent":23,"resetsAt":"2026-11-15T11:08:23.000Z"},
+        "weekly":{"status":"ok","percent":9,"resetsAt":"2026-11-16T00:00:00.000Z"},
+        "monthly":{"status":"ok","percent":4,"resetsAt":"2026-12-15T05:54:05.000Z"}}}"#;
+
+    fn serve_once(status_line: &'static str, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[test]
+    fn opencode_usage_payload_becomes_one_limit_per_window() {
+        let limits = opencode_usage_limits(&serde_json::from_str(OPENCODE_USAGE).unwrap());
+        let names: Vec<_> = limits.iter().map(|limit| limit.name.as_str()).collect();
+        assert_eq!(names, ["Rolling window", "Weekly window", "Monthly window"]);
+        let percents: Vec<_> = limits.iter().map(|limit| limit.usage_percent).collect();
+        assert_eq!(percents, [23.0, 9.0, 4.0]);
+        assert_eq!(
+            limits[0].resets_at.as_deref(),
+            Some("2026-11-15T11:08:23.000Z")
+        );
+    }
+
+    #[test]
+    fn opencode_usage_skips_windows_the_server_does_not_report() {
+        let payload = serde_json::json!({"usage":{
+            "rolling":{"status":"ok","percent":23,"resetsAt":"2026-11-15T11:08:23.000Z"},
+            "weekly":{"status":"error","percent":9},
+            "monthly":{"status":"ok"},
+            "seasonal":"unexpected"
+        }});
+        let limits = opencode_usage_limits(&payload);
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].name, "Rolling window");
+        // No windows at all is not a healthy zero.
+        assert!(opencode_usage_limits(&serde_json::json!({"usage":{}})).is_empty());
+    }
+
+    #[test]
+    fn opencode_usage_keeps_rate_limited_window() {
+        let payload = serde_json::json!({"usage":{
+            "rolling":{"status":"rate-limited","percent":100,"resetsAt":"2026-11-17T20:16:01.000Z"},
+            "weekly":{"status":"ok","percent":43},
+            "monthly":{"status":"ok","percent":34}
+        }});
+        let limits = opencode_usage_limits(&payload);
+        assert_eq!(limits.len(), 3);
+        assert_eq!(limits[0].usage_percent, 100.0);
+        assert_eq!(
+            limits[0].resets_at.as_deref(),
+            Some("2026-11-17T20:16:01.000Z")
+        );
+    }
+
+    #[test]
+    fn opencode_usage_fetch_reads_the_key_endpoint() {
+        let base = serve_once("200 OK", OPENCODE_USAGE);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let limits = runtime
+            .block_on(fetch_opencode_usage_limits(
+                &crate::provider::shared_http_client(),
+                &base,
+                "test-key",
+            ))
+            .expect("live quota response parses");
+        assert_eq!(limits.len(), 3);
+        assert_eq!(limits[0].usage_percent, 23.0);
+    }
+
+    /// Loopback `/usage` that answers each bearer key with its own payload.
+    fn serve_usage_by_key(payloads: Vec<(&'static str, &'static str)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
+                let body = payloads
+                    .iter()
+                    .find(|(key, _)| request.contains(&format!("bearer {key}")))
+                    .map(|(_, body)| *body);
+                let (status, body) = match (request.contains("get /usage"), body) {
+                    (true, Some(body)) => ("200 OK", body),
+                    _ => ("401 Unauthorized", "{}"),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn usage(rolling: u32, weekly: u32) -> String {
+        format!(
+            r#"{{"usage":{{"rolling":{{"status":"ok","percent":{rolling},"resetsAt":"2026-11-15T11:08:23.000Z"}},"weekly":{{"status":"ok","percent":{weekly},"resetsAt":"2026-11-16T00:00:00.000Z"}}}}}}"#
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn labelled_opencode_go_keys_are_listed_with_their_own_windows() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        // Keys are lowercase: the fixture matches them in a lowercased request.
+        let base = serve_usage_by_key(vec![
+            ("key-default", Box::leak(usage(10, 1).into_boxed_str())),
+            ("key-second", Box::leak(usage(55, 20).into_boxed_str())),
+            ("key-third", Box::leak(usage(90, 70).into_boxed_str())),
+            ("key-vault", Box::leak(usage(5, 2).into_boxed_str())),
+        ]);
+
+        let script = sandbox.root().join("vault.sh");
+        std::fs::write(&script, "#!/bin/sh\necho key-vault\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            crate::config::Config::path().unwrap(),
+            format!(
+                "[api_key_profiles.opencode-go]\nbase_url = \"{base}\"\n\
+                 [api_key_profiles.opencode-go.keys.vault]\nkey_command = [\"{}\"]\n",
+                script.display()
+            ),
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+
+        sandbox
+            .write_openai_compatible_api_key(
+                crate::provider_catalog::OPENCODE_GO_PROFILE,
+                "key-default",
+            )
+            .unwrap();
+        crate::provider_catalog::save_labelled_api_key("opencode-go", "second", "key-second")
+            .unwrap();
+        crate::provider_catalog::save_labelled_api_key("opencode-go", "third", "key-third")
+            .unwrap();
+        crate::provider_catalog::set_active_api_key_account("opencode-go", Some("second")).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut reports = runtime.block_on(async {
+            let mut tasks = tokio::task::JoinSet::new();
+            enqueue_api_key_usage_tasks(&mut tasks);
+            let mut reports = Vec::new();
+            while let Some(report) = tasks.join_next().await {
+                reports.extend(report.unwrap());
+            }
+            reports
+        });
+        reports.retain(|report| report.provider_name.starts_with("OpenCode Go"));
+        reports.sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
+
+        let summary: Vec<_> = reports
+            .iter()
+            .map(|report| {
+                (
+                    report.provider_name.as_str(),
+                    report
+                        .limits
+                        .iter()
+                        .map(|l| l.usage_percent)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("OpenCode Go (API key)", vec![10.0, 1.0]),
+                ("OpenCode Go (API key) [second]", vec![55.0, 20.0]),
+                ("OpenCode Go (API key) [third]", vec![90.0, 70.0]),
+                ("OpenCode Go (API key) [vault]", vec![5.0, 2.0]),
+            ]
+        );
+        let account_row = |report: &ProviderUsage| {
+            report
+                .extra_info
+                .iter()
+                .find(|(key, _)| key == "Account")
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(account_row(&reports[0]).as_deref(), Some("opencode-go"));
+        assert_eq!(
+            account_row(&reports[1]).as_deref(),
+            Some("opencode-go:second (active)")
+        );
+        assert_eq!(
+            account_row(&reports[3]).as_deref(),
+            Some("opencode-go:vault")
+        );
+
+        crate::config::invalidate_config_cache();
+    }
+
+    /// Each key's quota meter leaves from that key's own egress.
+    #[test]
+    fn labelled_key_meters_follow_their_keys_egress() {
+        use crate::egress::fixture::Proxy;
+
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let proxy = runtime.block_on(Proxy::start());
+        let dead = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let base = serve_usage_by_key(vec![
+            ("key-default", Box::leak(usage(10, 1).into_boxed_str())),
+            ("key-second", Box::leak(usage(55, 20).into_boxed_str())),
+            ("key-third", Box::leak(usage(90, 70).into_boxed_str())),
+        ]);
+        std::fs::write(
+            crate::config::Config::path().unwrap(),
+            format!(
+                "[api_key_profiles.opencode-go]\nbase_url = \"{base}\"\n\
+                 [egress.corp]\nurl = \"{}\"\nrequired = true\n\
+                 [egress.gone]\nurl = \"{dead}\"\nrequired = true\n\
+                 [[routing.accounts]]\nid = \"opencode-go:second\"\negress = \"corp\"\n\
+                 [[routing.accounts]]\nid = \"opencode-go:third\"\negress = \"gone\"\n",
+                proxy.url
+            ),
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+        sandbox
+            .write_openai_compatible_api_key(
+                crate::provider_catalog::OPENCODE_GO_PROFILE,
+                "key-default",
+            )
+            .unwrap();
+        crate::provider_catalog::save_labelled_api_key("opencode-go", "second", "key-second")
+            .unwrap();
+        crate::provider_catalog::save_labelled_api_key("opencode-go", "third", "key-third")
+            .unwrap();
+
+        let mut reports = runtime.block_on(async {
+            let mut tasks = tokio::task::JoinSet::new();
+            enqueue_api_key_usage_tasks(&mut tasks);
+            let mut reports = Vec::new();
+            while let Some(report) = tasks.join_next().await {
+                reports.extend(report.unwrap());
+            }
+            reports
+        });
+        reports.retain(|report| report.provider_name.starts_with("OpenCode Go"));
+        reports.sort_by(|a, b| a.provider_name.cmp(&b.provider_name));
+        let by_name = |name: &str| {
+            reports
+                .iter()
+                .find(|report| report.provider_name == name)
+                .unwrap_or_else(|| panic!("no report {name}"))
+        };
+        let percents = |name: &str| -> Vec<f32> {
+            by_name(name)
+                .limits
+                .iter()
+                .map(|l| l.usage_percent)
+                .collect()
+        };
+
+        // The unassigned key reads its meter directly.
+        assert_eq!(percents("OpenCode Go (API key)"), vec![10.0f32, 1.0]);
+        // The assigned key reads it through its proxy, and only that key does.
+        assert_eq!(percents("OpenCode Go (API key) [second]"), vec![55.0, 20.0]);
+        let through_proxy = proxy.seen();
+        assert_eq!(through_proxy.len(), 1, "proxy saw {through_proxy:?}");
+        assert!(through_proxy[0].starts_with(&format!("GET {base}/usage ")));
+        // A required proxy that is down reads nothing and says why.
+        let third = by_name("OpenCode Go (API key) [third]");
+        assert!(third.limits.is_empty());
+        assert!(
+            third
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("required egress proxy")),
+            "{:?}",
+            third.error
+        );
+
+        crate::config::invalidate_config_cache();
+    }
+
+    #[test]
+    fn opencode_usage_fetch_reports_a_missing_endpoint_instead_of_zeros() {
+        let base = serve_once("404 Not Found", "{}");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(
+            runtime
+                .block_on(fetch_opencode_usage_limits(
+                    &crate::provider::shared_http_client(),
+                    &base,
+                    "test-key",
+                ))
+                .is_err()
+        );
+    }
 }

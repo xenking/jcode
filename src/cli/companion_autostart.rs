@@ -24,7 +24,9 @@ pub fn spawn_if_needed(native_ssh: bool) {
     if !should_autostart(
         enabled,
         native_ssh,
-        crate::auth::running_in_test_harness(),
+        crate::harness_detect::running_in_test_harness()
+            || crate::storage::running_with_sandboxed_home()
+            || std::env::var("JCODE_TEST_SESSION").as_deref() == Ok("1"),
         env_off,
         std::env::var_os("JCODE_COMPANION").is_some(),
     ) {

@@ -19,8 +19,8 @@ async fn service_tier_header_changes_invalidate_persistent_socket() {
             &Arc::new(RwLock::new(creds)),
             &request,
             &[],
-            0,
             &tx,
+            None,
         )
         .await;
         assert!(matches!(result, PersistentWsResult::NotAvailable));
@@ -49,8 +49,8 @@ async fn oauth_routing_header_changes_invalidate_persistent_socket() {
             &Arc::new(RwLock::new(creds)),
             &request,
             &[],
-            0,
             &tx,
+            None,
         )
         .await;
         assert!(matches!(result, PersistentWsResult::NotAvailable));
@@ -118,8 +118,8 @@ async fn cache_affinity_changed_session_cannot_reuse_old_handshake() {
         &Arc::new(RwLock::new(prewarm_test_credentials())),
         &serde_json::json!({"model":"gpt-5.6-sol", "prompt_cache_key":"new-session"}),
         &input,
-        input.len(),
         &tx,
+        None,
     )
     .await;
     assert!(matches!(result, PersistentWsResult::NotAvailable));

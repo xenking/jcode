@@ -16,6 +16,7 @@ fn remote_model_picker_preview_state() -> crate::tui::InlineInteractiveState {
                 available: true,
                 detail: String::new(),
                 estimated_reference_cost_micros: None,
+                icon: None,
             }],
             action: crate::tui::PickerAction::Model,
             selected_option: 0,

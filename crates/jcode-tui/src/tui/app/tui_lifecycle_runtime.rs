@@ -22,17 +22,18 @@ impl App {
         // The saved session supplies metadata only. Transcript state must enter
         // exclusively through historical events, never through today's startup.
         app.display_messages.clear();
-        app.session.messages.clear();
+        app.session.replace_messages(Vec::new());
         app.auto_poke_incomplete_todos = false;
         app.auto_poke_default_on = false;
         app.overnight_auto_poke = None;
         app.queued_messages.clear();
+        app.queued_images.clear();
         app.queued_commands.clear();
         app.hidden_queued_system_messages.clear();
         app.status_notice = None;
         // Historical replay must never show today's on-disk todo state.
         app.pinned_todos_payload = None;
-        let model_name = app.session.model.clone().unwrap_or_default();
+        let model_name = app.session.model().map(str::to_owned).unwrap_or_default();
         let session_name = app.session.short_name.clone().unwrap_or_default();
 
         // Set provider/model info so status widgets show correct values
@@ -67,7 +68,7 @@ impl App {
 
     /// Get the current session ID
     pub fn session_id(&self) -> &str {
-        &self.session.id
+        self.session.id()
     }
 
     pub(super) fn update_terminal_title(&self) {
@@ -86,32 +87,26 @@ impl App {
         let session_id = if self.is_remote {
             self.remote_session_id
                 .as_deref()
-                .unwrap_or(&self.session.id)
+                .unwrap_or(self.session.id())
         } else {
-            &self.session.id
+            self.session.id()
         };
         let session_name = crate::id::extract_session_name(session_id)
             .map(|s| s.to_string())
             .unwrap_or_else(|| session_id.to_string());
         let session_icon = crate::id::session_icon(&session_name);
         // Keep the live terminal title aligned with /resume: an explicit rename
-        // wins, then the model's current todo/goal title, then the generated title.
-        let todo_title = self
-            .session
-            .custom_title
-            .is_none()
+        // wins, then the generated title. A todo group is a lane label, so it is
+        // only a last resort for sessions that have no title at all.
+        let todo_title = (self.session.custom_title().is_none() && self.session.title().is_none())
             .then(|| crate::todo::load_session_title(session_id))
             .flatten();
-        let display_title = self
-            .session
-            .custom_title
-            .as_deref()
-            .or(todo_title.as_deref())
-            .or(self.session.title.as_deref());
+        let display_title = self.session.custom_title().or(self.session.title());
+        let display_title = display_title.or(todo_title.as_deref());
         let is_canary = if self.is_remote {
-            self.remote_is_canary.unwrap_or(self.session.is_canary)
+            self.remote_is_canary.unwrap_or(self.session.is_canary())
         } else {
-            self.session.is_canary
+            self.session.is_canary()
         };
         let server_name = self.remote_server_short_name.as_deref().unwrap_or("jcode");
         let icon = connection_type_icon(self.connection_type.as_deref()).unwrap_or(session_icon);
@@ -197,9 +192,9 @@ impl App {
         };
 
         let is_selfdev_session = if self.is_remote {
-            self.remote_is_canary.unwrap_or(self.session.is_canary)
+            self.remote_is_canary.unwrap_or(self.session.is_canary())
         } else {
-            self.session.is_canary
+            self.session.is_canary()
         };
 
         let Some((candidate, _label)) =
@@ -245,15 +240,17 @@ impl App {
         let session_id = if self.is_remote {
             self.reload_handoff_session_id()
         } else {
-            self.session.provider_session_id = self.provider_session_id.clone();
-            self.session
-                .set_status(crate::session::SessionStatus::Reloaded);
+            self.session.apply_route(crate::session::Route {
+                provider_session_id: self.provider_session_id.clone(),
+                ..self.session.route()
+            });
+            self.session.mark_reloaded();
             if let Err(error) = self.session.save() {
                 crate::logging::warn(&format!(
                     "Failed to save session during TUI lifecycle: {error}"
                 ));
             }
-            self.session.id.clone()
+            self.session.id().to_owned()
         };
         self.append_reload_message("Newer jcode build published; hot reloading client...");
         self.save_input_for_reload(&session_id);
@@ -272,7 +269,7 @@ impl App {
         if !self.is_remote {
             return false;
         }
-        let is_selfdev_session = self.remote_is_canary.unwrap_or(self.session.is_canary);
+        let is_selfdev_session = self.remote_is_canary.unwrap_or(self.session.is_canary());
         if !is_selfdev_session {
             return false;
         }
@@ -297,7 +294,7 @@ impl App {
     pub async fn init_mcp(&mut self) {
         // Always register the MCP management tool so agent can connect servers
         let mcp_tool = crate::tool::mcp::McpManagementTool::new(Arc::clone(&self.mcp_manager))
-            .with_registry(self.registry.clone());
+            .with_registry(self.registry.downgrade());
         self.registry
             .register("mcp".to_string(), Arc::new(mcp_tool))
             .await;
@@ -354,7 +351,7 @@ impl App {
         }
 
         // Register self-dev tools if this is a canary session
-        if self.session.is_canary {
+        if self.session.is_canary() {
             self.registry.register_selfdev_tools().await;
         }
     }
@@ -368,7 +365,11 @@ impl App {
             // Count stats before restoring
             let mut user_turns = 0;
             let mut assistant_turns = 0;
-            let mut total_chars = 0;
+            let mut estimated_tokens = 0;
+            let family = session.model().map_or_else(
+                crate::message::TokenFamily::default,
+                crate::message::TokenFamily::from_model,
+            );
 
             for item in jcode_tui_messages::display_messages_from_rendered_messages(
                 crate::session::render_messages(&session),
@@ -378,7 +379,7 @@ impl App {
                 } else if item.role == "assistant" {
                     assistant_turns += 1;
                 }
-                total_chars += item.content.len();
+                estimated_tokens += crate::message::estimate_text(family, &item.content);
 
                 self.push_display_message(item);
             }
@@ -386,20 +387,21 @@ impl App {
             // Don't restore provider_session_id - Claude sessions don't persist across
             // process restarts. The messages are restored, so Claude will get full context.
             self.provider_session_id = None;
+            self.active_skill = session.pinned_skill().map(str::to_owned);
             self.session = session;
             crate::memory::sync_injected_memories(
-                &self.session.id,
+                self.session.id(),
                 &self.session.injected_memory_ids(),
             );
             // Clear the saved provider_session_id since it's no longer valid
-            self.session.provider_session_id = None;
+            self.session.forget_provider_session();
             let mut restored_model = false;
-            if let Some(model) = self.session.model.clone() {
+            if let Some(model) = self.session.model().map(str::to_owned) {
                 match crate::provider::restore_session_model(
                     self.provider.as_ref(),
                     &model,
-                    self.session.provider_key.as_deref(),
-                    self.session.route_api_method.as_deref(),
+                    self.session.provider_key(),
+                    self.session.route_api_method(),
                 ) {
                     Err(e) => {
                         self.push_display_message(DisplayMessage {
@@ -409,12 +411,20 @@ impl App {
                             duration_secs: None,
                             title: None,
                             tool_data: None,
+                            codemode: None,
+                            ask: None,
                         });
                     }
                     Ok(restore) => {
                         if let Some(healed) = restore.healed_route {
-                            self.session.provider_key = healed.provider_key;
-                            self.session.route_api_method = healed.route_api_method;
+                            self.session.apply_route(crate::session::Route {
+                                provider_key: healed.provider_key,
+                                ..self.session.route()
+                            });
+                            self.session.apply_route(crate::session::Route {
+                                route_api_method: healed.route_api_method,
+                                ..self.session.route()
+                            });
                         }
                         restored_model = true;
                     }
@@ -422,8 +432,11 @@ impl App {
             }
 
             let active_model = self.provider.model();
-            if restored_model || self.session.model.is_none() {
-                self.session.model = Some(active_model.clone());
+            if restored_model || self.session.model().is_none() {
+                self.session.apply_route(crate::session::Route {
+                    model: Some(active_model.clone()),
+                    ..self.session.route()
+                });
             }
             self.update_context_limit_for_model(&active_model, None);
             // Mark session as active now that it's being used again
@@ -436,7 +449,6 @@ impl App {
 
             // Build stats message
             let total_turns = user_turns + assistant_turns;
-            let estimated_tokens = total_chars / 4; // Rough estimate: ~4 chars per token
             let stats = if total_turns > 0 {
                 format!(
                     " ({} turns, ~{}k tokens)",
@@ -453,19 +465,14 @@ impl App {
                 .is_some();
             let message = format!("Reload complete - continuing.{}", stats);
 
-            // Add success message with stats (only if there's actual content or a reload happened)
+            // A status line, not a transcript row: the daemon resumes the turn
+            // in place, so no synthetic message belongs in the conversation.
             if total_turns > 0 || has_reload_ctx {
-                self.push_display_message(DisplayMessage {
-                    role: "system".to_string(),
-                    content: message,
-                    tool_calls: vec![],
-                    duration_secs: None,
-                    title: None,
-                    tool_data: None,
-                });
+                self.set_status_notice(message);
             }
 
-            // Queue an automatic message to notify the AI that reload completed
+            // Continuation is daemon-owned. Never queue a synthetic prompt
+            // from the client: it would be attributed to the user.
             let reload_ctx = ReloadContext::load_for_session(session_id).ok().flatten();
             let background_task_note = super::reload_persisted_background_tasks_note(session_id);
             let directive = ReloadContext::recovery_directive(
@@ -480,21 +487,11 @@ impl App {
                 } else {
                     "restored interrupted non-initiator session after reload"
                 };
-
+                ReloadContext::log_recovery_outcome("local_restore", session_id, "resumed", detail);
                 crate::logging::info(&format!(
-                    "Queuing reload continuation message ({} chars)",
+                    "Reload recovery is daemon-owned; client does not queue a continuation ({} chars in directive)",
                     directive.continuation_message.len()
                 ));
-                ReloadContext::log_recovery_outcome("local_restore", session_id, "resumed", detail);
-                self.hidden_queued_system_messages
-                    .push(directive.continuation_message);
-                // Trigger processing so the queued message gets sent to the LLM.
-                // Without this, the local event loop waits for user input since
-                // process_queued_messages only runs inside process_turn_with_input.
-                self.is_processing = true;
-                self.status = ProcessingStatus::Sending;
-                self.processing_started = Some(Instant::now());
-                self.pending_turn = true;
             } else {
                 ReloadContext::log_recovery_outcome(
                     "local_restore",
@@ -532,6 +529,8 @@ impl App {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
+                    ask: None,
                 });
             }
         }
@@ -544,11 +543,9 @@ impl App {
     /// 2. Last assistant message ends with "[generation interrupted - server reloading]"
     pub(super) fn was_interrupted_by_reload(&self) -> bool {
         use crate::message::{ContentBlock, Role};
-        let messages = &self.session.messages;
-        if messages.is_empty() {
+        let Some(last) = self.session.last_message() else {
             return false;
-        }
-        let last = &messages[messages.len() - 1];
+        };
         match last.role {
             Role::User => last.content.iter().any(|block| match block {
                 ContentBlock::ToolResult {
@@ -723,6 +720,8 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
+                ask: None,
             });
             return true;
         }
@@ -733,13 +732,17 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
-        app.session.provider_session_id = app.provider_session_id.clone();
-        app.session
-            .set_status(crate::session::SessionStatus::Reloaded);
+        app.session.apply_route(crate::session::Route {
+            provider_session_id: app.provider_session_id.clone(),
+            ..app.session.route()
+        });
+        app.session.mark_reloaded();
         let _ = app.session.save();
-        app.save_input_for_reload(&app.session.id.clone());
-        app.reload_requested = Some(app.session.id.clone());
+        app.save_input_for_reload(app.session.id());
+        app.reload_requested = Some(app.session.id().to_owned());
         app.should_quit = true;
         return true;
     }
@@ -752,24 +755,38 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            codemode: None,
+            ask: None,
         });
-        app.session.provider_session_id = app.provider_session_id.clone();
-        app.session
-            .set_status(crate::session::SessionStatus::Reloaded);
+        app.session.apply_route(crate::session::Route {
+            provider_session_id: app.provider_session_id.clone(),
+            ..app.session.route()
+        });
+        app.session.mark_reloaded();
         let _ = app.session.save();
-        app.save_input_for_reload(&app.session.id.clone());
-        app.restart_requested = Some(app.session.id.clone());
+        app.save_input_for_reload(app.session.id());
+        app.restart_requested = Some(app.session.id().to_owned());
         app.should_quit = true;
         return true;
     }
 
     if trimmed == "/rebuild" {
-        app.start_background_client_rebuild(app.session.id.clone());
+        app.start_background_client_rebuild(app.session.id().to_owned());
         return true;
     }
 
-    if trimmed == "/update" {
-        app.start_background_client_update(app.session.id.clone());
+    if let Some(parsed) = App::parse_update_command_channel(trimmed) {
+        match parsed {
+            Ok(explicit_channel) => {
+                app.start_background_client_update_with_channel(
+                    app.session.id().to_owned(),
+                    explicit_channel,
+                );
+            }
+            Err(usage) => {
+                app.set_status_notice(usage);
+            }
+        }
         return true;
     }
 

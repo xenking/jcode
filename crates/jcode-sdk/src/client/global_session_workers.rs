@@ -15,7 +15,7 @@ pub(super) fn discover_global_sessions(
                 limit: None,
             })
             .and_then(|frame| match frame.event {
-                ApiEvent::Sessions { sessions } => Ok(sessions),
+                ApiEvent::Sessions { sessions, .. } => Ok(sessions),
                 other => Err(unexpected("sessions", &other)),
             }) {
             Ok(sessions) => sessions,
@@ -89,6 +89,7 @@ pub(super) fn start_global_child(
     } else {
         JcodeClient::connect(ConnectOptions {
             supports_user_response: false,
+            supports_applets: false,
             socket_path: Some(parent.inner.socket_path.clone()),
             client_name: format!("{}/global-events", parent.inner.client_name),
             request_timeout: parent.inner.request_timeout,

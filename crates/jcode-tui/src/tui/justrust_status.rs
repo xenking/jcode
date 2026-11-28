@@ -201,7 +201,9 @@ impl Snapshot {
                 ));
             }
             if matching_count > 1 {
-                text.push_str(&format!(" · +{} builds", matching_count - 1));
+                let others = matching_count - 1;
+                let noun = if others == 1 { "build" } else { "builds" };
+                text.push_str(&format!(" · +{others} other active {noun}"));
             }
             return Some(StatusRow {
                 text,
@@ -316,8 +318,13 @@ pub(crate) struct Poller {
 }
 
 impl Poller {
-    pub(crate) fn row(&self) -> Option<&StatusRow> {
-        self.row.as_ref()
+    pub(crate) fn has_row(&self) -> bool {
+        self.row.is_some()
+    }
+
+    /// The row to show, as an owned copy so callers never hold the poller's storage.
+    pub(crate) fn row_snapshot(&self) -> Option<StatusRow> {
+        self.row.clone()
     }
 
     /// Never waits on the subprocess or the filesystem on the UI thread.
@@ -450,7 +457,37 @@ mod tests {
             row.text
                 .contains("test rewrite · 1m40s · 7.8/96 cores · compiling 2/10")
         );
-        assert!(row.text.ends_with("+1 builds"));
+        assert!(row.text.ends_with("+1 other active build"));
+    }
+
+    #[test]
+    fn additional_active_build_count_is_pluralized() {
+        for (count, suffix) in [
+            (1, None),
+            (2, Some(" · +1 other active build")),
+            (3, Some(" · +2 other active builds")),
+        ] {
+            let snapshot = Snapshot {
+                active: (0..count)
+                    .map(|_| Active {
+                        cwd: "/repo/app".into(),
+                        ..Active::default()
+                    })
+                    .chain(std::iter::once(Active {
+                        cwd: "/unrelated".into(),
+                        ..Active::default()
+                    }))
+                    .collect(),
+                recent: None,
+            };
+            let row = snapshot
+                .row(None, Some("/repo/app"), Duration::ZERO)
+                .unwrap();
+            match suffix {
+                Some(suffix) => assert!(row.text.ends_with(suffix), "{}", row.text),
+                None => assert!(!row.text.contains("other active"), "{}", row.text),
+            }
+        }
     }
 
     #[test]
@@ -552,23 +589,23 @@ mod tests {
         };
         poller.stream.as_mut().unwrap().mark_changed();
         poller.refresh(Some("ours"), Some("/repo/app"), true);
-        assert!(poller.row().unwrap().text.contains("finished in 51s"));
+        assert!(poller.row_snapshot().unwrap().text.contains("finished in 51s"));
         let mut next = feed(
             r#"{"active":[{"cwd":"/other"}],"recent":{"cwd":"/other","wall":1,"ok":false,"ago":0}}"#,
         );
         next.mark_changed();
         poller.stream = Some(next);
         poller.refresh(Some("ours"), Some("/repo/app"), true);
-        assert!(poller.row().unwrap().text.contains("finished in 51s"));
+        assert!(poller.row_snapshot().unwrap().text.contains("finished in 51s"));
         poller.snapshot = None;
         poller.last_finished.as_mut().unwrap().1 = Instant::now() - Duration::from_secs(60);
         poller.refresh(Some("ours"), Some("/repo/app"), true);
-        assert!(poller.row().is_some());
+        assert!(poller.row_snapshot().is_some());
         poller.refresh(Some("theirs"), Some("/other"), true);
-        assert!(poller.row().is_none());
+        assert!(poller.row_snapshot().is_none());
         poller.last_finished.as_mut().unwrap().1 = Instant::now() - COMPLETION_RETENTION;
         poller.refresh(Some("ours"), Some("/repo/app"), true);
-        assert!(poller.row().is_none());
+        assert!(poller.row_snapshot().is_none());
     }
 
     #[test]
@@ -584,7 +621,7 @@ mod tests {
         poller.received = Some(Instant::now() - Duration::from_secs(30));
         poller.last_finished = None;
         poller.refresh(Some("ours"), Some("/repo/app"), true);
-        assert!(poller.row().unwrap().text.contains("finished in 3s"));
+        assert!(poller.row_snapshot().unwrap().text.contains("finished in 3s"));
     }
 
     #[test]
@@ -598,7 +635,7 @@ mod tests {
             ..Default::default()
         };
         assert!(poller.refresh(None, None, false));
-        assert!(poller.row().is_none());
+        assert!(poller.row_snapshot().is_none());
         assert!(poller.stream.is_none());
     }
 

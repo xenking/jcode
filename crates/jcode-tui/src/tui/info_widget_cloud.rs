@@ -1,11 +1,11 @@
 //! Cloud-only details. Probe timing is not network RTT, and retained samples are
 //! always marked stale after a failed probe or while reconnecting.
-use super::cloud_status::{CloudProbeState, CloudStatusInfo};
-use super::info_widget::{
+use super::{
     InfoWidgetData,
     frame::{self, Framed},
     render_usage_limit_bar,
 };
+use crate::tui::cloud_status::{CloudProbeState, CloudStatusInfo};
 use ratatui::prelude::*;
 use std::time::SystemTime;
 use unicode_width::UnicodeWidthChar;
@@ -312,12 +312,9 @@ pub(super) fn render_cloud_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        cloud_status::CloudMachineStats,
-        info_widget::{WidgetKind, calculate_widget_height},
-        info_widget_overview::compute_page_layout,
-    };
+    use super::super::{WidgetKind, calculate_widget_height, overview::compute_page_layout};
     use super::*;
+    use crate::tui::cloud_status::CloudMachineStats;
     fn fixture() -> InfoWidgetData {
         InfoWidgetData {
             cloud_info: Some(CloudStatusInfo {
@@ -458,8 +455,8 @@ mod tests {
     }
     #[test]
     fn cloud_layout_preserves_dual_git_and_full_card() {
-        use super::super::info_widget::{DualGitInfo, GitInfo, Margins, RepoState};
-        use super::super::info_widget_layout::calculate_placements_anchored;
+        use super::super::{DualGitInfo, GitInfo, Margins, RepoState};
+        use super::super::layout::calculate_placements_anchored;
         let mut data = fixture();
         data.dual_git_info = Some(DualGitInfo {
             local_is_source: true,
@@ -488,7 +485,7 @@ mod tests {
         assert_eq!(cloud.rect.height, 16);
         assert_eq!(
             compute_page_layout(&data, 40, 55).max_page_height,
-            super::super::info_widget::changes_section_height(&data) + 1
+            super::super::changes_section_height(&data) + 1
         );
     }
     #[test]

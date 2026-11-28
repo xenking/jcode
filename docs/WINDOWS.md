@@ -21,7 +21,7 @@ PowerShell 5.1 or later is required by the installer. The x64 build is the defau
 Open PowerShell and run:
 
 ```powershell
-irm https://jcode.sh/install.ps1 | iex
+irm https://raw.githubusercontent.com/xenking/jcode/master/scripts/install.ps1 | iex
 ```
 
 The installer:
@@ -35,7 +35,7 @@ The installer:
 Alacritty installation and the global launch hotkey are optional and are no longer installed automatically. To request both explicitly:
 
 ```powershell
-$script = [scriptblock]::Create((irm https://jcode.sh/install.ps1))
+$script = [scriptblock]::Create((irm https://raw.githubusercontent.com/xenking/jcode/master/scripts/install.ps1))
 & $script -ConfigureAlacritty -ConfigureHotkey
 ```
 
@@ -46,7 +46,7 @@ fails with an actionable message rather than silently starting a long build.
 To explicitly allow a source build:
 
 ```powershell
-$script = [scriptblock]::Create((irm https://jcode.sh/install.ps1))
+$script = [scriptblock]::Create((irm https://raw.githubusercontent.com/xenking/jcode/master/scripts/install.ps1))
 & $script -BuildFromSource
 ```
 
@@ -68,7 +68,7 @@ Get-Command jcode
 Get-FileHash (Get-Command jcode).Source -Algorithm SHA256
 ```
 
-Compare the hash with `SHA256SUMS` on the matching [GitHub release](https://github.com/1jehuang/jcode/releases/latest).
+Compare the hash with `SHA256SUMS` on the matching [GitHub release](https://github.com/xenking/jcode/releases/latest).
 
 After Authenticode signing is enabled, this must report `Valid`:
 
@@ -139,12 +139,11 @@ For every release that changes Windows behavior:
 Windows is covered by:
 
 - `.github/workflows/ci.yml`: release build, test compilation, targeted platform tests, runtime smoke tests, lifecycle end-to-end tests, installer verification, and PowerShell syntax checks.
-- `.github/workflows/windows-smoke.yml`: manually dispatchable x64 and ARM64 smoke validation.
-- `.github/workflows/release.yml`: x64 and ARM64 builds, managed signing required for Windows publication, signature verification, packaging, and checksums. Every platform and architecture publishes independently, so a Windows failure cannot block any successful Unix asset.
+- `.github/workflows/release.yml`: on a version tag, builds `jcode-windows-x86_64` (unsigned) next to the macOS and Linux assets, then publishes them with `SHA256SUMS`. There is no ARM64 Windows asset and no Windows signing step.
 
 ## Architecture notes
 
-Unix domain sockets are replaced by Windows named pipes under `crates/jcode-base/src/transport/windows.rs`. Platform-specific filesystem, process, update, and replacement behavior is selected at compile time with `#[cfg(windows)]`, so Windows support does not add runtime branching to Unix builds.
+Unix domain sockets are replaced by Windows named pipes under `crates/jcode-transport/src/windows.rs`. Platform-specific filesystem, process, update, and replacement behavior is selected at compile time with `#[cfg(windows)]`, so Windows support does not add runtime branching to Unix builds.
 
 Windows launch-hotkey setup is implemented in `crates/jcode-setup-hints/src/windows_setup.rs` and is only installed after explicit user consent.
 

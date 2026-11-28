@@ -22,7 +22,7 @@ pub(super) fn build_info_widget_summary(data: &info_widget::InfoWidgetData) -> I
     let memory_total = data.memory_info.as_ref().map(|m| m.total_count);
     let memory_project = data.memory_info.as_ref().map(|m| m.project_count);
     let memory_global = data.memory_info.as_ref().map(|m| m.global_count);
-    let memory_activity = data.memory_info.as_ref().map(|m| m.activity.is_some());
+    let memory_activity = data.memory_info.as_ref().map(|m| m.has_activity_sample());
 
     let swarm_session_count = data.swarm_info.as_ref().map(|s| s.session_count);
     let swarm_member_count = data.swarm_info.as_ref().map(|s| s.members.len());
@@ -189,5 +189,81 @@ mod tests {
         // Rows 2..5 have no recorded slack, so coverage there is intrusion.
         let p = placement(Side::Right, 50, 0, 30, 5);
         assert!(widget_overlaps_content(&p, area, &margins));
+    }
+}
+use crate::config::DiagramDisplayMode;
+use jcode_tui_visual_debug::{FrameProbe, MessageCapture, RenderedText, StateSnapshot};
+
+pub(super) struct RenderProbe<'a> {
+    app: &'a dyn crate::tui::TuiState,
+    queued_count: usize,
+    diagram: (DiagramDisplayMode, bool, usize, usize),
+    diagram_scroll: (i32, i32),
+}
+
+impl<'a> RenderProbe<'a> {
+    pub(super) fn new(
+        app: &'a dyn crate::tui::TuiState,
+        queued_count: usize,
+        diagram: (DiagramDisplayMode, bool, usize, usize),
+        diagram_scroll: (i32, i32),
+    ) -> Self {
+        Self {
+            app,
+            queued_count,
+            diagram,
+            diagram_scroll,
+        }
+    }
+}
+
+impl FrameProbe for RenderProbe<'_> {
+    fn state(&self) -> StateSnapshot {
+        let app = self.app;
+        let (mode, focus, index, count) = self.diagram;
+        let (scroll_x, scroll_y) = self.diagram_scroll;
+        StateSnapshot {
+            is_processing: app.is_processing(),
+            input_len: app.input().len(),
+            input_preview: app.input().chars().take(100).collect(),
+            cursor_pos: app.cursor_pos(),
+            scroll_offset: app.scroll_offset(),
+            queued_count: self.queued_count,
+            message_count: app.display_messages().len(),
+            streaming_text_len: app.streaming_text().len(),
+            has_suggestions: !app.command_suggestions().is_empty(),
+            status: format!("{:?}", app.status()),
+            diagram_mode: Some(format!("{mode:?}")),
+            diagram_focus: focus,
+            diagram_index: index,
+            diagram_count: count,
+            diagram_scroll_x: scroll_x,
+            diagram_scroll_y: scroll_y,
+            diagram_pane_ratio: app.diagram_pane_ratio(),
+            diagram_pane_enabled: app.diagram_pane_enabled(),
+            diagram_pane_position: Some(format!("{:?}", app.diagram_pane_position())),
+            diagram_zoom: app.diagram_zoom(),
+        }
+    }
+
+    fn rendered(&self) -> RenderedText {
+        let app = self.app;
+        RenderedText {
+            queued_messages: super::input_ui::pending_queue_preview(app),
+            recent_messages: app
+                .display_messages()
+                .iter()
+                .rev()
+                .take(5)
+                .map(|m| MessageCapture {
+                    role: m.role.clone(),
+                    content_preview: m.content.chars().take(200).collect(),
+                    content_len: m.content.len(),
+                })
+                .collect(),
+            streaming_text_preview: app.streaming_text().chars().take(500).collect(),
+            status_line: super::format_status_for_debug(app),
+            ..Default::default()
+        }
     }
 }

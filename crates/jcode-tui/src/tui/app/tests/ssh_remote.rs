@@ -1,4 +1,9 @@
 fn with_ssh_remote_test_home(f: impl FnOnce()) {
+    let thread = std::thread::current();
+    let test_name = thread.name().expect("named test thread");
+    if super::commands_dispatch::ssh_test_runs_in_child(test_name) {
+        return;
+    }
     with_temp_jcode_home(|| {
         struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
         impl Drop for RestoreEnv {
@@ -41,17 +46,20 @@ fn ssh_cloud_handoff_previews_matching_transcript_once() {
                 cache_control: None,
             }],
         );
-        local.model = Some("gpt-5.4".into());
+        local.apply_route(crate::session::Route {
+            model: Some("gpt-5.4".into()),
+            ..local.route()
+        });
         local.save().expect("save handoff source");
-        crate::env::set_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", &local.id);
-        let app = App::new_for_remote(Some(local.id.clone()));
+        crate::env::set_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", local.id());
+        let app = App::new_for_remote(Some(local.id().to_owned()));
         assert!(app.display_messages().iter().any(|message| {
             message
                 .content
                 .contains("conversation before cloud handoff")
         }));
-        assert!(app.session.messages.is_empty());
-        assert!(app.session.working_dir.is_none());
+        assert!(app.session.has_no_messages());
+        assert!(app.session.working_dir().is_none());
         assert!(app.remote_startup_phase.is_some());
         assert_eq!(
             app.effective_remote_provider_model().as_deref(),
@@ -76,10 +84,10 @@ fn ssh_cloud_handoff_previews_matching_transcript_once() {
         );
         assert!(!frame_text.contains("loading session"), "{frame_text}");
 
-        let ordinary_resume = App::new_for_remote(Some(local.id.clone()));
+        let ordinary_resume = App::new_for_remote(Some(local.id().to_owned()));
         assert!(ordinary_resume.display_messages().is_empty());
         crate::env::set_var("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", "another-session");
-        let mismatched = App::new_for_remote(Some(local.id));
+        let mismatched = App::new_for_remote(Some(local.id().to_owned()));
         assert!(mismatched.display_messages().is_empty());
     });
 }
@@ -96,9 +104,9 @@ fn ssh_remote_startup_ignores_colliding_local_session_and_onboarding() {
             }],
         );
         local.save().expect("save local collision");
-        let app = App::new_for_remote(Some(local.id.clone()));
+        let app = App::new_for_remote(Some(local.id().to_owned()));
         assert!(app.display_messages().is_empty());
-        assert_eq!(app.resume_session_id.as_deref(), Some(local.id.as_str()));
+        assert_eq!(app.resume_session_id.as_deref(), Some(local.id()));
         assert!(app.remote_session_id.is_none());
         assert!(!app.onboarding_welcome_active());
         assert!(app.suggestion_prompts().is_empty());
@@ -237,6 +245,8 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             provider_name: Some("remote-provider".into()),
             provider_model: Some("remote-model".into()),
             subagent_model: None,
+            pinned_skill: None,
+            pinned_skills: None,
             agent_model_overrides: Default::default(),
             autoreview_enabled: Some(false),
             autojudge_enabled: Some(false),
@@ -264,6 +274,8 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             reasoning_effort: None,
             service_tier: None,
             available_service_tiers: None,
+            speed_mode: Default::default(),
+            speed_options: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -282,7 +294,10 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
 fn ssh_remote_header_guides_remote_login_and_hides_local_scheduler() {
     with_ssh_remote_test_home(|| {
         let mut app = App::new_for_remote(None);
-        app.session.model = Some("laptop-only-model".into());
+        app.session.apply_route(crate::session::Route {
+            model: Some("laptop-only-model".into()),
+            ..app.session.route()
+        });
         assert!(app.effective_remote_provider_model().is_none());
         assert_eq!(app.remote_effort_identity(), (None, None));
         assert!(app.remote_reasoning_effort_hint().is_none());
@@ -321,5 +336,64 @@ fn ssh_remote_header_guides_remote_login_and_hides_local_scheduler() {
         assert!(info.ambient_info.is_none());
         assert!(info.git_info.is_none());
         assert!(crate::tui::scheduled_notification_text(info.ambient_info.as_ref()).is_none());
+    });
+}
+
+#[test]
+fn antigravity_remote_effort_helpers_and_event_sync_sibling_model() {
+    with_ssh_remote_test_home(|| {
+        let mut app = App::new_for_remote(None);
+        app.remote_provider_name = Some("antigravity".to_string());
+        app.remote_provider_model = Some("gemini-4-neon-low".to_string());
+        let route = |model: &str| crate::provider::ModelRoute {
+            reasoning_efforts: None,
+            speed_options: Vec::new(),
+            model: model.to_string(),
+            provider: "Antigravity".to_string(),
+            api_method: "antigravity-https".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+            usage: None,
+            account: None,
+            icon: None,
+        };
+        app.remote_model_options = vec![
+            route("gemini-4-neon-low"),
+            route("gemini-4-neon-medium"),
+            route("gemini-4-neon-high"),
+            route("gemini-4-neon-xhigh"),
+            route("gemini-3-flash"),
+        ];
+
+        assert_eq!(
+            app.remote_available_efforts(),
+            vec!["low", "medium", "high", "xhigh", "swarm"]
+        );
+        assert_eq!(app.remote_reasoning_effort_hint().as_deref(), Some("low"));
+
+        let mut remote = crate::tui::backend::ReplayRemoteState::default();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReasoningEffortChanged {
+                id: 42,
+                effort: Some("high".to_string()),
+                model: Some("gemini-4-neon-high".to_string()),
+                error: None,
+            },
+            &mut remote,
+        );
+
+        assert_eq!(app.remote_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            app.remote_provider_model.as_deref(),
+            Some("gemini-4-neon-high")
+        );
+        assert_eq!(app.session.model(), Some("gemini-4-neon-high"));
+
+        // Non-effort Antigravity model exposes no reasoning efforts
+        app.remote_provider_model = Some("gemini-3-flash".to_string());
+        app.remote_reasoning_effort = None;
+        assert!(app.remote_available_efforts().is_empty());
+        assert_eq!(app.remote_reasoning_effort_hint(), None);
     });
 }

@@ -8,26 +8,75 @@ use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-#[path = "agent_tests/cache_session_affinity.rs"]
+#[path = "agent_tests/mcp/mcp_exposure.rs"]
+mod mcp_exposure;
+use mcp_exposure::*;
+
+#[path = "agent_tests/recovery/guardrail_recovery.rs"]
+mod guardrail_recovery;
+
+#[path = "agent_tests/steering.rs"]
+mod steering;
+
+#[path = "agent_tests/session/session_restore.rs"]
+mod session_restore;
+
+#[path = "agent_tests/compaction.rs"]
+mod compaction;
+
+#[path = "agent_tests/session/express_mode.rs"]
+mod express_mode;
+#[path = "agent_tests/session/pinned_mode.rs"]
+mod pinned_mode;
+#[path = "agent_tests/session/setting_log.rs"]
+mod setting_log;
+
+#[path = "agent_tests/cache/cache_session_affinity.rs"]
 mod cache_session_affinity;
 
-#[path = "agent_tests/tool_streaming.rs"]
+#[path = "agent_tests/cache/cache_keepalive.rs"]
+mod cache_keepalive;
+
+#[path = "agent_tests/request_only_recall_wire.rs"]
+mod request_only_recall_wire;
+#[path = "agent_tests/request_prefix_stability.rs"]
+mod request_prefix_stability;
+
+#[path = "agent_tests/worker/worker_http_capture.rs"]
+mod worker_http_capture;
+
+#[path = "agent_tests/worker/worker_tool_capture.rs"]
+mod worker_tool_capture;
+
+#[path = "agent_tests/worker/tool_streaming.rs"]
 mod tool_streaming;
 
-#[path = "agent_tests/concurrency.rs"]
+#[path = "agent_tests/pending_effort.rs"]
+mod pending_effort;
+
+#[path = "agent_tests/concurrency/concurrency.rs"]
 mod concurrency;
 
-#[path = "agent_tests/concurrency_construction.rs"]
+#[path = "agent_tests/concurrency/concurrency_construction.rs"]
 mod concurrency_construction;
 
 #[path = "agent_tests/desktop_selfdev.rs"]
 mod desktop_selfdev;
 
-#[path = "agent_tests/compile_remote.rs"]
+#[path = "agent_tests/mcp/compile_remote.rs"]
 mod compile_remote;
 
-#[path = "agent_tests/mcp_remote_cache.rs"]
+#[path = "agent_tests/mcp/mcp_remote_cache.rs"]
 mod mcp_remote_cache;
+
+#[path = "agent_tests/cache/cold_cache.rs"]
+mod cold_cache;
+
+#[path = "agent_tests/prompt_inputs_reload.rs"]
+mod prompt_inputs_reload;
+
+#[path = "agent_tests/cache/restart_cache.rs"]
+mod restart_cache;
 
 struct DelayedProvider {
     open_delay: Duration,
@@ -36,77 +85,41 @@ struct DelayedProvider {
 
 struct NativeAutoCompactionProvider;
 
+struct ArchiveReplayProvider {
+    images: bool,
+}
+
+#[async_trait]
+impl Provider for ArchiveReplayProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        panic!("this offline request preparation test must not call a provider")
+    }
+    fn name(&self) -> &str {
+        "archive-replay-test"
+    }
+    fn model(&self) -> String {
+        "claude-opus-5-5".into()
+    }
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+    fn supports_image_input(&self) -> bool {
+        self.images
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            images: self.images,
+        })
+    }
+}
+
 struct BoundSavedAccountProvider;
-
-#[tokio::test]
-async fn working_directory_moves_preserve_first_active_session_origin() {
-    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
-    agent.session.messages.clear();
-    agent.session.working_dir = Some("/daemon".into());
-    agent.set_working_dir("/projects/start");
-    assert_eq!(
-        agent.session.original_working_dir, None,
-        "initial subscription is not a move"
-    );
-    agent.session.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "hello".into(),
-            cache_control: None,
-        }],
-    );
-    agent.set_working_dir("/projects/second");
-    agent.set_working_dir_for_pending_context(Some("/projects/third".into()));
-    assert_eq!(
-        agent.session.original_working_dir.as_deref(),
-        Some("/projects/start")
-    );
-    assert_eq!(agent.working_dir(), Some("/projects/third"));
-    agent.set_working_dir("/projects/start");
-    assert_eq!(
-        agent.session.original_working_dir.as_deref(),
-        Some("/projects/start")
-    );
-}
-
-#[tokio::test]
-async fn user_response_capability_updates_locked_tool_surface() {
-    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
-    assert!(
-        !agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-    assert!(agent.locked_tools.is_some());
-    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
-    agent.set_desktop_response_capability(true).await;
-    assert!(agent.locked_tools.is_none());
-    assert!(agent.tool_names().await.iter().any(|n| n == "applet"));
-    assert!(
-        agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-    agent.set_desktop_response_capability(true).await;
-    assert!(
-        agent.locked_tools.is_some(),
-        "unchanged capability preserves the cache"
-    );
-    agent.set_desktop_response_capability(false).await;
-    assert!(agent.locked_tools.is_none());
-    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
-    assert!(
-        !agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-}
 
 #[async_trait]
 impl Provider for BoundSavedAccountProvider {
@@ -134,67 +147,6 @@ impl Provider for BoundSavedAccountProvider {
 }
 
 #[tokio::test]
-async fn saved_account_observed_binding_is_persisted() {
-    let _guard = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    struct RestoreHome(Option<std::ffi::OsString>);
-    impl Drop for RestoreHome {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(home) => crate::env::set_var("JCODE_HOME", home),
-                None => crate::env::remove_var("JCODE_HOME"),
-            }
-            crate::config::Config::invalidate_cache();
-        }
-    }
-    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
-    crate::env::set_var("JCODE_HOME", home.path());
-    crate::config::Config::invalidate_cache();
-    let provider: Arc<dyn Provider> = Arc::new(BoundSavedAccountProvider);
-    let mut agent = Agent::new(provider, Registry::empty());
-    agent.session.route_api_method = None;
-    agent.session.save_prepared().unwrap();
-    agent.sync_bound_account_route();
-    assert_eq!(
-        agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@work")
-    );
-    let saved = crate::session::Session::load(&agent.session.id).unwrap();
-    assert_eq!(saved.route_api_method.as_deref(), Some("openai-oauth@work"));
-    assert_eq!(saved.provider_key.as_deref(), Some("openai-oauth"));
-    agent.sync_bound_account_route();
-    assert_eq!(agent.session.route_api_method, saved.route_api_method);
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("personal"));
-    agent.record_failed_account_route("429 rate limit reached");
-    assert!(
-        crate::provider::provider_unavailability_detail_for_account_label("openai", Some("work"))
-            .is_some()
-    );
-    assert!(
-        crate::provider::provider_unavailability_detail_for_account_label(
-            "openai",
-            Some("personal")
-        )
-        .is_none()
-    );
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
-    agent.session.route_api_method = Some("openai-oauth@personal".to_string());
-    agent.sync_bound_account_route();
-    assert_eq!(
-        agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@personal")
-    );
-    assert!(
-        agent
-            .ensure_session_lease()
-            .unwrap_err()
-            .to_string()
-            .contains("personal")
-    );
-}
-
-#[tokio::test]
 async fn saved_account_restore_mismatch_blocks_model_turn() {
     let _guard = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
@@ -213,11 +165,20 @@ async fn saved_account_restore_mismatch_blocks_model_turn() {
     crate::config::Config::invalidate_cache();
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let mut agent = Agent::new(provider, Registry::empty());
-    agent.session.route_api_method = Some("openai-oauth@work".into());
+    agent.session.apply_route(crate::session::Route {
+        route_api_method: Some("openai-oauth@work".into()),
+        ..agent.session.route()
+    });
     let error = agent.ensure_session_lease().unwrap_err().to_string();
     assert!(error.contains("Saved account 'work' could not be restored"));
-    agent.session.route_api_method = None;
-    agent.session.provider_key = Some("openai-oauth@personal".into());
+    agent.session.apply_route(crate::session::Route {
+        route_api_method: None,
+        ..agent.session.route()
+    });
+    agent.session.apply_route(crate::session::Route {
+        provider_key: Some("openai-oauth@personal".into()),
+        ..agent.session.route()
+    });
     assert!(
         agent
             .ensure_session_lease()
@@ -225,7 +186,10 @@ async fn saved_account_restore_mismatch_blocks_model_turn() {
             .to_string()
             .contains("personal")
     );
-    agent.session.provider_key = Some("openai-oauth".into());
+    agent.session.apply_route(crate::session::Route {
+        provider_key: Some("openai-oauth".into()),
+        ..agent.session.route()
+    });
     assert!(agent.ensure_session_lease().is_ok());
 }
 
@@ -332,10 +296,7 @@ async fn mpsc_preserves_signatures_and_never_rebinds_to_provider_session_id() {
     }
     assert_eq!(agent.session_id(), jcode_id);
     let saved = Session::load(&jcode_id).unwrap();
-    assert_eq!(
-        saved.provider_session_id.as_deref(),
-        Some("provider-resume-handle")
-    );
+    assert_eq!(saved.provider_session_id(), Some("provider-resume-handle"));
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert!(requests[1].iter().flat_map(|message| &message.content).any(|block| matches!(
@@ -421,7 +382,7 @@ fn message_text(message: &Message) -> &str {
 fn agent_drop_removes_its_configured_session_tool_policy() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let session = Session::create(None, None);
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
     let agent = Agent::new_with_session(
         provider,
         Registry::empty(),
@@ -445,7 +406,7 @@ fn agent_drop_removes_its_configured_session_tool_policy() {
 fn stale_agent_drop_preserves_successor_session_tool_policy() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let first_session = Session::create(None, None);
-    let session_id = first_session.id.clone();
+    let session_id = first_session.id().to_owned();
     let first = Agent::new_with_session(
         provider.clone(),
         Registry::empty(),
@@ -453,7 +414,7 @@ fn stale_agent_drop_preserves_successor_session_tool_policy() {
         Some(HashSet::from(["bash".to_string()])),
     );
     let mut successor_session = Session::create(None, None);
-    successor_session.id.clone_from(&session_id);
+    successor_session.set_id_for_tests(session_id.clone());
     let successor = Agent::new_with_session(
         provider,
         Registry::empty(),
@@ -484,7 +445,7 @@ fn stale_agent_drop_preserves_successor_session_tool_policy() {
 fn agent_clear_moves_tool_policy_registration_to_new_session() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let session = Session::create(None, None);
-    let previous_session_id = session.id.clone();
+    let previous_session_id = session.id().to_owned();
     let mut agent = Agent::new_with_session(
         provider,
         Registry::empty(),
@@ -493,7 +454,7 @@ fn agent_clear_moves_tool_policy_registration_to_new_session() {
     );
 
     agent.clear();
-    let new_session_id = agent.session.id.clone();
+    let new_session_id = agent.session.id().to_owned();
 
     assert_ne!(previous_session_id, new_session_id);
     assert_eq!(
@@ -743,112 +704,6 @@ fn tool_output_to_content_blocks_preserves_labeled_images() {
 }
 
 #[tokio::test]
-async fn queued_soft_interrupt_images_are_injected_as_image_blocks() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let _guard = crate::storage::lock_test_env();
-    let mut agent = Agent::new(provider, registry);
-
-    agent.queue_soft_interrupt(
-        "look at this".to_string(),
-        vec![("image/png".to_string(), "ZmFrZQ==".to_string())],
-        false,
-        SoftInterruptSource::User,
-    );
-    let injected = agent.inject_soft_interrupts();
-
-    assert_eq!(injected.len(), 1);
-    let message = agent
-        .session
-        .messages
-        .last()
-        .expect("soft interrupt should append a user message");
-    assert!(matches!(
-        &message.content[0],
-        ContentBlock::Image { media_type, data }
-            if media_type == "image/png" && data == "ZmFrZQ=="
-    ));
-    assert!(matches!(
-        &message.content[1],
-        ContentBlock::Text { text, .. } if text == "look at this"
-    ));
-}
-
-#[tokio::test]
-async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let _guard = crate::storage::lock_test_env();
-    let mut agent = Agent::new(provider, registry);
-
-    let user = SoftInterruptSource::User;
-    agent.queue_soft_interrupt_with_id("one".into(), vec![], false, user, Some("f1".into()));
-    agent.queue_soft_interrupt_with_id("anon".into(), vec![], false, user, None);
-    agent.queue_soft_interrupt_with_id("two".into(), vec![], false, user, Some("f2".into()));
-    agent.queue_soft_interrupt(
-        "[Background Task Completed]".into(),
-        vec![],
-        false,
-        SoftInterruptSource::BackgroundTask,
-    );
-    agent.queue_soft_interrupt_with_id("three".into(), vec![], false, user, Some("f3".into()));
-
-    let injected = agent.inject_soft_interrupts();
-    let events = Agent::build_soft_interrupt_events(injected, "D", None);
-    let summary: Vec<(String, Vec<String>)> = events
-        .into_iter()
-        .map(|event| match event {
-            ServerEvent::SoftInterruptInjected {
-                content,
-                client_ids,
-                ..
-            } => (content, client_ids),
-            other => panic!("unexpected event {other:?}"),
-        })
-        .collect();
-    assert_eq!(
-        summary,
-        vec![
-            (
-                "one\n\nanon\n\ntwo".to_string(),
-                vec!["f1".into(), "f2".into()]
-            ),
-            ("[Background Task Completed]".to_string(), vec![]),
-            ("three".to_string(), vec!["f3".into()]),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn adjacent_notifications_each_emit_a_delivery_event() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let _guard = crate::storage::lock_test_env();
-    let mut agent = Agent::new(provider, registry);
-    for source in [
-        SoftInterruptSource::System,
-        SoftInterruptSource::BackgroundTask,
-    ] {
-        for content in ["first notice", "second notice"] {
-            agent.queue_soft_interrupt(content.into(), vec![], false, source);
-        }
-    }
-    let injected = agent.inject_soft_interrupts();
-    let events = Agent::build_soft_interrupt_events(injected, "D", None);
-    assert_eq!(events.len(), 4);
-    for (event, expected) in events.iter().zip([
-        "first notice",
-        "second notice",
-        "first notice",
-        "second notice",
-    ]) {
-        assert!(
-            matches!(event, ServerEvent::SoftInterruptInjected { content, .. } if content == expected)
-        );
-    }
-}
-
-#[tokio::test]
 async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(DelayedProvider {
@@ -919,6 +774,30 @@ async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     task.await.unwrap().unwrap();
 }
 
+#[test]
+fn compaction_usage_event_is_a_plain_post_compaction_report() {
+    assert!(
+        crate::agent::compaction_context_usage_event(None, Some(1)).is_none(),
+        "no post-compaction count means no usage refresh"
+    );
+    match crate::agent::compaction_context_usage_event(Some(58_400), Some(1_000_000)) {
+        Some(ServerEvent::TokenUsage {
+            input,
+            output,
+            cache_read_input,
+            cache_creation_input,
+            effective_budget,
+        }) => {
+            assert_eq!(input, 58_400);
+            assert_eq!(output, 0);
+            assert_eq!(cache_read_input, Some(0));
+            assert_eq!(cache_creation_input, Some(0));
+            assert_eq!(effective_budget, Some(1_000_000));
+        }
+        other => panic!("expected a usage report, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset() {
     let _guard = crate::storage::lock_test_env();
@@ -937,7 +816,18 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
     agent.run_turn_streaming_mpsc(tx).await.unwrap();
 
     let mut saw_native_compaction = false;
+    let mut compaction_post_tokens: Option<u64> = None;
+    let mut usage_after_compaction: Vec<(u64, Option<u64>)> = Vec::new();
     while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::TokenUsage {
+            input,
+            cache_read_input,
+            ..
+        } = &event
+            && compaction_post_tokens.is_some()
+        {
+            usage_after_compaction.push((*input, *cache_read_input));
+        }
         if let ServerEvent::Compaction {
             trigger,
             pre_tokens,
@@ -963,6 +853,7 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
                 messages_compacted.is_some_and(|count| count > 0),
                 "native compaction should report a non-empty compacted prefix"
             );
+            compaction_post_tokens = Some(post);
             saw_native_compaction = true;
         }
     }
@@ -970,6 +861,68 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
         saw_native_compaction,
         "native provider compaction must reach clients so they clear KV baselines"
     );
+    // Clients derive the context percentage from the last usage report, so the
+    // post-compaction size must arrive as its own report immediately after the
+    // compaction event, or the composer pill keeps the pre-compaction figure
+    // until the next provider call rewrites it (the 2026-11-15 07:20Z incident:
+    // the pill sat at 45% for eight minutes after a compaction to ~58K).
+    let post = compaction_post_tokens.expect("compaction post count");
+    assert_eq!(
+        usage_after_compaction.first(),
+        Some(&(post, Some(0))),
+        "the first usage report after compaction must be the new context size"
+    );
+}
+
+#[tokio::test]
+async fn completed_requests_add_cached_and_uncached_tokens_to_the_durable_route_totals() {
+    let _guard = crate::storage::lock_test_env();
+    // Other agent tests also record requests; count only this one's home.
+    let home = tempfile::tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = Restore(previous_home);
+    let provider: Arc<dyn Provider> = Arc::new(NativeCompactionStreamProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "count this".to_string(),
+            cache_control: None,
+        }],
+    );
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+    // The write is off the turn's path; wait for it to land.
+    let routes = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let routes = jcode_base::request_usage::summarize().unwrap();
+            if !routes.is_empty() {
+                break routes;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("request usage must be recorded");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].provider, "openai");
+    // The provider's compaction makes the turn issue several requests.
+    let requests = routes[0].requests;
+    assert!(requests >= 1);
+    assert_eq!(routes[0].cached_input, 0);
+    assert_eq!(routes[0].uncached_input, 24_000 * requests);
+    assert_eq!(routes[0].output, 10 * requests);
 }
 
 /// Provider that transparently switches its model mid-stream, mimicking the
@@ -1153,162 +1106,6 @@ async fn run_turn_streaming_mpsc_emits_account_only_change_without_email() {
     }
     assert_eq!(labels, vec![Some("personal".to_string())]);
 }
-
-#[tokio::test]
-async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    agent.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "first".to_string(),
-            cache_control: None,
-        }],
-    );
-    agent.add_message(
-        Role::Assistant,
-        vec![ContentBlock::Text {
-            text: "second".to_string(),
-            cache_control: None,
-        }],
-    );
-
-    agent
-        .apply_openai_native_compaction("enc_auto".to_string(), 1)
-        .expect("persist native compaction");
-
-    let (messages, event) = agent.messages_for_provider();
-    assert!(event.is_none());
-    assert!(!messages.is_empty());
-    match &messages[0].content[0] {
-        ContentBlock::OpenAICompaction { encrypted_content } => {
-            assert_eq!(encrypted_content, "enc_auto");
-        }
-        other => panic!("expected OpenAI compaction block, got {other:?}"),
-    }
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.role == Role::Assistant)
-    );
-}
-
-#[tokio::test]
-async fn oversized_openai_native_compaction_is_persisted_as_text_fallback() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    agent.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "first".to_string(),
-            cache_control: None,
-        }],
-    );
-    agent.add_message(
-        Role::Assistant,
-        vec![ContentBlock::Text {
-            text: "second".to_string(),
-            cache_control: None,
-        }],
-    );
-
-    let oversized =
-        "x".repeat(crate::provider::openai_request::OPENAI_ENCRYPTED_CONTENT_SAFE_MAX_CHARS + 1);
-    agent
-        .apply_openai_native_compaction(oversized, 1)
-        .expect("persist fallback compaction");
-
-    let state = agent
-        .session
-        .compaction
-        .as_ref()
-        .expect("compaction should be persisted");
-    assert!(state.openai_encrypted_content.is_none());
-    assert!(
-        state
-            .summary_text
-            .contains("OpenAI native compaction state was discarded")
-    );
-
-    let (messages, event) = agent.messages_for_provider();
-    assert!(event.is_none());
-    assert!(!messages.is_empty());
-    assert!(messages.iter().all(|message| {
-        message
-            .content
-            .iter()
-            .all(|block| !matches!(block, ContentBlock::OpenAICompaction { .. }))
-    }));
-    match &messages[0].content[0] {
-        ContentBlock::Text { text, .. } => {
-            assert!(text.contains("Previous Conversation Summary"));
-            assert!(text.contains("OpenAI native compaction state was discarded"));
-        }
-        other => panic!("expected text fallback summary, got {other:?}"),
-    }
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.role == Role::Assistant)
-    );
-}
-
-#[tokio::test]
-async fn messages_for_provider_applies_manual_compaction_in_native_auto_mode() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    for i in 0..30 {
-        agent.add_message(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: format!("turn {i} {}", "x".repeat(120)),
-                cache_control: None,
-            }],
-        );
-    }
-
-    agent.provider_session_id = Some("stale-provider-session".to_string());
-    agent.session.provider_session_id = Some("stale-provider-session".to_string());
-
-    let provider_messages = agent.provider_messages();
-    let (message, success) = agent.request_manual_compaction();
-    assert!(success, "manual compaction should start: {message}");
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut event = None;
-    let mut compacted_messages = Vec::new();
-    while Instant::now() < deadline {
-        let (messages, maybe_event) = agent.messages_for_provider();
-        if maybe_event.is_some() {
-            event = maybe_event;
-            compacted_messages = messages;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    let event = event.expect("manual compaction event should be applied");
-    assert_eq!(event.trigger, "manual");
-    assert!(agent.session.compaction.is_some());
-    assert!(agent.provider_session_id.is_none());
-    assert!(agent.session.provider_session_id.is_none());
-    assert!(compacted_messages.len() < provider_messages.len());
-    match &compacted_messages[0].content[0] {
-        ContentBlock::Text { text, .. } => {
-            assert!(text.contains("Previous Conversation Summary"));
-            assert!(text.contains("manual summary from native-auto provider"));
-        }
-        other => panic!("expected text summary block, got {other:?}"),
-    }
-}
-
-// ── InterruptSignal tests ────────────────────────────────────────────────
 
 #[tokio::test]
 async fn interrupt_signal_fire_before_notified_does_not_hang() {
@@ -1498,7 +1295,7 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
             .to_string()
             .contains("disabled in self-development mode")
     );
-    agent.session.is_canary = false;
+    agent.session.set_is_canary_for_tests(false);
     agent.unlock_tools();
     assert!(
         agent
@@ -1564,1309 +1361,11 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
     crate::config::Config::invalidate_cache();
 }
 
-fn seed_transient_session_state(agent: &mut Agent) {
-    agent.push_alert("pending alert".to_string());
-    agent.queue_soft_interrupt(
-        "queued interrupt".to_string(),
-        Vec::new(),
-        true,
-        SoftInterruptSource::User,
-    );
-    agent.background_tool_signal.fire();
-    agent.request_graceful_shutdown();
-    agent.tool_call_ids.insert("tool_call_old".to_string());
-    agent.tool_result_ids.insert("tool_result_old".to_string());
-    agent.tool_output_scan_index = 7;
-    agent.last_upstream_provider = Some("upstream_old".to_string());
-    agent.last_connection_type = Some("websocket".to_string());
-    agent.last_usage = TokenUsage {
-        input_tokens: 11,
-        output_tokens: 17,
-        cache_read_input_tokens: Some(3),
-        cache_creation_input_tokens: Some(5),
-    };
-    agent.locked_tools = Some(vec![ToolDefinition {
-        name: "test_tool".to_string(),
-        description: "test tool".to_string(),
-        input_schema: serde_json::json!({"type": "object"}),
-        defer_loading: false,
-    }]);
-}
-
-#[tokio::test]
-async fn clear_resets_runtime_interrupt_and_queue_state() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    seed_transient_session_state(&mut agent);
-    assert_eq!(agent.soft_interrupt_count(), 1);
-    assert!(agent.background_tool_signal().is_set());
-    assert!(agent.graceful_shutdown_signal().is_set());
-
-    agent.clear();
-
-    assert_eq!(agent.soft_interrupt_count(), 0);
-    assert!(!agent.background_tool_signal().is_set());
-    assert!(!agent.graceful_shutdown_signal().is_set());
-    assert_eq!(agent.pending_alert_count(), 0);
-    assert!(agent.tool_call_ids.is_empty());
-    assert!(agent.tool_result_ids.is_empty());
-    assert_eq!(agent.tool_output_scan_index, 0);
-    assert!(agent.last_upstream_provider.is_none());
-    assert!(agent.last_connection_type.is_none());
-    assert_eq!(agent.last_usage.input_tokens, 0);
-    assert_eq!(agent.last_usage.output_tokens, 0);
-    assert!(agent.locked_tools.is_none());
-}
-
-#[tokio::test]
-async fn restore_session_resets_runtime_interrupt_and_queue_state() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    let mut restored_session = crate::session::Session::create_with_id(
-        "session_restore_resets_runtime_state".to_string(),
-        None,
-        None,
-    );
-    restored_session
-        .save_prepared()
-        .expect("save restored session");
-
-    seed_transient_session_state(&mut agent);
-    assert_eq!(agent.soft_interrupt_count(), 1);
-    assert!(agent.background_tool_signal().is_set());
-    assert!(agent.graceful_shutdown_signal().is_set());
-
-    let status = agent
-        .restore_session(&restored_session.id)
-        .expect("restore session should succeed");
-
-    assert_eq!(status, crate::session::SessionStatus::Active);
-    assert_eq!(agent.session_id(), restored_session.id);
-    assert_eq!(agent.soft_interrupt_count(), 0);
-    assert!(!agent.background_tool_signal().is_set());
-    assert!(!agent.graceful_shutdown_signal().is_set());
-    assert_eq!(agent.pending_alert_count(), 0);
-    assert!(agent.tool_call_ids.is_empty());
-    assert!(agent.tool_result_ids.is_empty());
-    assert_eq!(agent.tool_output_scan_index, 0);
-    assert!(agent.last_upstream_provider.is_none());
-    assert!(agent.last_connection_type.is_none());
-    assert_eq!(agent.last_usage.input_tokens, 0);
-    assert_eq!(agent.last_usage.output_tokens, 0);
-    assert!(agent.locked_tools.is_none());
-}
-
-#[tokio::test]
-async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
-    let _guard = crate::storage::lock_test_env();
-    let provider = Arc::new(ExplicitPinProvider::new("z-ai/glm-5.2"));
-    let provider_dyn: Arc<dyn Provider> = provider.clone();
-    let registry = Registry::new(provider_dyn.clone()).await;
-    let mut agent = Agent::new(provider_dyn, registry);
-    // Untouched sessions are not persisted (783c979a0); materialize the
-    // snapshot so the pin written by set_model lands on disk.
-    agent
-        .session
-        .save_prepared()
-        .expect("materialize session snapshot");
-
-    agent
-        .set_model("z-ai/glm-5.2@Novita")
-        .expect("set explicitly pinned model");
-    assert_eq!(agent.provider_model(), "z-ai/glm-5.2@Novita");
-    let persisted = crate::session::Session::load(agent.session_id()).expect("load saved session");
-    assert_eq!(persisted.model.as_deref(), Some("z-ai/glm-5.2@Novita"));
-
-    let restored_provider = Arc::new(ExplicitPinProvider::new("other/model"));
-    let restored_provider_dyn: Arc<dyn Provider> = restored_provider.clone();
-    let restored_registry = Registry::new(restored_provider_dyn.clone()).await;
-    let restored_agent =
-        Agent::new_with_session(restored_provider_dyn, restored_registry, persisted, None);
-
-    assert_eq!(
-        restored_provider
-            .set_model_requests
-            .lock()
-            .unwrap()
-            .as_slice(),
-        ["openrouter:z-ai/glm-5.2@Novita"]
-    );
-    assert_eq!(restored_agent.provider_model(), "z-ai/glm-5.2@Novita");
-}
-
-#[tokio::test]
-async fn restore_session_rehydrates_injected_memory_ids() {
-    let _guard = crate::storage::lock_test_env();
-    crate::memory::clear_all_pending_memory();
-
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    let mut restored_session = crate::session::Session::create_with_id(
-        "session_restore_memory_dedup".to_string(),
-        None,
-        None,
-    );
-    restored_session.record_memory_injection(
-        "🧠 auto-recalled 1 memory".to_string(),
-        "persisted memory".to_string(),
-        1,
-        5,
-        vec!["memory-persisted".to_string()],
-    );
-    restored_session
-        .save_prepared()
-        .expect("save restored session");
-
-    crate::memory::mark_memories_injected(&restored_session.id, &["memory-stale".to_string()]);
-
-    agent
-        .restore_session(&restored_session.id)
-        .expect("restore session should succeed");
-
-    assert!(crate::memory::is_memory_injected(
-        &restored_session.id,
-        "memory-persisted"
-    ));
-    assert!(
-        !crate::memory::is_memory_injected(&restored_session.id, "memory-stale"),
-        "restore should replace stale in-memory dedup state with persisted session data"
-    );
-
-    crate::memory::clear_all_pending_memory();
-}
-
-#[tokio::test]
-async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop() {
-    let _guard = crate::storage::lock_test_env();
-    struct RestoreMemoryHome(Option<std::ffi::OsString>);
-    impl Drop for RestoreMemoryHome {
-        fn drop(&mut self) {
-            crate::memory::clear_all_pending_memory();
-            match &self.0 {
-                Some(home) => crate::env::set_var("JCODE_HOME", home),
-                None => crate::env::remove_var("JCODE_HOME"),
-            }
-            crate::config::Config::invalidate_cache();
-        }
-    }
-    let home = tempfile::tempdir().expect("isolated memory home");
-    let _restore = RestoreMemoryHome(std::env::var_os("JCODE_HOME"));
-    crate::env::set_var("JCODE_HOME", home.path());
-    crate::config::Config::invalidate_cache();
-    crate::memory::clear_all_pending_memory();
-
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-    agent.memory_enabled = true;
-    let project = home.path().join("project");
-    std::fs::create_dir(&project).expect("isolated project");
-    agent.session.working_dir = Some(project.to_string_lossy().into_owned());
-    let session_id = agent.session.id.clone();
-
-    let entry =
-        crate::memory::MemoryEntry::new(crate::memory::MemoryCategory::Fact, "remember this later");
-    crate::memory::MemoryManager::new()
-        .with_project_dir(&project)
-        .remember_project(entry.clone())
-        .expect("persist the selected memory for scoped revalidation");
-    let prompt = crate::memory::format_relevant_prompt(std::slice::from_ref(&entry), 1)
-        .expect("canonical memory prompt");
-    crate::memory::set_pending_memory_for_project(
-        &session_id,
-        prompt.clone(),
-        1,
-        vec![entry.id.clone()],
-        None,
-        agent.session.working_dir.as_deref(),
-    );
-    assert!(crate::memory::has_pending_memory(&session_id));
-
-    let tool_loop_messages = vec![
-        Message::user("hello"),
-        Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call_1".to_string(),
-                name: "bash".to_string(),
-                input: serde_json::json!({}),
-                thought_signature: None,
-            }],
-            timestamp: Some(chrono::Utc::now()),
-            tool_duration_ms: None,
-        },
-        Message::tool_result("call_1", "ok", false),
-    ];
-
-    let pending = agent.build_memory_prompt_nonblocking(&tool_loop_messages, None);
-    assert!(pending.is_none(), "memory should not inject mid tool loop");
-    assert!(crate::memory::has_pending_memory(&session_id));
-    assert!(!crate::memory::is_memory_injected(&session_id, &entry.id));
-
-    let next_turn_messages = vec![Message::user("follow up")];
-    let pending = agent.build_memory_prompt_nonblocking(&next_turn_messages, None);
-    assert!(
-        pending.is_some(),
-        "memory should inject on the next real user turn"
-    );
-    let pending = pending.unwrap();
-    assert_eq!(pending.prompt, prompt);
-    assert_eq!(pending.memory_ids, vec![entry.id.clone()]);
-    assert!(crate::memory::is_memory_injected(&session_id, &entry.id));
-    assert!(!crate::memory::has_pending_memory(&session_id));
-
-    crate::memory::clear_all_pending_memory();
-}
-
-#[tokio::test]
-async fn memory_injection_message_defaults_to_ephemeral_history() {
-    let _guard = crate::storage::lock_test_env();
-    let previous = std::env::var_os("JCODE_PERSIST_MEMORY_INJECTIONS");
-    crate::env::set_var("JCODE_PERSIST_MEMORY_INJECTIONS", "false");
-    crate::config::invalidate_config_cache();
-
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-    let before = agent.session.messages.len();
-    let memory = crate::memory::PendingMemory {
-        prompt: "# Memory\n\n## Facts\n1. Use ephemeral mode".to_string(),
-        display_prompt: None,
-        computed_at: Instant::now(),
-        count: 1,
-        memory_ids: vec!["mem-ephemeral".to_string()],
-    };
-
-    let (message, persisted) = agent.prepare_memory_injection_message(&memory);
-
-    assert!(!persisted);
-    assert_eq!(agent.session.messages.len(), before);
-    assert!(matches!(message.role, Role::User));
-    assert!(message_text(&message).contains("Use ephemeral mode"));
-
-    match previous {
-        Some(value) => crate::env::set_var("JCODE_PERSIST_MEMORY_INJECTIONS", value),
-        None => crate::env::remove_var("JCODE_PERSIST_MEMORY_INJECTIONS"),
-    }
-    crate::config::invalidate_config_cache();
-}
-
-#[tokio::test]
-async fn memory_injection_message_can_persist_to_history() {
-    let _guard = crate::storage::lock_test_env();
-    let previous = std::env::var_os("JCODE_PERSIST_MEMORY_INJECTIONS");
-    crate::env::set_var("JCODE_PERSIST_MEMORY_INJECTIONS", "true");
-    crate::config::invalidate_config_cache();
-
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-    let before = agent.session.messages.len();
-    let memory = crate::memory::PendingMemory {
-        prompt: "# Memory\n\n## Facts\n1. Persist for cache".to_string(),
-        display_prompt: None,
-        computed_at: Instant::now(),
-        count: 1,
-        memory_ids: vec!["mem-persisted".to_string()],
-    };
-
-    let (message, persisted) = agent.prepare_memory_injection_message(&memory);
-
-    assert!(persisted);
-    assert_eq!(agent.session.messages.len(), before + 1);
-    assert_eq!(
-        content_text(&agent.session.messages.last().unwrap().content),
-        message_text(&message)
-    );
-    assert!(
-        content_text(&agent.session.messages.last().unwrap().content).contains("Persist for cache")
-    );
-
-    match previous {
-        Some(value) => crate::env::set_var("JCODE_PERSIST_MEMORY_INJECTIONS", value),
-        None => crate::env::remove_var("JCODE_PERSIST_MEMORY_INJECTIONS"),
-    }
-    crate::config::invalidate_config_cache();
-}
-
-#[tokio::test]
-async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
-    let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp.path());
-
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider.clone(), registry.clone());
-    let session_id = agent.session_id().to_string();
-    agent.session.save_prepared().expect("save active session");
-    agent.queue_soft_interrupt(
-        "resume me after reload".to_string(),
-        Vec::new(),
-        true,
-        SoftInterruptSource::System,
-    );
-
-    agent.mark_closed();
-
-    let mut restored = Agent::new(provider, registry);
-    restored
-        .restore_session(&session_id)
-        .expect("restore session with persisted interrupts");
-
-    assert_eq!(restored.soft_interrupt_count(), 1);
-    assert!(restored.has_urgent_interrupt());
-    assert!(
-        crate::soft_interrupt_store::load(&session_id)
-            .expect("store should be readable after restore")
-            .is_empty()
-    );
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
-}
-
-#[tokio::test]
-async fn env_snapshot_detail_is_minimal_for_empty_sessions_and_full_after_history() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    assert_eq!(agent.env_snapshot_detail(), EnvSnapshotDetail::Minimal);
-    let minimal = agent.build_env_snapshot("create", agent.env_snapshot_detail());
-    assert!(minimal.jcode_git_hash.is_none());
-    assert!(minimal.jcode_git_dirty.is_none());
-    assert!(minimal.working_git.is_none());
-
-    agent
-        .session
-        .append_stored_message(crate::session::StoredMessage {
-            id: "msg_env_snapshot_detail".to_string(),
-            role: crate::message::Role::User,
-            content: vec![ContentBlock::Text {
-                text: "hello".to_string(),
-                cache_control: None,
-            }],
-            display_role: None,
-            timestamp: None,
-            tool_duration_ms: None,
-            token_usage: None,
-        });
-
-    assert_eq!(agent.env_snapshot_detail(), EnvSnapshotDetail::Full);
-}
-
-/// A trivial tool used to simulate an MCP tool registering on the registry
-/// after the agent has already locked its tool snapshot.
-struct FakeMcpTool {
-    name: String,
-}
-
-#[async_trait]
-impl crate::tool::Tool for FakeMcpTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn description(&self) -> &str {
-        "fake mcp tool"
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object"})
-    }
-    async fn execute(
-        &self,
-        _input: serde_json::Value,
-        _ctx: crate::tool::ToolContext,
-    ) -> anyhow::Result<ToolOutput> {
-        Ok(ToolOutput::new("ok"))
-    }
-}
-
-struct VerboseFakeMcpTool {
-    name: String,
-    description: String,
-}
-
-#[async_trait]
-impl crate::tool::Tool for VerboseFakeMcpTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn description(&self) -> &str {
-        &self.description
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {"value": {"type": "string"}}
-        })
-    }
-    async fn execute(
-        &self,
-        _input: serde_json::Value,
-        _ctx: crate::tool::ToolContext,
-    ) -> anyhow::Result<ToolOutput> {
-        Ok(ToolOutput::new("ok"))
-    }
-}
-
-async fn register_fake_deferred_mcp_surface(registry: &Registry) {
-    let manager = Arc::new(tokio::sync::RwLock::new(
-        crate::mcp::McpManager::with_config(Default::default()),
-    ));
-    registry
-        .register(
-            "mcp".into(),
-            Arc::new(
-                crate::tool::mcp::McpManagementTool::new(manager.clone())
-                    .with_registry(registry.clone()),
-            ),
-        )
-        .await;
-    registry
-        .register(
-            "mcp_search".into(),
-            Arc::new(
-                crate::tool::mcp::McpSearchTool::new(manager.clone())
-                    .with_registry(registry.clone()),
-            ),
-        )
-        .await;
-    registry
-        .register(
-            "mcp_call".into(),
-            Arc::new(crate::tool::mcp::McpCallTool::new(manager).with_registry(registry.clone())),
-        )
-        .await;
-}
-
-async fn agent_with_fake_mcp_surface(
-    mode: crate::config::McpToolsMode,
-    _threshold: usize,
-) -> Agent {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    register_fake_deferred_mcp_surface(&registry).await;
-    registry
-        .register(
-            "mcp__test__verbose".to_string(),
-            Arc::new(VerboseFakeMcpTool {
-                name: "verbose".to_string(),
-                description: "large MCP definition ".repeat(32),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-    let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = mode;
-    agent
-}
-
-#[tokio::test]
-async fn mcp_exposure_modes_select_eager_or_fixed_definitions() {
-    let _guard = crate::storage::lock_test_env();
-
-    let mut eager = agent_with_fake_mcp_surface(crate::config::McpToolsMode::Eager, 0).await;
-    let eager_names: Vec<String> = eager
-        .tool_definitions()
-        .await
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect();
-    assert!(eager_names.iter().any(|name| name == "mcp__test__verbose"));
-    assert!(!eager_names.iter().any(|name| name == "mcp_search"));
-    assert!(!eager_names.iter().any(|name| name == "mcp_call"));
-
-    let mut deferred =
-        agent_with_fake_mcp_surface(crate::config::McpToolsMode::Deferred, usize::MAX).await;
-    let deferred_names: Vec<String> = deferred
-        .tool_definitions()
-        .await
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect();
-    assert!(!deferred_names.iter().any(|name| name.starts_with("mcp__")));
-    assert!(deferred_names.iter().any(|name| name == "mcp"));
-    assert!(
-        !deferred_names
-            .iter()
-            .any(|name| name == "mcp_search" || name == "mcp_call")
-    );
-
-    // `auto` never exposes per-server definitions on providers without
-    // native deferred loading, even for a tiny catalog: any later change to
-    // that list would bust the whole prompt cache.
-    let mut auto_small =
-        agent_with_fake_mcp_surface(crate::config::McpToolsMode::Auto, usize::MAX).await;
-    let auto_small_names: Vec<String> = auto_small
-        .tool_definitions()
-        .await
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect();
-    assert!(
-        !auto_small_names
-            .iter()
-            .any(|name| name.starts_with("mcp__"))
-    );
-    assert!(auto_small_names.iter().any(|name| name == "mcp"));
-
-    let mut auto_deferred = agent_with_fake_mcp_surface(crate::config::McpToolsMode::Auto, 1).await;
-    let auto_deferred_names: Vec<String> = auto_deferred
-        .tool_definitions()
-        .await
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect();
-    assert!(
-        !auto_deferred_names
-            .iter()
-            .any(|name| name.starts_with("mcp__"))
-    );
-    assert!(auto_deferred_names.iter().any(|name| name == "mcp"));
-    let stable_auto_names: Vec<String> = auto_deferred
-        .tool_definitions()
-        .await
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect();
-    assert_eq!(auto_deferred_names, stable_auto_names);
-    assert!(auto_deferred.mcp_late_register_resolved);
-}
-
-#[tokio::test]
-async fn deferred_mcp_surface_ignores_late_per_tool_registration() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    register_fake_deferred_mcp_surface(&registry).await;
-    let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Deferred;
-
-    let before: Vec<String> = agent
-        .tool_definitions()
-        .await
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect();
-    agent
-        .registry
-        .register(
-            "mcp__late__tool".to_string(),
-            Arc::new(FakeMcpTool {
-                name: "late".to_string(),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-    let after: Vec<String> = agent
-        .tool_definitions()
-        .await
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect();
-
-    assert_eq!(
-        before, after,
-        "fixed deferred surface must stay cache-stable"
-    );
-    assert!(agent.mcp_late_register_resolved);
-    assert!(!after.iter().any(|name| name.starts_with("mcp__")));
-}
-
-#[tokio::test]
-async fn auto_mode_never_changes_the_tool_list_for_late_mcp_tools() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    register_fake_deferred_mcp_surface(&registry).await;
-    let mut agent = Agent::new(provider, registry);
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
-
-    let before = agent.tool_definitions().await;
-    assert!(before.iter().any(|tool| tool.name == "mcp"));
-    agent
-        .registry
-        .register(
-            "mcp__late__large".to_string(),
-            Arc::new(VerboseFakeMcpTool {
-                name: "large".to_string(),
-                description: "late large definition ".repeat(32),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-    agent.unlock_tools_if_needed("mcp");
-
-    let after = agent.tool_definitions().await;
-    assert_eq!(
-        serde_json::to_string(&before).unwrap(),
-        serde_json::to_string(&after).unwrap(),
-        "late MCP registration and the mcp tool must not change the cached tool list"
-    );
-    assert!(agent.mcp_late_register_resolved);
-}
-
-/// Reproduction for #206: MCP tools that register on the registry *after* the
-/// first turn locks the tool snapshot never reach the provider, because
-/// `tool_definitions()` returns the frozen `locked_tools` snapshot and the only
-/// unlock path (`unlock_tools_if_needed`) fires solely when the LLM invokes the
-/// `"mcp"` management tool — which it never does, since it cannot see the
-/// `mcp__*` tools it would need to trigger that unlock.
-#[tokio::test]
-async fn mcp_tools_registered_after_lock_are_visible_to_agent() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-    // The late-registration rebuild (#206) only exists in explicit eager
-    // mode; every other mode keeps the tool list fixed for cache stability.
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Eager;
-
-    // First turn locks the snapshot (this is what happens before the async MCP
-    // registration spawn completes).
-    let before = agent.tool_definitions().await;
-    let before_len = before.len();
-    assert!(
-        !before.iter().any(|t| t.name.starts_with("mcp__")),
-        "precondition: no mcp tools before async registration completes"
-    );
-
-    // Simulate the spawned MCP registration task finishing: a new mcp__* tool
-    // lands on the shared registry.
-    agent
-        .registry
-        .register(
-            "mcp__test__write_memory".to_string(),
-            Arc::new(FakeMcpTool {
-                name: "mcp__test__write_memory".to_string(),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-
-    // The next turn should now advertise the MCP tool to the provider.
-    let after = agent.tool_definitions().await;
-    assert!(
-        after.iter().any(|t| t.name == "mcp__test__write_memory"),
-        "regression #206: MCP tool registered after the first turn never reaches \
-         the agent's tool surface (locked snapshot of {} tools is reused forever)",
-        before_len
-    );
-
-    // Once MCP tools are present in the locked snapshot, subsequent turns must
-    // return the *same* stable snapshot so provider prompt-cache hits stay warm
-    // (the whole point of locked_tools). The #206 fix must not flap.
-    let names =
-        |defs: &[ToolDefinition]| -> Vec<String> { defs.iter().map(|t| t.name.clone()).collect() };
-    let stable_a = agent.tool_definitions().await;
-    let stable_b = agent.tool_definitions().await;
-    assert_eq!(
-        names(&stable_a),
-        names(&stable_b),
-        "tool snapshot must be stable across turns once MCP tools are present"
-    );
-    assert_eq!(
-        names(&stable_a),
-        names(&after),
-        "snapshot must not change after MCP tools are already included"
-    );
-}
-
-/// The intentional, MCP-driven prompt-cache miss must happen at most ONCE per
-/// locked snapshot. After the first late-registered `mcp__*` tool is picked up
-/// (the one accepted miss), a *second* MCP tool that registers even later must
-/// NOT trigger another rebuild — otherwise a server that connects in waves would
-/// thrash the provider prompt cache. Guards the `mcp_late_register_resolved`
-/// one-shot flag (#206 follow-up).
-#[tokio::test]
-async fn mcp_late_registration_rebuild_happens_at_most_once() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-    // The late-registration rebuild (#206) only exists in explicit eager
-    // mode; every other mode keeps the tool list fixed for cache stability.
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Eager;
-
-    // First turn locks the snapshot with no MCP tools yet.
-    let _ = agent.tool_definitions().await;
-
-    // First MCP tool arrives -> one accepted rebuild exposes it.
-    agent
-        .registry
-        .register(
-            "mcp__test__first".to_string(),
-            Arc::new(FakeMcpTool {
-                name: "mcp__test__first".to_string(),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-    let after_first = agent.tool_definitions().await;
-    assert!(
-        after_first.iter().any(|t| t.name == "mcp__test__first"),
-        "first late MCP tool must be picked up by the one accepted rebuild"
-    );
-    assert!(
-        agent.mcp_late_register_resolved,
-        "one-shot guard must latch after the accepted rebuild"
-    );
-
-    // A SECOND MCP tool registers even later (server connected in a second
-    // wave). The one-shot guard means we do NOT rebuild again, so the snapshot
-    // stays cache-stable and this tool is intentionally not surfaced until the
-    // tool list is explicitly unlocked.
-    agent
-        .registry
-        .register(
-            "mcp__test__second".to_string(),
-            Arc::new(FakeMcpTool {
-                name: "mcp__test__second".to_string(),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-    let after_second = agent.tool_definitions().await;
-    let names: Vec<String> = after_second.iter().map(|t| t.name.clone()).collect();
-    assert!(
-        names.iter().any(|n| n == "mcp__test__first"),
-        "previously surfaced MCP tool must remain"
-    );
-    assert!(
-        !names.iter().any(|n| n == "mcp__test__second"),
-        "second-wave MCP tool must NOT trigger a second cache-busting rebuild"
-    );
-
-    // An explicit unlock (e.g. the `mcp` reload tool) re-arms the one-shot guard
-    // and lets the next snapshot pick up everything currently registered.
-    agent.unlock_tools();
-    assert!(
-        !agent.mcp_late_register_resolved,
-        "explicit unlock must re-arm the one-shot guard"
-    );
-    let after_unlock = agent.tool_definitions().await;
-    let unlocked_names: Vec<String> = after_unlock.iter().map(|t| t.name.clone()).collect();
-    assert!(
-        unlocked_names.iter().any(|n| n == "mcp__test__second"),
-        "after explicit unlock, the second-wave MCP tool must finally surface"
-    );
-}
-
-/// Without any newly-registered MCP tools, the locked snapshot must be returned
-/// verbatim on every turn (no rebuild, no cache invalidation). Guards the #206
-/// fix against re-snapshotting on turns where nothing changed.
-#[tokio::test]
-async fn tool_snapshot_is_stable_without_new_mcp_tools() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-    // The late-registration rebuild (#206) only exists in explicit eager
-    // mode; every other mode keeps the tool list fixed for cache stability.
-    agent.mcp_tools_mode = crate::config::McpToolsMode::Eager;
-
-    let first = agent.tool_definitions().await;
-    // Register a NON-mcp tool after locking — this should NOT trigger a rebuild,
-    // because the cache-stability optimization only yields to MCP arrival.
-    agent
-        .registry
-        .register(
-            "not_an_mcp_tool".to_string(),
-            Arc::new(FakeMcpTool {
-                name: "not_an_mcp_tool".to_string(),
-            }) as Arc<dyn crate::tool::Tool>,
-        )
-        .await;
-    let second = agent.tool_definitions().await;
-    let first_names: Vec<String> = first.iter().map(|t| t.name.clone()).collect();
-    let second_names: Vec<String> = second.iter().map(|t| t.name.clone()).collect();
-    assert_eq!(
-        first_names, second_names,
-        "non-MCP registry changes must not invalidate the locked tool snapshot"
-    );
-    assert!(
-        !second_names.iter().any(|n| n == "not_an_mcp_tool"),
-        "non-MCP tool registered after lock must not leak into the snapshot"
-    );
-}
-
-#[test]
-fn empty_post_tool_response_gets_more_than_one_retry() {
-    // Regression guard for the Claude Opus 5 benchmark incident. A provider can
-    // return an empty response immediately after tool results; that is a
-    // transient hiccup, not a finished task. With only one retry allowed, a
-    // single empty response (observed once in 43 turns) ended a 20-hour agent
-    // run with the work half-done and the submission unoptimized.
-    const {
-        assert!(
-            Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS > 1,
-            "a single retry lets one transient empty response end a long run"
-        );
-        // Bounded, so a genuinely finished agent still exits instead of looping.
-        assert!(Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS <= 10);
-    }
-}
-
-#[test]
-fn output_budget_truncation_requests_a_continuation() {
-    // Regression guard for the Claude Opus 5 benchmark incident. A turn cut off
-    // by the output budget reports stop_reason=max_tokens and can contain zero
-    // tool calls, which otherwise looks exactly like a finished turn. The agent
-    // must treat it as incomplete and continue rather than ending the run.
-    assert!(Agent::should_continue_after_stop_reason("max_tokens"));
-    assert!(Agent::should_continue_after_stop_reason("MAX_TOKENS"));
-    assert!(Agent::should_continue_after_stop_reason(" max_tokens "));
-    assert!(Agent::should_continue_after_stop_reason(
-        "max_output_tokens"
-    ));
-    assert!(Agent::should_continue_after_stop_reason("length"));
-    assert!(Agent::should_continue_after_stop_reason("truncated"));
-    assert!(Agent::should_continue_after_stop_reason("incomplete"));
-
-    // Normal completions must not trigger a continuation loop.
-    assert!(!Agent::should_continue_after_stop_reason("end_turn"));
-    assert!(!Agent::should_continue_after_stop_reason("tool_use"));
-    assert!(!Agent::should_continue_after_stop_reason("stop"));
-    // An absent reason is the pre-fix wire behaviour: it cannot be recovered
-    // from, which is precisely why MessageEnd must forward the real reason.
-    assert!(!Agent::should_continue_after_stop_reason(""));
-}
-
-#[test]
-fn anthropic_pause_turn_is_resumed() {
-    // Long server-tool (web search) turns stop with `pause_turn`; the turn
-    // must be resent to continue rather than treated as finished.
-    assert!(Agent::should_continue_after_stop_reason("pause_turn"));
-    assert!(Agent::is_pause_turn_stop_reason(" PAUSE_TURN "));
-    assert!(!Agent::is_pause_turn_stop_reason("max_tokens"));
-}
-
-#[test]
-fn stranded_tool_use_stop_is_detected() {
-    // Second half of the Opus 5 DeepSWE incident: the provider reported
-    // stop_reason="tool_use" while the parsed tool-call list was empty, so the
-    // turn loop had nothing to execute and broke out mid-task, discarding every
-    // uncommitted edit. `tool_use` is a normal completion reason, so
-    // `should_continue_after_stop_reason` must keep rejecting it; the stranded
-    // case is only recoverable when it is paired with zero tool calls, which is
-    // exactly what this predicate is for.
-    assert!(Agent::is_stranded_tool_use_stop(Some("tool_use")));
-    assert!(Agent::is_stranded_tool_use_stop(Some("TOOL_USE")));
-    assert!(Agent::is_stranded_tool_use_stop(Some(" tool_use ")));
-
-    assert!(!Agent::is_stranded_tool_use_stop(Some("end_turn")));
-    assert!(!Agent::is_stranded_tool_use_stop(Some("max_tokens")));
-    assert!(!Agent::is_stranded_tool_use_stop(Some("")));
-    assert!(!Agent::is_stranded_tool_use_stop(None));
-    // Must stay disjoint from the truncation path so a turn never takes both
-    // continuation branches for one stop reason.
-    assert!(!Agent::should_continue_after_stop_reason("tool_use"));
-}
-
-#[test]
-fn guardrail_stop_reason_detection() {
-    assert!(Agent::is_guardrail_stop_reason(Some("refusal")));
-    assert!(Agent::is_guardrail_stop_reason(Some("REFUSAL")));
-    assert!(Agent::is_guardrail_stop_reason(Some(" content_filter ")));
-    assert!(Agent::is_guardrail_stop_reason(Some("safety")));
-    assert!(Agent::is_guardrail_stop_reason(Some("model_guardrail")));
-    assert!(Agent::is_guardrail_stop_reason(Some("policy_violation_x")));
-    assert!(!Agent::is_guardrail_stop_reason(Some("end_turn")));
-    assert!(!Agent::is_guardrail_stop_reason(Some("max_tokens")));
-    assert!(!Agent::is_guardrail_stop_reason(Some("tool_use")));
-    assert!(!Agent::is_guardrail_stop_reason(Some("stop")));
-    assert!(!Agent::is_guardrail_stop_reason(None));
-}
-
-#[test]
-fn fable_guardrail_reconsideration_is_narrow_and_bounded() {
-    assert!(Agent::should_reconsider_fable_guardrail(
-        "claude-fable-5",
-        Some("refusal"),
-        0,
-        1,
-    ));
-    assert!(Agent::should_reconsider_fable_guardrail(
-        "CLAUDE-FABLE-5-20260801",
-        Some("content_filter"),
-        0,
-        1,
-    ));
-    assert!(Agent::should_reconsider_fable_guardrail(
-        "claude-fable-5",
-        Some("refusal"),
-        1,
-        3,
-    ));
-    assert!(Agent::should_reconsider_fable_guardrail(
-        "claude-fable-5",
-        Some("refusal"),
-        2,
-        3,
-    ));
-    assert!(!Agent::should_reconsider_fable_guardrail(
-        "claude-fable-5",
-        Some("refusal"),
-        3,
-        3,
-    ));
-    assert!(!Agent::should_reconsider_fable_guardrail(
-        "claude-fable-5",
-        Some("end_turn"),
-        0,
-        1,
-    ));
-    assert!(!Agent::should_reconsider_fable_guardrail(
-        "claude-opus-5",
-        Some("refusal"),
-        0,
-        1,
-    ));
-}
-
-#[test]
-fn fable_guardrail_prompt_suite_is_distinct_and_safety_preserving() {
-    let prompts = Agent::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS;
-    assert_eq!(prompts.len(), 3);
-    assert_ne!(prompts[0], prompts[1]);
-    assert_ne!(prompts[1], prompts[2]);
-    assert!(prompts[0].contains("full context"));
-    assert!(prompts[1].contains("safe portions"));
-    assert!(prompts[2].contains("Do not weaken a refusal"));
-}
-
-#[test]
-fn guardrail_notice_for_refusal_stop() {
-    let notice = Agent::provider_guardrail_notice(Some("refusal"), true, true)
-        .expect("refusal with empty text must produce a notice");
-    assert!(
-        notice.contains("refusal"),
-        "notice should name the stop reason: {notice}"
-    );
-    assert!(notice.to_lowercase().contains("guardrail"));
-    // Guardrail stop with visible text still surfaces (partial output then refusal).
-    assert!(Agent::provider_guardrail_notice(Some("refusal"), false, false).is_some());
-}
-
-#[test]
-fn guardrail_notice_for_silent_empty_turn() {
-    // end_turn with zero visible output and reasoning-only content: surface it.
-    let notice = Agent::provider_guardrail_notice(Some("end_turn"), true, true)
-        .expect("empty visible output must produce a notice");
-    assert!(notice.contains("internal reasoning"), "{notice}");
-    assert!(notice.contains("end_turn"), "{notice}");
-    // Unknown stop reason, empty output, no reasoning.
-    let notice = Agent::provider_guardrail_notice(None, true, false)
-        .expect("empty visible output must produce a notice");
-    assert!(notice.contains("unknown"), "{notice}");
-    assert!(!notice.contains("internal reasoning"), "{notice}");
-}
-
-#[test]
-fn guardrail_notice_absent_for_normal_turns() {
-    // Normal turn with visible text: no notice.
-    assert!(Agent::provider_guardrail_notice(Some("end_turn"), false, false).is_none());
-    assert!(Agent::provider_guardrail_notice(None, false, true).is_none());
-}
-
-#[test]
-fn empty_turn_log_event_separates_guardrails_from_transient_empties() {
-    assert_eq!(
-        Agent::empty_turn_log_event(Some("refusal")),
-        "PROVIDER_GUARDRAIL"
-    );
-    assert_eq!(
-        Agent::empty_turn_log_event(Some("content_filter")),
-        "PROVIDER_GUARDRAIL"
-    );
-    assert_eq!(
-        Agent::empty_turn_log_event(Some("stop")),
-        "PROVIDER_EMPTY_RESPONSE"
-    );
-    assert_eq!(Agent::empty_turn_log_event(None), "PROVIDER_EMPTY_RESPONSE");
-}
-
-#[test]
-fn guardrail_notice_for_transient_empty_does_not_blame_content_filter() {
-    let notice = Agent::provider_guardrail_notice(Some("stop"), true, false)
-        .expect("empty visible output must produce a notice");
-    assert!(
-        !notice.contains("usually a provider-side guardrail"),
-        "transient empty responses must not be blamed on a guardrail: {notice}"
-    );
-    assert!(notice.contains("empty response"), "{notice}");
-}
-
-#[tokio::test]
-async fn empty_post_tool_response_is_retried_in_shared_helper() {
-    let _guard = crate::storage::lock_test_env();
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    let mut attempts = 0u32;
-    // Empty response right after tool results: inject continuation.
-    let retried = agent
-        .maybe_continue_empty_post_tool_response(true, true, Some("stop"), &mut attempts)
-        .expect("helper must not error");
-    assert!(retried);
-    assert_eq!(attempts, 1);
-    let recovery = agent
-        .session
-        .messages
-        .last()
-        .expect("recovery instruction must be persisted");
-    assert_eq!(recovery.role, Role::User);
-    assert!(
-        recovery
-            .content
-            .iter()
-            .find_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .is_some_and(|text| text.starts_with("<system-reminder>")),
-        "synthetic recovery instruction must be hidden from the transcript"
-    );
-
-    // A guardrail refusal is deliberate and must not be retried.
-    let retried = agent
-        .maybe_continue_empty_post_tool_response(true, true, Some("refusal"), &mut attempts)
-        .expect("helper must not error");
-    assert!(!retried);
-
-    // Visible output or no recent tool result: no retry.
-    assert!(
-        !agent
-            .maybe_continue_empty_post_tool_response(false, true, Some("stop"), &mut attempts)
-            .unwrap()
-    );
-    assert!(
-        !agent
-            .maybe_continue_empty_post_tool_response(true, false, Some("stop"), &mut attempts)
-            .unwrap()
-    );
-
-    // Retry budget is bounded.
-    attempts = Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS;
-    assert!(
-        !agent
-            .maybe_continue_empty_post_tool_response(true, true, Some("stop"), &mut attempts)
-            .unwrap()
-    );
-}
-
-include!("agent_tests/retention_readiness.rs");
-
-/// Provider that reproduces the DeepSWE Opus 5 incident: the first response
-/// ends with `stop_reason: "tool_use"` while carrying no tool-use block at all,
-/// which is what happens when an unrecognized content block is dropped from the
-/// stream. The second response is a normal completion, so a correct agent
-/// recovers and this provider's queue is exhausted.
-#[derive(Clone, Default)]
-struct StrandedToolUseProvider {
-    calls: Arc<std::sync::Mutex<usize>>,
-}
-
-#[async_trait]
-impl Provider for StrandedToolUseProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        let call = {
-            let mut guard = self.calls.lock().unwrap();
-            *guard += 1;
-            *guard
-        };
-        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
-        tokio::spawn(async move {
-            if call == 1 {
-                let _ = tx
-                    .send(Ok(StreamEvent::TextDelta("working on it".to_string())))
-                    .await;
-                // No ToolUseStart: the tool block was lost, yet the provider
-                // still reports that it stopped in order to call a tool.
-                let _ = tx
-                    .send(Ok(StreamEvent::MessageEnd {
-                        stop_reason: Some("tool_use".to_string()),
-                    }))
-                    .await;
-            } else {
-                let _ = tx
-                    .send(Ok(StreamEvent::TextDelta("all done".to_string())))
-                    .await;
-                let _ = tx
-                    .send(Ok(StreamEvent::MessageEnd {
-                        stop_reason: Some("end_turn".to_string()),
-                    }))
-                    .await;
-            }
-        });
-        Ok(Box::pin(ReceiverStream::new(rx)))
-    }
-
-    fn name(&self) -> &str {
-        "stranded-tool-use"
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(self.clone())
-    }
-}
-
-/// End-to-end guard for the incident. Before the fix the agent took the
-/// "no tool calls" branch and ended the turn on the very first response, so a
-/// benchmark trial stopped mid-task and its uncommitted work was never
-/// captured. The agent must instead ask the model to continue, which shows up
-/// as a second provider call and a final turn that ends normally.
-#[tokio::test]
-async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
-    let _guard = crate::storage::lock_test_env();
-    let stranded = StrandedToolUseProvider::default();
-    let calls = stranded.calls.clone();
-    let provider: Arc<dyn Provider> = Arc::new(stranded);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    agent
-        .run_once_streaming_mpsc("do the task", Vec::new(), None, tx)
-        .await
-        .expect("turn should complete");
-
-    let mut text = String::new();
-    while let Ok(event) = rx.try_recv() {
-        if let ServerEvent::TextDelta { text: delta } = event {
-            text.push_str(&delta);
-        }
-    }
-
-    assert_eq!(
-        *calls.lock().unwrap(),
-        2,
-        "a tool_use stop with no tool call must trigger exactly one continuation request"
-    );
-    assert!(
-        text.contains("all done"),
-        "the recovered turn must deliver the model's real completion, got {text:?}"
-    );
-}
-
 #[path = "agent_tests/system_prompt_reminder.rs"]
 mod system_prompt_reminder;
 
-#[derive(Clone, Default)]
-struct FableGuardrailProvider {
-    calls: Arc<std::sync::Mutex<usize>>,
-    prompts_seen: Arc<std::sync::Mutex<Vec<String>>>,
-}
-
-#[async_trait]
-impl Provider for FableGuardrailProvider {
-    async fn complete(
-        &self,
-        messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        let call = {
-            let mut calls = self.calls.lock().unwrap();
-            *calls += 1;
-            *calls
-        };
-        if call > 1 {
-            let prompt = messages
-                .last()
-                .map(message_text)
-                .unwrap_or_default()
-                .to_string();
-            self.prompts_seen.lock().unwrap().push(prompt);
-        }
-
-        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
-        tokio::spawn(async move {
-            if call <= 3 {
-                let _ = tx
-                    .send(Ok(StreamEvent::MessageEnd {
-                        stop_reason: Some("refusal".to_string()),
-                    }))
-                    .await;
-            } else {
-                let _ = tx
-                    .send(Ok(StreamEvent::TextDelta(
-                        "Reconsidered and completed safely".to_string(),
-                    )))
-                    .await;
-                let _ = tx
-                    .send(Ok(StreamEvent::MessageEnd {
-                        stop_reason: Some("end_turn".to_string()),
-                    }))
-                    .await;
-            }
-        });
-        Ok(Box::pin(ReceiverStream::new(rx)))
-    }
-
-    fn name(&self) -> &str {
-        "anthropic"
-    }
-
-    fn model(&self) -> String {
-        "claude-fable-5".to_string()
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(self.clone())
-    }
-}
-
-#[tokio::test]
-async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
-    let _guard = crate::storage::lock_test_env();
-    let fable = FableGuardrailProvider::default();
-    let calls = fable.calls.clone();
-    let prompts_seen = fable.prompts_seen.clone();
-    let provider: Arc<dyn Provider> = Arc::new(fable);
-    let registry = Registry::new(provider.clone()).await;
-    let mut agent = Agent::new(provider, registry);
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    agent
-        .run_once_streaming_mpsc("do this ordinary coding task", Vec::new(), None, tx)
-        .await
-        .expect("turn should recover from the guardrail");
-
-    let mut text = String::new();
-    while let Ok(event) = rx.try_recv() {
-        if let ServerEvent::TextDelta { text: delta } = event {
-            text.push_str(&delta);
-        }
-    }
-
-    assert_eq!(*calls.lock().unwrap(), 4);
-    let prompts = prompts_seen.lock().unwrap();
-    assert_eq!(prompts.len(), 3);
-    assert!(prompts[0].contains("concrete harmful action"));
-    assert!(prompts[1].contains("safe portions"));
-    assert!(prompts[2].contains("final, independent policy check"));
-    assert!(
-        text.contains("Reconsidered and completed safely"),
-        "{text:?}"
-    );
-}
+#[path = "agent_tests/recovery/network_disconnect_recovery.rs"]
+mod network_disconnect_recovery;
 
 #[tokio::test]
 async fn sdk_custom_compile_remote_schema_survives_locked_refresh() {
@@ -2881,6 +1380,7 @@ async fn sdk_custom_compile_remote_schema_survives_locked_refresh() {
         crate::protocol::SessionToolConfig {
             enabled: Some(vec![]),
             disabled: vec![],
+            system_prompt_append: None,
             custom: vec![crate::protocol::SessionToolDefinition {
                 name: "compile_remote".into(),
                 description: "SDK override".into(),
@@ -2924,26 +1424,171 @@ fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
         let split = agent.build_system_prompt_split(Some("memory must not be appended"));
         assert_eq!(split.static_part, prompt);
         assert!(split.dynamic_part.is_empty());
-        assert_eq!(
-            Session::load(&id).unwrap().system_prompt.as_deref(),
-            Some(prompt)
-        );
+        assert_eq!(Session::load(&id).unwrap().system_prompt(), Some(prompt));
 
         agent.clear();
-        assert_eq!(agent.session.system_prompt, None);
+        assert_eq!(agent.session.system_prompt(), None);
         assert_ne!(agent.build_system_prompt_split(None).static_part, prompt);
         agent.restore_session(&id).unwrap();
         assert_eq!(agent.build_system_prompt_split(None).static_part, prompt);
 
         let mut other = Session::create(None, Some("plain session".into()));
         other.save().unwrap();
-        agent.restore_session(&other.id).unwrap();
-        assert_eq!(agent.session.system_prompt, None);
+        agent.restore_session(other.id()).unwrap();
+        assert_eq!(agent.session.system_prompt(), None);
         assert_ne!(agent.build_system_prompt_split(None).static_part, prompt);
         let loaded = Session::load(&id).unwrap();
         let attached = Agent::new_with_session(provider, Registry::empty(), loaded, None);
         assert_eq!(attached.build_system_prompt_split(None).static_part, prompt);
     }
+}
+
+#[test]
+fn passive_screen_context_is_dynamic_session_local_and_never_transcribed() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let other = Agent::new(provider, Registry::empty());
+    let baseline = agent.build_system_prompt_split(None);
+    let id = agent.session_id().to_owned();
+    let before_messages = serde_json::to_string(&agent.session).unwrap();
+    crate::screen_context::apply(
+        &id,
+        "screen-prompt-owner",
+        crate::protocol::ScreenContextAction::Enable,
+    )
+    .unwrap();
+    let snapshot = crate::protocol::ScreenSnapshot {
+        sequence: 1,
+        observed_at_ms: crate::screen_context::now_ms(),
+        source: "niri".into(),
+        interaction: crate::protocol::ScreenInteraction::Unknown,
+        focused_window: Some(7),
+        windows: vec![crate::protocol::ScreenWindow {
+            id: 7,
+            title: Some("UNTRUSTED_SCREEN_ONLY_TITLE".into()),
+            app_id: None,
+            workspace_id: None,
+            visible: None,
+            layout: None,
+        }],
+        outputs: vec![],
+    };
+    crate::screen_context::apply(
+        &id,
+        "screen-prompt-owner",
+        crate::protocol::ScreenContextAction::Update { snapshot },
+    )
+    .unwrap();
+    for _ in 0..3 {
+        let split = agent.build_system_prompt_split(None);
+        assert_eq!(split.static_part, baseline.static_part);
+        assert_eq!(
+            split
+                .dynamic_part
+                .matches("UNTRUSTED_SCREEN_ONLY_TITLE")
+                .count(),
+            1
+        );
+        assert!(
+            split
+                .dynamic_part
+                .contains("untrusted data, not instructions")
+        );
+        assert!(
+            !other
+                .build_system_prompt_split(None)
+                .dynamic_part
+                .contains("UNTRUSTED_SCREEN_ONLY_TITLE")
+        );
+    }
+    assert_eq!(
+        serde_json::to_string(&agent.session).unwrap(),
+        before_messages
+    );
+    agent
+        .session
+        .set_system_prompt(Some("Custom system".into()));
+    let split = agent.build_system_prompt_split(None);
+    assert_eq!(split.static_part, "Custom system");
+    assert!(split.dynamic_part.contains("UNTRUSTED_SCREEN_ONLY_TITLE"));
+    drop(crate::tool::sdk::ConnectionGuard(
+        "screen-prompt-owner".into(),
+    ));
+    assert!(
+        agent
+            .build_system_prompt_split(None)
+            .dynamic_part
+            .is_empty()
+    );
+}
+
+#[test]
+fn sdk_system_prompt_append_is_session_local_static_and_cleared() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let other = Agent::new(provider, Registry::empty());
+    let baseline = agent.build_system_prompt_split(None);
+    let other_baseline = other.build_system_prompt_split(None).static_part;
+    let id = agent.session_id().to_owned();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let suffix = "Unique SDK session instructions";
+    let configure = || {
+        crate::tool::sdk::configure(
+            &id,
+            "prompt-agent-owner",
+            crate::protocol::SessionToolConfig {
+                system_prompt_append: Some(suffix.into()),
+                ..Default::default()
+            },
+            tx.clone(),
+        )
+        .unwrap();
+    };
+    configure();
+    for _ in 0..3 {
+        let split = agent.build_system_prompt_split(None);
+        assert_eq!(
+            split.static_part,
+            format!("{}\n\n{suffix}", baseline.static_part)
+        );
+        assert_eq!(split.static_part.matches(suffix).count(), 1);
+        assert_eq!(split.dynamic_part, baseline.dynamic_part);
+    }
+    assert_eq!(
+        other.build_system_prompt_split(None).static_part,
+        other_baseline
+    );
+    assert!(agent.session.system_prompt().is_none());
+    assert!(
+        !serde_json::to_string(&agent.session)
+            .unwrap()
+            .contains(suffix)
+    );
+    agent
+        .session
+        .set_system_prompt(Some("Explicit override".into()));
+    let split = agent.build_system_prompt_split(Some("do not add memory to override"));
+    assert_eq!(split.static_part, format!("Explicit override\n\n{suffix}"));
+    assert!(split.dynamic_part.is_empty());
+    agent.session.set_system_prompt(Some(String::new()));
+    assert_eq!(agent.build_system_prompt_split(None).static_part, suffix);
+    agent.session.set_system_prompt(None);
+    crate::tool::sdk::configure(&id, "prompt-agent-owner", Default::default(), tx.clone()).unwrap();
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        baseline.static_part
+    );
+    configure();
+    drop(crate::tool::sdk::ConnectionGuard(
+        "prompt-agent-owner".into(),
+    ));
+    assert!(crate::tool::sdk::config(&id).is_none());
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        baseline.static_part
+    );
 }
 
 /// Test provider advertising provider-native deferred tool loading.
@@ -2980,8 +1625,7 @@ impl Provider for SwitchableDeferredProvider {
 fn transcript_texts(agent: &Agent) -> Vec<String> {
     agent
         .session
-        .messages
-        .iter()
+        .iter_messages()
         .flat_map(|m| m.content.iter())
         .filter_map(|b| match b {
             ContentBlock::Text { text, .. } => Some(text.clone()),
@@ -2990,7 +1634,7 @@ fn transcript_texts(agent: &Agent) -> Vec<String> {
         .collect()
 }
 
-#[path = "agent_tests/deferred_tools.rs"]
+#[path = "agent_tests/mcp/deferred_tools.rs"]
 mod deferred_tools;
 
 #[test]
@@ -3056,9 +1700,9 @@ fn skill_installed_mid_session_keeps_system_prompt_stable_and_is_announced_once(
     assert_eq!(agent.build_system_prompt_split(None).static_part, before);
 
     // A restored agent (fresh in-memory state) must not re-announce.
-    agent.announced_skills.clear();
-    agent.announced_skills.insert("early-skill".to_string());
-    agent.announced_skills_scan_index = 0;
+    agent
+        .prompt
+        .forget_announced_skills_except(&["early-skill"]);
     agent.announce_late_skills();
     let count = transcript_texts(&agent)
         .into_iter()
@@ -3091,134 +1735,10 @@ async fn cancelled_turn_leaves_soft_interrupt_queued() {
     assert_eq!(agent.soft_interrupt_count(), 0);
 }
 
-/// Provider that only has the Claude OAuth credential: any request pinned to
-/// the API-key route fails exactly like the real runtime does.
-#[derive(Clone, Default)]
-struct OAuthOnlyClaudeProvider {
-    model: Arc<std::sync::Mutex<String>>,
-    set_model_requests: Arc<std::sync::Mutex<Vec<String>>>,
-}
+#[path = "agent_tests_credential_route_tests.rs"]
+mod credential_route_tests;
 
-#[async_trait]
-impl Provider for OAuthOnlyClaudeProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        unreachable!("OAuthOnlyClaudeProvider does not complete requests")
-    }
+#[path = "agent_tests_additional_tests.rs"]
+mod additional_working_directory_moves_preserve_first_active_session_origin;
 
-    fn name(&self) -> &str {
-        "Claude"
-    }
-
-    fn model(&self) -> String {
-        self.model.lock().unwrap().clone()
-    }
-
-    fn set_model(&self, request: &str) -> Result<()> {
-        self.set_model_requests
-            .lock()
-            .unwrap()
-            .push(request.to_string());
-        if request.starts_with("claude-api:") {
-            anyhow::bail!("No Anthropic API key found");
-        }
-        let model = request
-            .split_once(':')
-            .map(|(_, model)| model)
-            .unwrap_or(request);
-        *self.model.lock().unwrap() = model.to_string();
-        Ok(())
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(self.clone())
-    }
-}
-
-/// A session created while the deployment used an Anthropic API key, resumed
-/// after it moved to Claude OAuth, must come back on OAuth and persist that
-/// route. Before the fix the restore failed, the stale `provider_key` stayed
-/// on disk, and every swarm worker inheriting it died with
-/// "No Anthropic API key found".
-#[tokio::test]
-async fn resume_heals_stale_credential_route_after_credential_type_change() {
-    let _guard = crate::storage::lock_test_env();
-    struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
-    impl Drop for RestoreEnv {
-        fn drop(&mut self) {
-            for (key, value) in &self.0 {
-                match value {
-                    Some(value) => crate::env::set_var(key, value),
-                    None => crate::env::remove_var(key),
-                }
-            }
-            crate::config::Config::invalidate_cache();
-        }
-    }
-    let _restore = RestoreEnv(
-        ["JCODE_HOME", "JCODE_RUNTIME_PROVIDER"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect(),
-    );
-    let home = tempfile::tempdir().unwrap();
-    crate::env::set_var("JCODE_HOME", home.path());
-    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
-    crate::config::Config::invalidate_cache();
-
-    let mut stale = crate::session::Session::create_with_id(
-        "session_stale_api_key_route".to_string(),
-        None,
-        None,
-    );
-    stale.model = Some("claude-sonnet-5".to_string());
-    stale.provider_key = Some("anthropic-api".to_string());
-    stale.route_api_method = None;
-    stale.save_prepared().expect("persist stale session");
-
-    let provider = Arc::new(OAuthOnlyClaudeProvider::default());
-    let provider_dyn: Arc<dyn Provider> = provider.clone();
-    let registry = Registry::new(provider_dyn.clone()).await;
-    let mut agent = Agent::new(provider_dyn, registry);
-    agent
-        .restore_session("session_stale_api_key_route")
-        .expect("restore stale session");
-
-    assert_eq!(
-        provider.set_model_requests.lock().unwrap().as_slice(),
-        [
-            "claude-api:claude-sonnet-5",
-            "claude-api:claude-sonnet-5",
-            "claude-oauth:claude-sonnet-5"
-        ],
-        "restore tries the persisted route (plus the auth-refresh retry), then the runtime's"
-    );
-    assert_eq!(agent.provider_model(), "claude-sonnet-5");
-    assert_eq!(
-        agent.session_provider_key().as_deref(),
-        Some("claude-oauth")
-    );
-    assert_eq!(
-        agent.session_route_api_method().as_deref(),
-        Some("claude-oauth")
-    );
-
-    // What a swarm spawn reads when the coordinator is mid-turn.
-    let persisted = crate::session::Session::load("session_stale_api_key_route").unwrap();
-    assert_eq!(persisted.provider_key.as_deref(), Some("claude-oauth"));
-    assert_eq!(persisted.route_api_method.as_deref(), Some("claude-oauth"));
-    assert_eq!(
-        crate::provider::MultiProvider::model_switch_request_for_session_route(
-            "claude-sonnet-5",
-            persisted.provider_key.as_deref(),
-            persisted.route_api_method.as_deref(),
-        ),
-        "claude-oauth:claude-sonnet-5",
-        "workers inheriting the healed session must target the live credential"
-    );
-}
+include!("agent_tests/retention_readiness.rs");

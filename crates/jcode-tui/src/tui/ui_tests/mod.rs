@@ -1,8 +1,16 @@
 use super::*;
 
+#[path = "cards/cloud_directories.rs"]
 mod cloud_directories;
+#[path = "cards/codemode_preview.rs"]
 mod codemode_preview;
+#[path = "cards/compact_agent_dms.rs"]
+mod compact_agent_dms;
+#[path = "cards/preview_redraw_schedule.rs"]
 mod preview_redraw_schedule;
+#[path = "cards/queued_reminders.rs"]
+mod queued_reminders;
+#[path = "cards/resume_parity.rs"]
 mod resume_parity;
 use crate::tui::session_picker;
 use crate::tui::ui::tools_ui;
@@ -133,6 +141,7 @@ struct TestState {
     streaming_tools: Vec<ToolCall>,
     batch_progress: Option<crate::bus::BatchProgress>,
     queued_messages: Vec<String>,
+    server_queued_prompts: Vec<crate::protocol::QueuedPrompt>,
     pending_soft_interrupts: Vec<String>,
     interleave_message: Option<String>,
     status: ProcessingStatus,
@@ -163,20 +172,25 @@ struct TestState {
     status_notice: Option<String>,
     time_since_user_interaction: Option<Duration>,
     swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
-    transcript_swarm_members: Option<Vec<crate::protocol::SwarmMemberStatus>>,
     swarm_panel_selected: usize,
     swarm_panel_focused: bool,
     pinned_todos_payload: Option<String>,
     justrust_status: Option<crate::tui::justrust_status::StatusRow>,
     swarm_panel_full_page: bool,
+    palette_rows: Vec<(String, &'static str)>,
+    palette_info: std::collections::HashMap<String, crate::tui::CommandSuggestionInfo>,
+    palette_selected: usize,
 }
 
 impl crate::tui::TuiState for TestState {
+    fn server_queued_prompts(&self) -> &[crate::protocol::QueuedPrompt] {
+        &self.server_queued_prompts
+    }
     fn client_focused(&self) -> bool {
         !self.unfocused
     }
-    fn justrust_status(&self) -> Option<&crate::tui::justrust_status::StatusRow> {
-        self.justrust_status.as_ref()
+    fn justrust_status(&self) -> Option<crate::tui::justrust_status::StatusRow> {
+        self.justrust_status.clone()
     }
     fn pinned_todos_payload(&self) -> Option<&str> {
         self.pinned_todos_payload.as_deref()
@@ -187,7 +201,7 @@ impl crate::tui::TuiState for TestState {
     fn display_user_message_count(&self) -> usize {
         self.display_messages
             .iter()
-            .filter(|message| message.role == "user")
+            .filter(|message| message.role == "user" || message.is_answered_ask())
             .count()
     }
     fn compacted_hidden_user_prompts(&self) -> usize {
@@ -282,7 +296,13 @@ impl crate::tui::TuiState for TestState {
         self.status.clone()
     }
     fn command_suggestions(&self) -> Vec<(String, &'static str)> {
-        Vec::new()
+        self.palette_rows.clone()
+    }
+    fn command_suggestion_info(&self, command: &str) -> Option<crate::tui::CommandSuggestionInfo> {
+        self.palette_info.get(command).cloned()
+    }
+    fn command_suggestion_selected(&self) -> usize {
+        self.palette_selected
     }
     fn active_skill(&self) -> Option<String> {
         self.active_skill.clone()
@@ -344,11 +364,6 @@ impl crate::tui::TuiState for TestState {
     }
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         self.swarm_members.clone()
-    }
-    fn swarm_members_for_transcript(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
-        self.transcript_swarm_members
-            .clone()
-            .unwrap_or_else(|| self.swarm_members.clone())
     }
     fn swarm_panel_selected(&self) -> usize {
         self.swarm_panel_selected
@@ -476,8 +491,12 @@ impl crate::tui::TuiState for TestState {
     fn model_status_overlay(&self) -> Option<(usize, &str)> {
         None
     }
-    fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>> {
-        self.session_picker.as_deref()
+    fn session_picker_overlay(
+        &self,
+    ) -> Option<&std::cell::RefCell<dyn crate::tui::picker_overlay::SessionPickerOverlay>> {
+        self.session_picker.as_deref().map(|picker| {
+            picker as &std::cell::RefCell<dyn crate::tui::picker_overlay::SessionPickerOverlay>
+        })
     }
     fn login_picker_overlay(
         &self,
@@ -539,29 +558,32 @@ fn reset_prompt_viewport_state_for_test() {
     });
 }
 
-#[path = "pinned_todo_regressions.rs"]
+#[path = "cards/pinned_todo_regressions.rs"]
 mod pinned_todo_regressions;
+#[path = "cards/todo_blocker_notes.rs"]
 mod todo_blocker_notes;
 
 #[path = "basic.rs"]
 mod basic;
+#[path = "chrome/command_palette.rs"]
+mod command_palette;
 #[path = "diagrams.rs"]
 mod diagrams;
-#[path = "expanded_diff.rs"]
+#[path = "cards/expanded_diff.rs"]
 mod expanded_diff;
-#[path = "inline_picker.rs"]
+#[path = "chrome/inline_picker.rs"]
 mod inline_picker;
-#[path = "onboarding.rs"]
+#[path = "chrome/onboarding.rs"]
 mod onboarding;
-#[path = "palette_topology.rs"]
+#[path = "chrome/palette_topology.rs"]
 mod palette_topology;
 #[path = "prepare.rs"]
 mod prepared_messages_tests;
-#[path = "rendering.rs"]
+#[path = "chrome/rendering.rs"]
 mod rendering;
-#[path = "scrollbar_overlay.rs"]
+#[path = "chrome/scrollbar_overlay.rs"]
 mod scrollbar_overlay;
-#[path = "swarm_buffer.rs"]
+#[path = "chrome/swarm_buffer.rs"]
 mod swarm_buffer;
-#[path = "tools.rs"]
+#[path = "cards/tools.rs"]
 mod tools;

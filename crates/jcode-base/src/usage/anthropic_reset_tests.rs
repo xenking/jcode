@@ -132,6 +132,9 @@ fn only_explicit_denial_is_reported_as_ineligible() {
     assert!(!explicitly_ineligible(
         &json!({"juniper_tide": {"eligible": null}})
     ));
+    assert!(!explicitly_ineligible(
+        &json!({"juniper_tide": {"eligible": false, "ineligible_reason": "surface"}})
+    ));
     assert!(explicitly_ineligible(
         &json!({"juniper_tide": {"eligible": false}})
     ));
@@ -154,6 +157,17 @@ async fn preparation_is_read_only_and_pins_the_organization() {
     assert!(requests[1].starts_with("GET /api/oauth/profile HTTP/1.1"));
     for request in &requests {
         assert!(request.contains("authorization: Bearer test-access-secret"));
+        // The reset program is evaluated per caller identity (surface and
+        // Claude Code version), so every account endpoint presents it.
+        let agent = request
+            .lines()
+            .find_map(|line| line.strip_prefix("user-agent: "))
+            .unwrap();
+        assert!(agent.starts_with("claude-cli/") && agent.ends_with(" (external, cli)"));
+        // The reference CLI's account-endpoint headers and nothing else (no request id).
+        assert!(request.contains("anthropic-beta: oauth-2025-04-20"));
+        assert!(request.contains("accept: application/json, text/plain, */*"));
+        assert!(!request.contains("x-client-request-id"));
     }
 }
 

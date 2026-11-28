@@ -103,6 +103,28 @@ pub(super) fn history_payload_fingerprint(messages: &[crate::protocol::HistoryMe
     for message in messages {
         message.role.hash(&mut hasher);
         message.content.hash(&mut hasher);
+        message.attachments.len().hash(&mut hasher);
+        for attachment in &message.attachments {
+            match attachment {
+                jcode_session_types::StoredAttachment::File {
+                    name,
+                    mime,
+                    size,
+                    path,
+                } => {
+                    0u8.hash(&mut hasher);
+                    name.hash(&mut hasher);
+                    mime.hash(&mut hasher);
+                    size.hash(&mut hasher);
+                    path.hash(&mut hasher);
+                }
+                jcode_session_types::StoredAttachment::PastedText { text } => {
+                    1u8.hash(&mut hasher);
+                    text.hash(&mut hasher);
+                }
+                jcode_session_types::StoredAttachment::Unknown => 2u8.hash(&mut hasher),
+            }
+        }
         match &message.tool_calls {
             Some(calls) => {
                 calls.len().hash(&mut hasher);

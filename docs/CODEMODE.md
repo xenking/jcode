@@ -1,12 +1,77 @@
 # Code Mode
 
-Code Mode adds one native tool, `codemode`. The model writes a JavaScript
-program and runs it in an embedded QuickJS sandbox. The program calls every
-jcode tool and every MCP tool as an async function on `tools`. It can use
+Code Mode adds one native tool, `codemode`. The model writes a JavaScript or
+TypeScript program and runs it in an embedded QuickJS sandbox. The program
+calls every jcode tool and every MCP tool as an async function on `tools`. It can use
 loops, branches, and `Promise.all`. Intermediate data stays in the VM. Only
 the bounded return value, captured `console.*` output, and a host-recorded
 receipt of the nested calls reach the model. The model sees the same idea as
 Cloudflare's Code Mode: a typed TypeScript API generated from tool schemas.
+
+## When the model is told to use it
+
+Tool descriptions alone were not enough: measured over three days (2026-11-13
+to 2026-11-15), `codemode` was 11 of 7,884 tool calls (0.14%, and 6 of those 11
+came from probe sessions told to use it), while `bash` was 65.5% and `batch`
+1.1%. The cause was steering, not availability: the tool was registered and
+eager in every build, but nothing told the model when one script beats many
+calls.
+
+Three places now carry that guidance:
+
+- `CODEMODE_PROMPT` in `jcode-base/src/prompt.rs`, appended to the static
+  system prompt when both `[features] code_mode` and `[tools] codemode` are
+  on. It lists the work shapes: 5+ calls, dependent chains, loops over a
+  previous result, and large outputs that only need a summary. For example,
+  find matches with `agentgrep`, pass their paths and line numbers to `read`
+  for small windows, and return only relevant `path:line` entries. Use
+  `Promise.allSettled` when independent reads can succeed or fail separately.
+  Call `swarm` directly for short coordination. Use `codemode` for dependent
+  swarm reads or to return only needed fields from large results. See
+  [Swarm token cost](#swarm-token-cost).
+- The tool description leads with the same shapes before the mechanics, and
+  says which tool wins for each (`batch` for 1-10 independent calls, `bash`
+  for shell work). Both it and `CODEMODE_PROMPT` say that MCP tools are
+  callable from a script (`tools.mcp__<server>__<tool>`, found with
+  `listTools('mcp__')`) even when a deferred catalog keeps them out of the
+  tool list, and that the typed ones return typed results.
+- `batch`'s description points at `codemode` for dependent or looping work.
+
+## Swarm token cost
+
+Call `swarm` directly for short coordination. Use `codemode` when a script can
+resolve dependencies without the model, or when the model needs only part of a
+large result. Use the native multi-target action when it does the whole job,
+such as `status` with `session_ids`; the measurement below does not cover it.
+
+Measured once on CLI `1ced95d9c7682c939992f4f4b47a7df63c1b08d7` against a
+loopback OpenAI-compatible fixture (private home and socket,
+`JCODE_TEST_SESSION=1`, no real credentials, no billing or latency data).
+Calls cycled through `list`, `status` and `plan_status` on a solo synthetic
+swarm; five runs per arm, order rotated. Counts are local `o200k_base` proxy
+tokens, not provider usage. The harness script is no longer in the repository.
+Cells are median extra input / median output (extra input is the request history
+beyond the first request):
+
+| Shape | N | Native | Code Mode passthrough | Code Mode projection |
+| --- | ---: | ---: | ---: | ---: |
+| Independent | 1 | 155 / 54 | 231 / 88 | 211 / 104 |
+| Independent | 3 | 510 / 123 | 484 / 111 | 314 / 171 |
+| Independent | 16 | 2681 / 569 | 1699 / 125 | 637 / 185 |
+| Chain | 4 | 2088 / 255 | 712 / 134 | 324 / 165 |
+| Chain | 16 | 31776 / 1059 | 2440 / 134 | 529 / 165 |
+
+- Native wins for a single short call; passthrough crosses over between N=2 and
+  N=3. That is a fixture-dependent tradeoff, not a universal cutoff.
+- Chains are where the script wins: an N-step native chain takes N+1 requests,
+  both Code Mode chain arms take two.
+- Projection changes what reaches the model, not what the nested calls read.
+- The `swarm` schema advertises 25 properties; sending the 23 unused ones as
+  `null` costs about 102 output tokens per call here. Omit unused arguments where
+  the endpoint allows it.
+
+Compare script output and receipt text against the results omitted and the turns
+avoided; do not estimate a bill from this run.
 
 ## Enabling
 
@@ -24,16 +89,31 @@ codemode = true    # legacy alias, also default; either false disables
 
 | Global | Meaning |
 | --- | --- |
-| `await tools.<name>(args)` / `callTool(name, args)` | Run a tool. JSON output is parsed to objects; failures throw `Error("<tool>: <reason>")`. |
+| `await tools.<name>(args)` / `callTool(name, args)` | Run a tool. JSON object/array output becomes a JS object/array. Other output is a string. Failures throw `Error("<tool>: <reason>")`. |
 | `listTools(filter?)` | `[{name, description}]` (first line of each description). |
-| `types(filter?)` | TypeScript declarations (`type XInput = {...}; declare const tools: {...}`) for matching tools. |
-| `describeTool(name)` | `{name, description, input_schema, typescript}`. |
+| `types(filter?)` | TypeScript declarations (`type XInput = {...}; declare const tools: {...}`) for matching tools. A tool whose MCP server declares an `outputSchema` also gets `type XOutput` and returns `Promise<XOutput>`; every other tool stays `Promise<any>`. |
+| `describeTool(name)` | `{name, description, input_schema, output_schema, typescript}`. |
 | `store(k, v)` / `load(k)` / `storedKeys()` | JSON store persisted per session across runs. |
 | `console.log/info/warn/error/debug` | Captured output, 64 KiB cap. |
 
 MCP tools appear under their registry dispatch names (`mcp__<server>__<tool>`,
 which are always valid identifiers). The unified `mcp` tool is also callable.
 The legacy `mcp_search`/`mcp_call` names are hidden.
+
+A tool that declares an `outputSchema` returns its `structuredContent` object,
+so `const {sum} = await tools.mcp__calc__add({a: 1, b: 2})` is typed and needs
+no parsing. Without an `outputSchema` the script sees the registry's rendered
+output (parsed JSON when the text is a JSON object or array, otherwise a
+string), so check the shape before using it. Options for approval and result
+typing are in [MCP_TOOLS.md](MCP_TOOLS.md). Argument errors from
+`agentgrep` and JSON shape errors from `read` identify the bad field and show
+one valid call. For example, `agentgrep` trace expects a `terms` array with
+DSL entries such as `['subject:auth_status', 'relation:rendered']`. Repair the
+failed step rather than replaying successful calls with side effects.
+
+A script that starts while a never-listed MCP server is still on its first
+connection waits for it (up to 15 s), so its tools are there. A warm session
+never waits.
 
 Report shape returned to the model:
 
@@ -70,6 +150,19 @@ the same one direct calls end in. So every nested call gets:
 `codemode` and `batch` cannot be called from inside a script. The sandbox has
 no filesystem, network, timer, module, or process API.
 
+An MCP server can opt in to a human yes per call (`approval = "annotations"`).
+The gate is part of this same path, so a script cannot reach a tool it could not
+reach directly: `tools.mcp__srv__write(...)` asks the user and throws when there
+is nobody to ask. The time a script spends waiting for a person is added to its
+deadline, so slow approvals do not time it out. While a prompt is open the run
+stays in the foreground: Alt+B/Ctrl+B is ignored (the prompt owns the keys, as
+with `ask`) and a `background_tool` request from another client is answered
+`moved: false`. See [MCP_TOOLS.md](MCP_TOOLS.md).
+
+The TUI lists every call a run dispatched under its row, one line each: status,
+tool, swarm action and target, duration, a safe failure category, and a count
+of calls past the first 40.
+
 One deliberate difference: nested calls set `accept_large_output: true`. A
 tool's output goes into the VM, not into the model context, so the per-call
 context guard and the MCP token budget would only corrupt data the script is
@@ -79,7 +172,8 @@ affects output size only, never permissions.
 ## Limits
 
 - QuickJS heap: 64 MiB, stack: 1 MiB.
-- Per-program deadline: 300 s wall clock, including awaited tool calls. It is
+- Per-program deadline: 300 s wall clock, including awaited tool calls but
+  excluding time spent waiting for a person to approve a call. It is
   enforced by both an interrupt handler (busy loops) and a select on the
   future (hung tools). When the deadline fires, in-flight host calls are
   aborted.
@@ -88,6 +182,23 @@ affects output size only, never permissions.
 - Report: 60k chars. Past that, the full report is spilled to
   `~/.jcode/codemode/spill/<session>-<call>.txt` and the path is included in
   the report.
+- Optional `max_output_tokens` (512–15,000): use `4000` when a preview is
+  enough. This is a provider-independent estimate (about three UTF-8 bytes per token,
+  see `TOKEN_ESTIMATION.md`), not a billing count. The budget applies only to the final report,
+  not nested results or stored values. A truncated preview includes the error
+  (or its beginning), call counts by status, and the full report path when
+  available. Omit the parameter to keep the original report limit.
+
+To page data without repeating tool calls, save it before returning:
+
+```js
+const matches = await tools.agentgrep({mode: 'grep', query: 'TODO'});
+store('matches', matches);
+return matches; // Call codemode with max_output_tokens: 4000 for a preview.
+```
+
+Then run `return load('matches').slice(12000, 14000)` in the same session.
+For structured data, slice the array or return selected fields instead.
 
 ## Engine choice: rquickjs
 
@@ -109,9 +220,88 @@ We picked rquickjs (QuickJS, `futures` feature) over V8/deno_core and boa:
 FreeBSD has no prebuilt rquickjs bindings. There the tool reports itself
 unavailable instead of failing the build.
 
-TypeScript is not compiled. `types()` gives the model the declarations to
-write against, and the program itself must be plain JavaScript (QuickJS
-ES2023). This matches Cloudflare's model, which also strips types first.
+## TypeScript
+
+The script may be TypeScript. `types()` hands the model TypeScript
+declarations for every tool, so writing `const args: ReadToolInput = {...}`,
+`interface`, `as`, `satisfies`, generics, non-null `!`, optional parameters and
+`enum`s has to work rather than fail as a syntax error. `crates/jcode-codemode/src/strip.rs`
+erases the types in-process before QuickJS sees the script: types are removed,
+never checked, which is the same bargain Deno and Bun make. No `tsc`, no Node,
+no subprocess.
+
+### Why oxc, and what it costs
+
+Measured on this machine (aarch64 macOS, the workspace `release` profile:
+`opt-level = 1`, 256 codegen units, no LTO) with a 2 KiB TypeScript snippet
+covering every construct above, built twice from an empty target directory:
+
+| | oxc 0.146 (picked) | deno_ast 0.53 + swc (what Deno uses) |
+| --- | --- | --- |
+| release binary added | **+3.25 MB** (433 KB base -> 3.68 MB) | +10.68 MB (433 KB -> 11.11 MB) |
+| clean dependency build | **14.8 s** | 53.4 s |
+| crates in the graph | 123 | 181 |
+| strip 2 KiB TS, p50 | **23-28 us** (p90 28-64 us) | 100-102 us (p90 117-123 us) |
+| strip 1.4 KiB JS, p50 | **18 us** | 84 us |
+
+Both produce equivalent JavaScript: types gone, `enum` lowered, top-level
+`await` and `return` kept. Costs above include the codegen source map the line
+map needs; the map itself is free at this size, it is codegen's token table, not
+a JSON round trip. oxc wins on all three axes (3.3x smaller, 3.6x faster to
+build, ~4x faster to run), so the smaller one it is.
+
+`oxc` is pinned to `=0.146.0`: that is the last release whose MSRV is the
+workspace toolchain (1.95). `0.158` requires 1.97 and would drag a toolchain
+bump into this change.
+
+### Bun is not a third candidate
+
+Bun moved its runtime to Rust (v1.4.0, August 2026), so `bun_js_parser` looked
+like a candidate. It is not extractable, before performance even matters (no
+size or latency figure is obtainable, and the run stops at the build script):
+
+- It is workspace-internal: `version.workspace = true`, workspace lints, and 16
+  `bun_*` sibling crates (`bun_core`, `bun_sys`, `bun_crash_handler`,
+  `bun_highway`, `bun_react_compiler`, ...), none published to crates.io. A git
+  dependency clones the whole 1.6 GB repo (491 MB bare git db here) and drags
+  that graph in.
+- `lib.rs` opens with `#![feature(optimize_attribute)]` and the repo pins
+  `nightly-2026-09-15`. The workspace builds on stable 1.95.
+- `bun_core`'s build script panics without Bun's own configure output
+  (`build/debug/codegen/build_options.rs`), and `bun bd --configure-only` then
+  demands clang >= 23.1.0 < 23.2 (this machine has 21.0.0).
+- The strip-and-print entry point is `bun_transpiler`, a re-export of
+  `bun_bundler::transpiler`; `bun_js_parser` alone is just the parser.
+
+Rebuilding that tree is the price of using the parser at all, so no figure would
+change the answer: erasing types must not pin the harness to someone else's
+nightly and someone else's build system. License is the one clean dimension: Bun
+is MIT, and the parser tier is deliberately JSC-free (LGPL-2 JSC enters only
+through the `*_jsc` crates).
+
+### Design notes
+
+- **Plain JavaScript is untouched.** `strip` parses as an ES module first and
+  returns the input byte for byte when that succeeds, so a JS script's stack
+  traces are its own and the transform is skipped entirely. Only a script that
+  does not parse as JavaScript goes through the semantic builder, the
+  TypeScript transform and codegen.
+- **Top-level `return` is legal.** The engine wraps the body in
+  `(async () => { ... })()`, so the parser runs with
+  `allow_return_outside_function`, and the module source type keeps top-level
+  `await` legal.
+- **Line numbers survive.** Codegen reprints the program, so the stripped script
+  has different line numbers than the model's source. `strip` turns the codegen
+  source map into a stripped-line to original-line table, and the engine maps
+  every `file:line:col` in a QuickJS stack back through it (minus the one
+  wrapper line) before reporting. Errors point at the line the model wrote.
+- **Parse errors carry a position.** A script that is neither JavaScript nor
+  TypeScript reports `line L:C: <message>` from the parser over the original
+  source, before any rewriting. That is the only error path that can name a
+  typo in the annotations themselves.
+- **Enums need `enum_eval`.** The TypeScript transform reads member values the
+  semantic builder only precomputes with `SemanticBuilder::with_enum_eval(true)`;
+  without it the lowering is wrong (and debug builds assert).
 
 ## References
 
@@ -126,11 +316,14 @@ ES2023). This matches Cloudflare's model, which also strips types first.
 
 ## Gaps
 
-- No TS transpile step, so type annotations in the program are syntax errors.
-- No approval pause clock (codewhale pauses the deadline while a human
-  approves). jcode's `pre_tool` gate is non-interactive, so this is not
-  needed today.
+- Types are erased, never checked. A wrong annotation is a no-op, not an
+  error, so a script can type-check in the model's head and still fail at
+  runtime.
+- Only syntax is erased. `tsconfig` knobs (`target`, `useDefineForClassFields`,
+  `experimentalDecorators`) are the transformer defaults, and JSX is off;
+  `tsx` input is not accepted.
+- Columns inside a rewritten statement can be approximate: lines are mapped
+  exactly through the codegen source map, but column starts come from the
+  reprinted text.
 - Nested calls are not shown as separate transcript tool cards. The receipt is
   the record.
-- MCP schemas come from the registry's cached catalog. A server that has
-  never been listed is invisible until `mcp` connects it once.

@@ -1,5 +1,6 @@
 //! Recorded OAuth usage, deliberately separate from the API-key spend ledger.
 //! A stable sidecar lock serializes read/modify/atomic-replace across processes.
+use crate::persistence_batch::Batch;
 use chrono::{DateTime, Local, Utc};
 use jcode_core::util::format_number_u64;
 use serde::{Deserialize, Serialize};
@@ -104,7 +105,7 @@ impl Totals {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct AccountUsage {
     first_recorded: Option<i64>,
@@ -113,10 +114,33 @@ struct AccountUsage {
     days: BTreeMap<String, Totals>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Store {
     accounts: BTreeMap<String, AccountUsage>,
+}
+
+static WRITES: Batch<Store> = Batch::new(persist_usage, Store::merge);
+
+pub(crate) fn flush_oauth_usage() {
+    WRITES.flush();
+}
+
+impl Store {
+    fn merge(&mut self, changes: &Self) {
+        for (label, delta) in &changes.accounts {
+            let account = self.accounts.entry(label.clone()).or_default();
+            account.first_recorded = account
+                .first_recorded
+                .into_iter()
+                .chain(delta.first_recorded)
+                .min();
+            account.lifetime.add(&delta.lifetime);
+            for (day, totals) in &delta.days {
+                account.days.entry(day.clone()).or_default().add(totals);
+            }
+        }
+    }
 }
 
 fn path() -> anyhow::Result<std::path::PathBuf> {
@@ -134,6 +158,31 @@ fn load(path: &Path) -> anyhow::Result<Store> {
 }
 
 fn update(path: &Path, label: &str, totals: &Totals, now: DateTime<Local>) -> anyhow::Result<()> {
+    WRITES.submit(path.to_owned(), usage_delta(label, totals, now))
+}
+
+fn usage_delta(label: &str, totals: &Totals, now: DateTime<Local>) -> Store {
+    let mut delta = Store::default();
+    let account = delta.accounts.entry(label.to_owned()).or_default();
+    account.first_recorded = Some(now.timestamp());
+    account.lifetime.add(totals);
+    account
+        .days
+        .insert(now.format("%Y-%m-%d").to_string(), totals.clone());
+    delta
+}
+
+fn load_with_pending(path: &Path) -> anyhow::Result<Store> {
+    WRITES.inspect(path, |pending| {
+        let mut store = load(path)?;
+        if let Some(pending) = pending {
+            store.merge(&pending);
+        }
+        Ok(store)
+    })
+}
+
+fn persist_usage(path: &Path, changes: &Store) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -145,18 +194,7 @@ fn update(path: &Path, label: &str, totals: &Totals, now: DateTime<Local>) -> an
         .open(path.with_extension("lock"))?;
     lock.lock()?;
     let mut store = load(path)?;
-    let account = store.accounts.entry(label.to_string()).or_default();
-    account.first_recorded = Some(
-        account
-            .first_recorded
-            .map_or(now.timestamp(), |first| first.min(now.timestamp())),
-    );
-    account.lifetime.add(totals);
-    account
-        .days
-        .entry(now.format("%Y-%m-%d").to_string())
-        .or_default()
-        .add(totals);
+    store.merge(changes);
     crate::storage::write_json(path, &store)?;
     Ok(()) // Dropping the stable lock file releases the OS lock.
 }
@@ -243,7 +281,7 @@ pub fn record_openai_oauth_usage(
 /// tracker began, not the account's lifetime subscription usage or billed cost.
 /// Unknown prices are explicitly reported, never silently presented as zero.
 pub fn openai_oauth_usage_summary(label: &str) -> Vec<(String, String)> {
-    let store = match path().and_then(|path| load(&path)) {
+    let store = match path().and_then(|path| load_with_pending(&path)) {
         Ok(store) => store,
         Err(_) => {
             return ["Today", "Lifetime"]
@@ -266,7 +304,7 @@ fn anthropic_priced_usage(
     output: Option<u64>,
     cache_read: Option<u64>,
     cache_creation: Option<u64>,
-    tier: Option<&str>,
+    speed: Option<&str>,
     cache_creation_5m: Option<u64>,
     cache_creation_1h: Option<u64>,
 ) -> Totals {
@@ -279,34 +317,38 @@ fn anthropic_priced_usage(
         .unwrap_or(0)
         .checked_add(cache_creation_1h.unwrap_or(0))
         == Some(created);
-    let cost = jcode_provider_core::pricing::anthropic_api_pricing_with_tier(model, tier).and_then(
-        |price| {
-            if !complete {
-                return None;
-            }
-            let (input, output) = (input?, output?);
-            let input_price = price.input_price_per_mtok_micros?;
-            let output_price = price.output_price_per_mtok_micros?;
-            let read_price = if cached > 0 {
-                price.cache_read_price_per_mtok_micros?
-            } else {
-                0
-            };
-            Some(
-                (input as f64 * input_price as f64
-                    + output as f64 * output_price as f64
-                    + cached as f64 * read_price as f64
-                    + if writes_known {
-                        (cache_creation_5m.unwrap_or(0) as f64 * 1.25
-                            + cache_creation_1h.unwrap_or(0) as f64 * 2.0)
-                            * input_price as f64
-                    } else {
-                        0.0
-                    })
-                    / 1_000_000_000_000.0,
-            )
-        },
-    );
+    use jcode_provider_core::pricing::{anthropic_api_fast_pricing, anthropic_api_pricing};
+    let price = match speed {
+        Some("fast") => anthropic_api_fast_pricing(model),
+        None | Some("standard") => anthropic_api_pricing(model),
+        _ => None,
+    };
+    let cost = price.and_then(|price| {
+        if !complete {
+            return None;
+        }
+        let (input, output) = (input?, output?);
+        let input_price = price.input_price_per_mtok_micros?;
+        let output_price = price.output_price_per_mtok_micros?;
+        let read_price = if cached > 0 {
+            price.cache_read_price_per_mtok_micros?
+        } else {
+            0
+        };
+        Some(
+            (input as f64 * input_price as f64
+                + output as f64 * output_price as f64
+                + cached as f64 * read_price as f64
+                + if writes_known {
+                    (cache_creation_5m.unwrap_or(0) as f64 * 1.25
+                        + cache_creation_1h.unwrap_or(0) as f64 * 2.0)
+                        * input_price as f64
+                } else {
+                    0.0
+                })
+                / 1_000_000_000_000.0,
+        )
+    });
     Totals {
         requests: 1,
         input: input
@@ -324,7 +366,9 @@ fn anthropic_priced_usage(
 
 /// Record one authoritative Anthropic OAuth completion against its captured
 /// credential label. Input excludes both cache reads and cache creation.
-/// Tier is passed to the shared pricing helper. Cache-write costs are known
+/// Only acknowledged `usage.speed` permits a Fast estimate. `None` preserves
+/// Standard estimates for legacy callers, `Some("unknown")` for an unconfirmed
+/// Fast request leaves the price unknown. Cache-write costs are known
 /// only when the 5-minute and 1-hour breakdown sums to total cache creation.
 #[allow(clippy::too_many_arguments)]
 pub fn record_anthropic_oauth_usage(
@@ -334,7 +378,7 @@ pub fn record_anthropic_oauth_usage(
     output: Option<u64>,
     cache_read: Option<u64>,
     cache_creation: Option<u64>,
-    tier: Option<&str>,
+    speed: Option<&str>,
     cache_creation_5m: Option<u64>,
     cache_creation_1h: Option<u64>,
 ) {
@@ -351,7 +395,7 @@ pub fn record_anthropic_oauth_usage(
         output,
         cache_read,
         cache_creation,
-        tier,
+        speed,
         cache_creation_5m,
         cache_creation_1h,
     );
@@ -366,7 +410,7 @@ pub fn record_anthropic_oauth_usage(
 
 /// Local-day and lifetime recorded usage, separate from API-key spend.
 pub fn anthropic_oauth_usage_summary(label: &str) -> Vec<(String, String)> {
-    let store = match anthropic_path().and_then(|path| load(&path)) {
+    let store = match anthropic_path().and_then(|path| load_with_pending(&path)) {
         Ok(store) => store,
         Err(_) => {
             return ["Today", "Lifetime"]
@@ -410,6 +454,66 @@ fn summary(store: &Store, label: &str, now: DateTime<Local>) -> Vec<(String, Str
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[tokio::test(start_paused = true)]
+    async fn write_amp_oauth_burst_merges_once_with_concurrent_durable_updates()
+    -> anyhow::Result<()> {
+        let home = tempfile::tempdir()?;
+        let path = home.path().join("ledger.json");
+        let now = Local::now();
+        let usage = Totals {
+            requests: 1,
+            input: 10,
+            ..Totals::default()
+        };
+        let handle = tokio::runtime::Handle::current();
+        for _ in 0..20 {
+            WRITES.queue(
+                &handle,
+                std::time::Duration::from_secs(10),
+                path.clone(),
+                usage_delta("alpha", &usage, now),
+            );
+        }
+        assert!(
+            !path.exists(),
+            "a burst should not rewrite the ledger per request"
+        );
+        assert_eq!(
+            load_with_pending(&path)?.accounts["alpha"]
+                .lifetime
+                .requests,
+            20
+        );
+        // Another process can publish while the daemon still has pending deltas.
+        persist_usage(&path, &usage_delta("alpha", &usage, now))?;
+        persist_usage(&path, &usage_delta("beta", &usage, now))?;
+        let other_version = std::fs::read(&path)?;
+        assert_eq!(
+            load_with_pending(&path)?.accounts["alpha"]
+                .lifetime
+                .requests,
+            21
+        );
+        flush_oauth_usage();
+        let combined = load(&path)?;
+        assert_eq!(combined.accounts["alpha"].lifetime.requests, 21);
+        assert_eq!(combined.accounts["beta"].lifetime.requests, 1);
+        assert_eq!(
+            combined.accounts["alpha"]
+                .days
+                .values()
+                .next()
+                .unwrap()
+                .input,
+            210
+        );
+        assert_eq!(std::fs::read(path.with_extension("bak"))?, other_version);
+        let published = std::fs::metadata(&path)?.modified()?;
+        flush_oauth_usage();
+        assert_eq!(std::fs::metadata(&path)?.modified()?, published);
+        Ok(())
+    }
 
     #[test]
     fn anthropic_totals_cache_pricing_and_unknown_models() {
@@ -511,19 +615,19 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_cache_ttl_and_fast_tier_pricing() {
-        for (tier, expected) in [
+    fn anthropic_cache_ttl_and_confirmed_speed_pricing() {
+        for (speed, expected) in [
             (None, 15.875),
-            (Some("auto"), 95.25),
-            (Some("priority"), 95.25),
+            (Some("standard"), 15.875),
+            (Some("fast"), 31.75),
         ] {
             let usage = anthropic_priced_usage(
-                "claude-opus-4-6",
+                "claude-opus-5",
                 Some(1_000_000),
                 Some(100_000),
                 Some(500_000),
                 Some(1_000_000),
-                tier,
+                speed,
                 Some(500_000),
                 Some(500_000),
             );
@@ -531,6 +635,18 @@ mod tests {
             assert_eq!(usage.unpriced_requests, 0);
             assert_eq!(usage.input, 2_500_000);
         }
+        let unconfirmed = anthropic_priced_usage(
+            "claude-opus-5",
+            Some(1_000_000),
+            Some(100_000),
+            None,
+            None,
+            Some("unknown"),
+            None,
+            None,
+        );
+        assert_eq!(unconfirmed.known_usd, 0.0);
+        assert_eq!(unconfirmed.unpriced_requests, 1);
         for (created, five, hour) in [
             (100, Some(99), Some(0)),
             (100, None, None),

@@ -568,6 +568,8 @@ mod tests {
     fn dedupes_model_routes_by_route_identity() {
         let routes = vec![
             ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "m".to_string(),
                 provider: "p".to_string(),
                 api_method: "a".to_string(),
@@ -575,8 +577,12 @@ mod tests {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "m".to_string(),
                 provider: "p".to_string(),
                 api_method: "a".to_string(),
@@ -584,8 +590,12 @@ mod tests {
                 detail: "duplicate".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "m".to_string(),
                 provider: "p".to_string(),
                 api_method: "b".to_string(),
@@ -593,6 +603,8 @@ mod tests {
                 detail: String::new(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ];
 
@@ -605,6 +617,8 @@ mod tests {
     fn dedupes_openai_compatible_generic_and_profile_aliases() {
         let routes = vec![
             ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "qwen".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible".to_string(),
@@ -612,8 +626,12 @@ mod tests {
                 detail: "generic transport".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "qwen".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible:cerebras".to_string(),
@@ -621,8 +639,12 @@ mod tests {
                 detail: "profile transport".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "qwen".to_string(),
                 provider: "OtherDirect".to_string(),
                 api_method: "openai-compatible:other".to_string(),
@@ -630,8 +652,12 @@ mod tests {
                 detail: "different provider".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
             ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: "qwen".to_string(),
                 provider: "Cerebras".to_string(),
                 api_method: "openai-compatible:cerebras-alt".to_string(),
@@ -639,6 +665,8 @@ mod tests {
                 detail: "distinct profile route".to_string(),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             },
         ];
 
@@ -684,6 +712,8 @@ mod tests {
             let m = models[(seed >> 17) as usize % models.len()];
             let a = api_methods[(seed >> 27) as usize % api_methods.len()];
             routes.push(ModelRoute {
+                speed_options: Vec::new(),
+                reasoning_efforts: None,
                 model: m.to_string(),
                 provider: p.to_string(),
                 api_method: a.to_string(),
@@ -691,6 +721,8 @@ mod tests {
                 detail: format!("route-{i}"),
                 usage: None,
                 cheapness: None,
+                account: None,
+                icon: None,
             });
         }
 

@@ -545,7 +545,9 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         message_count: 1,
         last_input_item_count: 1,
         last_response_output: Vec::new(),
-        last_input_item_hashes: persistent_ws_input_item_hashes(&[
+        last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
+            last_input_item_hashes: persistent_ws_input_item_hashes(&[
             serde_json::json!({"type":"message","role":"user","content":"first"}),
         ]),
     })));
@@ -560,8 +562,8 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
             serde_json::json!({"type": "message", "role": "user", "content": "first"}),
             serde_json::json!({"type": "message", "role": "user", "content": "interrupt"}),
         ],
-        2,
         &tx,
+        None,
     )
     .await;
 
@@ -589,8 +591,8 @@ async fn persistent_ws_rejects_identity_changed_by_another_fork() {
             serde_json::json!({"role":"user", "content":"previous"}),
             serde_json::json!({"role":"user", "content":"new account"}),
         ],
-        2,
         &tx,
+        None,
     )
     .await;
     assert!(matches!(result, PersistentWsResult::NotAvailable));
@@ -619,8 +621,8 @@ async fn persistent_ws_rechecks_identity_after_presend_backpressure() {
                 serde_json::json!({"role":"user", "content":"previous"}),
                 serde_json::json!({"role":"user", "content":"new account"}),
             ],
-            2,
             &tx,
+            None,
         )
         .await
     });

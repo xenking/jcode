@@ -19,12 +19,35 @@ requesting credentials or repeating setup.
 Group migration requires compatible daemons and a safe idle boundary. It must
 fail closed when it cannot reserve that boundary. A failed or interrupted
 activation can leave source sessions fenced deliberately: retry the same move
-to recover, rather than deleting leases or starting both copies. The initial
-group implementation rejects individual member returns, and full group return
-is not implemented. Ungrouped single-session move/return remains available.
+to recover, rather than deleting leases or starting both copies. On the original
+machine, `jcode cloud return --session <any-member>` brings back the entire group
+and merges its shared checkout once. Individual members cannot be returned
+separately. Both CLIs must support group return. For a self-hosted machine, use
+`--remote-binary <path>` to select a compatible CLI without replacing its install.
+If a return is interrupted, retry the same command. A local OAuth conflict can
+be bypassed with `--keep-local-auth`. A Git conflict leaves the cloud work in the
+coordinator's rescue refs. Returning an ungrouped session is unchanged. A second
+group move for the same already-returned group is not yet supported.
 Imported workers stay paused until the coordinator finishes shared setup and
 resumes their existing IDs. Only the initiating terminal attaches automatically;
 other terminals must reconnect to their migrated sessions.
+
+## Repository and index semantics
+
+An updated sender and receiver place a migrated repository in a managed,
+user-owned workspace on the destination. The session retains its relative
+working directory. Return uses the original local repository and working
+directory. Older senders require the same absolute path on the destination.
+An older receiver may also require that path; update both CLIs for portable
+workspaces.
+
+Move transfers the working file contents, including untracked files, but not
+the source Git index. At the destination, changes are unstaged relative to the
+transferred HEAD, even when they were staged locally. Return retains the local
+staged and unstaged split when it can safely advance the local index to a cloud
+commit. If that index conflicts, return fails instead of discarding staged work;
+the cloud snapshot remains available in the cloud rescue ref. This is not index
+parity between machines.
 
 ## What runs
 
@@ -33,7 +56,7 @@ other terminals must reconnect to their migrated sessions.
 | `cli` | `scripts/test_cloud_move_e2e.sh`: real cloud move/return commands and daemons, with a local transport script into a **bubblewrap** filesystem sandbox instead of SSH. Exercises dry run, repository/index/untracked state, session and todo transfer, ownership fencing, round-trip merge and conflict handling. |
 | `agent` | `scripts/test_cloud_move_agent_e2e.sh`: real agent turns before move, in the bubblewrap destination and after return. Checks conversation continuity, cloud notice in provider context and refusal to run the away local copy. Transport is local, not SSH. |
 | `credentials` | `tests/test_cloud_credentials.py`: synthetic OpenAI/Claude OAuth and router credentials over local pipes. Checks round trips, all-account transfer, permissions, secret-free archives/diagnostics, stale and expired tokens, dry run, identity/refresh conflicts, ownership rollback, one-way router transfer and failure before transfer with an incompatible remote. No production authentication or refresh endpoint is used. |
-| `group` | `scripts/test_cloud_group_e2e.sh`: real local/cloud daemons with isolated homes and a bubblewrap transport. Checks automatic swarm selection, explicit independent-session inclusion, excluded sessions, one shared repository and environment replay, preserved conversation/todo/swarm state, preview, and safe retry after a lost activation response. No live cloud account or model is used. |
+| `group` | `scripts/test_cloud_group_e2e.sh`: real local/cloud daemons with isolated homes and a bubblewrap transport. Checks group selection, shared repository/environment, preview, lost activation and export responses, group return by worker ID, refusal of partial return, interruption after Git apply and during session install, and preserved work and swarm state. No live cloud account or model is used. |
 | `tui` | `scripts/cloud_acceptance_tui.py`: the **actual interactive TUI in tmux**, a real loopback OpenSSH server and client, isolated local/cloud homes, real daemons, and a user/mount namespace providing separate repository contents at the same absolute path. No cloud-transport override is used in this layer. |
 
 The agent and TUI use `scripts/fake_openai_server.py`, a deterministic local
@@ -75,8 +98,8 @@ needs `/run/sshd`. Package installation and this host setup may need administrat
 privileges. **Do not run the acceptance runner with sudo or as root.**
 
 Unprivileged user and mount namespaces must work. Ubuntu's AppArmor user-namespace
-restriction can block them. The workflow conditionally disables
-`kernel.apparmor_restrict_unprivileged_userns` and enables
+restriction can block them. The upstream CI workflow conditionally disabled
+`kernel.apparmor_restrict_unprivileged_userns` and enabled
 `kernel.unprivileged_userns_clone` only on its disposable GitHub-hosted runner.
 Do not copy that system-wide policy change onto a shared workstation or production
 host. Use a disposable Linux VM with suitable namespace policy instead.
@@ -87,7 +110,7 @@ sockets use short private directories under `/tmp` to avoid Linux socket path
 limits even when artifact directories are deeply nested. Those socket directories
 are removed after their fixture processes stop. Fixtures are not
 intended to access your real accounts, shared daemon or managed VM. Never add
-production tokens, account files or SSH keys to the fixtures or workflow.
+production tokens, account files or SSH keys to the fixtures.
 
 ## Manual use and focused diagnosis
 
@@ -136,25 +159,14 @@ have their own bounded deadlines and are not controlled by that flag. If a run i
 externally killed, inspect the last saved evidence rather than assuming a complete
 report or successful cleanup.
 
-## CI and evidence
+## Evidence
 
-`.github/workflows/cloud-acceptance.yml` runs daily at 09:23 UTC, on manual dispatch,
-and on relevant PRs/pushes targeting `main` or `master`. Its intentionally broad
-`src/**`, `crates/**`, `scripts/**` and `tests/**` filters include TUI input/remote
-handling, cloud CLI, transport, credential code and harness changes. Cargo/build
-configuration and this documentation also trigger it.
+The fork has no CI workflow for this gate (`cloud-acceptance.yml` was removed with
+the other upstream workflows); run `scripts/test_cloud_acceptance.py` by hand. The
+existing quality CI stays responsible for the code-size/test-size and other ratchet
+budgets, this gate does not replace them.
 
-The workflow follows existing CI conventions: recursive checkout, stable Rust
-with `rust-src`, Rust cache, wrapper disabled and clang/mold linking. It installs
-the repository-pinned justrust client and uses its local CI build path without a
-hosted account, building the locked release `jcode` binary for Linux x86_64. It
-checks module declarations before building. Existing quality CI remains responsible
-for the code-size/test-size and other ratchet budgets, this gate does not replace
-them. Build, acceptance and whole-job limits are 75, 40 and 120 minutes respectively.
-
-The artifact upload runs with `always()`, retaining available evidence for seven
-days, including hidden files. A failure before the runner starts may leave no
-artifact. The bundle includes `report.json`, `junit.xml`, per-stage output logs,
+The evidence bundle includes `report.json`, `junit.xml`, per-stage output logs,
 provider requests, SSH logs, captured TUI `frame*.txt`, and retained fixture homes
 and workspaces. The root evidence directory is mode 0700 locally. Credential-suite
 temporary homes are normally cleaned by unittest, while other fixture homes remain.

@@ -31,6 +31,7 @@ fn cloud_auto_recovery_survives_offline_send_and_dispatches_after_reconnect() {
     let mut offline = crate::tui::backend::RemoteConnection::dummy();
     offline.mark_history_loaded();
     drop(offline.take_dummy_peer());
+    offline.fail_dummy_writes();
     rt.block_on(super::super::super::remote::process_remote_followups(
         &mut app,
         &mut offline,
@@ -85,7 +86,7 @@ fn cloud_auto_recovery_waits_for_history_then_sends_hidden_diagnostics() {
     ));
     assert!(app.is_processing);
     assert!(!app.has_pending_cloud_recovery());
-    assert!(app.cloud_recovery_context.is_none());
+    assert!(app.cloud_recovery_reminder().is_none());
     let sent = app.rate_limit_pending_message.as_ref().unwrap();
     assert!(sent.is_system);
     assert!(sent.content.is_empty());

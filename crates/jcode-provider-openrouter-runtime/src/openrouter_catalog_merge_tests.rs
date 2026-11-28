@@ -64,7 +64,7 @@ async fn static_only_named_profile_refresh_never_resolves_auth_or_fetches() {
     };
     let mut provider = OpenRouterProvider::new_named_openai_compatible("static-only", &profile)
         .expect("static-only profile initializes");
-    provider.auth = Arc::new(|| anyhow::bail!("catalog must not resolve credentials"));
+    provider.auth = Arc::new(|_| anyhow::bail!("catalog must not resolve credentials"));
     assert!(provider.refresh_models().await.unwrap().is_empty());
     let summary = provider.refresh_model_catalog().await.unwrap();
     assert_eq!(

@@ -1,34 +1,73 @@
+#[path = "accounts/account_identity.rs"]
+pub mod account_identity;
+#[path = "accounts/account_names.rs"]
+pub mod account_names;
+#[path = "accounts/account_pool.rs"]
 pub mod account_pool;
+#[path = "accounts/account_store.rs"]
 pub mod account_store;
+#[path = "status/active_method.rs"]
 pub mod active_method;
+#[path = "providers/antigravity.rs"]
 pub mod antigravity;
+#[path = "status/api_key_login.rs"]
+pub mod api_key_login;
+#[path = "providers/azure.rs"]
 pub mod azure;
+#[path = "providers/claude.rs"]
 pub mod claude;
+#[path = "providers/codex.rs"]
 pub mod codex;
+#[path = "status/commands.rs"]
 mod commands;
+#[path = "providers/copilot.rs"]
 pub mod copilot;
+#[path = "providers/cursor/mod.rs"]
 pub mod cursor;
+#[path = "status/doctor.rs"]
 pub mod doctor;
+#[path = "status/env_facts.rs"]
 pub mod env_facts;
+#[path = "providers/external.rs"]
 pub mod external;
+#[path = "providers/external_trust.rs"]
+pub(crate) mod external_trust;
+#[path = "providers/gemini.rs"]
 pub mod gemini;
+#[path = "providers/google.rs"]
 pub mod google;
+#[path = "providers/google_oauth.rs"]
 pub(crate) mod google_oauth;
+#[path = "providers/grok_build.rs"]
 pub mod grok_build;
+#[path = "status/integration.rs"]
 pub mod integration;
+#[path = "lifecycle/lifecycle.rs"]
 pub mod lifecycle;
+#[path = "status/login_diagnostics.rs"]
 pub mod login_diagnostics;
+#[path = "status/login_ui.rs"]
 pub mod login_ui;
+#[path = "providers/muse.rs"]
 pub mod muse;
+#[path = "flow/oauth.rs"]
 pub mod oauth;
+#[path = "flow/refresh_coordinator.rs"]
 pub(crate) mod refresh_coordinator;
+#[path = "flow/refresh_state.rs"]
 pub mod refresh_state;
+#[path = "accounts/router_transfer.rs"]
 pub mod router_transfer;
+#[path = "status/status_detail.rs"]
 mod status_detail;
+#[path = "status/status_types.rs"]
 mod status_types;
 #[cfg(any(test, feature = "test-support"))]
+#[path = "status/test_sandbox.rs"]
 pub mod test_sandbox;
+#[path = "accounts/transfer.rs"]
 pub mod transfer;
+#[path = "status/validation.rs"]
 pub mod validation;
 
 pub(crate) use commands::command_exists;
@@ -139,44 +178,7 @@ fn browser_unusable_here() -> bool {
     )
 }
 
-/// True when the current process is a Rust test binary (`cargo test` /
-/// `cargo nextest`). Cargo places hashed test executables in `deps/` beneath
-/// its build directory, which can be relocated with `CARGO_TARGET_DIR`.
-///
-/// Used to keep tests from opening real browser windows (OAuth login pages,
-/// files) on the developer's desktop: many login/onboarding flows are
-/// exercised by TUI tests, and without this guard each test run could pop
-/// multiple browser tabs. Set `JCODE_ALLOW_BROWSER_IN_TESTS=1` to opt out
-/// (e.g. for an intentionally interactive live test).
-pub fn running_in_test_harness() -> bool {
-    static IN_TEST_HARNESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *IN_TEST_HARNESS.get_or_init(|| {
-        if env_truthy("JCODE_ALLOW_BROWSER_IN_TESTS") {
-            return false;
-        }
-        // Hosted runners can relocate test binaries outside Cargo's deps directory.
-        if cfg!(test) {
-            return true;
-        }
-        std::env::current_exe()
-            .ok()
-            .map(|exe| is_test_harness_path(&exe.to_string_lossy()))
-            .unwrap_or(false)
-    })
-}
-
-mod test_harness;
-use test_harness::is_test_harness_path;
-
-fn env_truthy(key: &str) -> bool {
-    std::env::var(key)
-        .ok()
-        .map(|value| {
-            let trimmed = value.trim();
-            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
-}
+use crate::harness_detect::{env_truthy, running_in_test_harness};
 
 fn auth_timing_logging_enabled() -> bool {
     env_truthy("JCODE_AUTH_TIMING")
@@ -485,6 +487,7 @@ impl AuthStatus {
     pub fn has_any_untrusted_external_auth() -> bool {
         crate::auth::codex::has_unconsented_legacy_credentials()
             || crate::auth::claude::has_unconsented_external_auth().is_some()
+            || crate::auth::claude::has_unconsented_native_auth()
             || crate::auth::external::has_any_unconsented_external_auth()
             || crate::auth::gemini::has_unconsented_cli_auth()
             || crate::auth::copilot::has_unconsented_external_auth().is_some()
@@ -532,7 +535,7 @@ impl AuthStatus {
                 }
             }
             crate::provider_catalog::LoginProviderTarget::OpenRouter => {
-                if api_key_available("OPENROUTER_API_KEY", "openrouter.env") {
+                if crate::provider::openrouter::standard_openrouter_api_key().is_some() {
                     AuthState::Available
                 } else {
                     AuthState::NotConfigured
@@ -636,14 +639,16 @@ impl AuthStatus {
                 )
             }
             crate::provider_catalog::LoginProviderTarget::OpenRouter => {
+                let own_key = crate::provider::openrouter::standard_openrouter_api_key().is_some();
                 let (source, detail) = summarize_sources(vec![
-                    env_source("OPENROUTER_API_KEY"),
+                    env_source("OPENROUTER_API_KEY").filter(|_| own_key),
                     config_source(
                         "OPENROUTER_API_KEY",
                         "openrouter.env",
                         "~/.config/jcode/openrouter.env",
-                    ),
-                    external_api_key_source("OPENROUTER_API_KEY"),
+                    )
+                    .filter(|_| own_key),
+                    external_api_key_source("OPENROUTER_API_KEY").filter(|_| own_key),
                 ]);
                 (
                     source,
@@ -1077,7 +1082,7 @@ fn probe_copilot_status(status: &mut AuthStatus) {
 fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
     match mode {
         AuthProbeMode::Full => {
-            let cursor_has_api_key = cursor::has_cursor_api_key();
+            let cursor_has_api_key = cursor::load_api_key().is_ok();
             let cursor_has_native_auth = cursor::has_cursor_native_auth();
             status.cursor = if cursor_has_native_auth {
                 AuthState::Available
@@ -1089,7 +1094,7 @@ fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
         }
         AuthProbeMode::Fast => {
             // Avoid the vscdb probe in fast UI paths.
-            let cursor_has_api_key = cursor::has_cursor_api_key();
+            let cursor_has_api_key = cursor::load_api_key().is_ok();
             let cursor_has_file_or_env_auth = cursor::load_access_token_from_env_or_file().is_ok();
             status.cursor = if cursor_has_file_or_env_auth || cursor_has_api_key {
                 AuthState::Available
@@ -1361,7 +1366,7 @@ fn anthropic_oauth_source(status: &AuthStatus) -> Option<(AuthCredentialSource, 
     }
     if let Some(source) = crate::auth::claude::preferred_external_auth_source()
         && let Ok(path) = source.path()
-        && crate::config::Config::external_auth_source_allowed_for_path(source.source_id(), &path)
+        && crate::auth::external_trust::source_allowed_for_path(source.source_id(), &path)
     {
         return Some((
             AuthCredentialSource::TrustedExternalFile,
@@ -1417,7 +1422,7 @@ fn gemini_source() -> Option<(AuthCredentialSource, String)> {
     }
     if let Ok(path) = crate::auth::gemini::gemini_cli_oauth_path()
         && path.exists()
-        && crate::config::Config::external_auth_source_allowed_for_path(
+        && crate::auth::external_trust::source_allowed_for_path(
             crate::auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
             &path,
         )
@@ -1474,9 +1479,17 @@ fn cursor_source() -> Option<(AuthCredentialSource, String)> {
             "CURSOR_ACCESS_TOKEN / CURSOR_API_KEY environment variable".to_string(),
         ));
     }
+    if let Ok(path) = crate::auth::cursor::login::login_path()
+        && crate::auth::cursor::login::load_login().is_some()
+    {
+        return Some((
+            AuthCredentialSource::JcodeManagedFile,
+            path.display().to_string(),
+        ));
+    }
     if let Ok(file_path) = crate::auth::cursor::cursor_auth_file_path()
         && file_path.exists()
-        && crate::config::Config::external_auth_source_allowed_for_path(
+        && crate::auth::external_trust::source_allowed_for_path(
             crate::auth::cursor::CURSOR_AUTH_FILE_SOURCE_ID,
             &file_path,
         )
@@ -1522,10 +1535,7 @@ fn copilot_source() -> Option<(AuthCredentialSource, String)> {
     ] {
         let path = source.path();
         if path.exists()
-            && crate::config::Config::external_auth_source_allowed_for_path(
-                source.source_id(),
-                &path,
-            )
+            && crate::auth::external_trust::source_allowed_for_path(source.source_id(), &path)
         {
             return Some((
                 AuthCredentialSource::TrustedExternalFile,

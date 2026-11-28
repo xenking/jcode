@@ -1,5 +1,7 @@
 # Account routing priorities
 
+See [ROUTING.md](ROUTING.md) for the authoritative routing design.
+
 Fresh sessions select a ready account from the highest available priority tier in
 the automatic account pool. A saved default model is preferred on that account
 when supported. It does not pin new sessions to the last-used login. Explicit

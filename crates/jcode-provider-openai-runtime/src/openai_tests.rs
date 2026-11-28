@@ -15,6 +15,26 @@ const BRIGHT_PEARL_WRAPPED_TOOL_CALL_FIXTURE: &str = include_str!(concat!(
     "/../../tests/fixtures/openai/bright_pearl_wrapped_tool_call.txt"
 ));
 
+async fn try_persistent_ws_continuation(
+    persistent_ws: &Arc<Mutex<Option<PersistentWsState>>>,
+    credentials: &Arc<RwLock<CodexCredentials>>,
+    request: &Value,
+    input: &[Value],
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+    premium_route: Option<&str>,
+) -> PersistentWsResult {
+    openai_stream_runtime::try_persistent_ws_continuation(
+        persistent_ws,
+        credentials,
+        request,
+        input,
+        &persistent_ws_input_item_hashes(input),
+        tx,
+        premium_route,
+    )
+    .await
+}
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<OsString>,
@@ -90,6 +110,8 @@ pub(super) async fn test_persistent_ws_state() -> (PersistentWsState, tokio::tas
             message_count: 1,
             last_input_item_count: 1,
             last_response_output: Vec::new(),
+            last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
             last_input_item_hashes: persistent_ws_input_item_hashes(&[
                 serde_json::json!({"role":"user","content":"previous"}),
             ]),
@@ -153,6 +175,8 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
             message_count: 1,
             last_input_item_count: 1,
             last_response_output: Vec::new(),
+            last_request_options: None,
+            turn_state: Arc::new(StdMutex::new(None)),
             last_input_item_hashes: persistent_ws_input_item_hashes(&[
                 serde_json::json!({"role":"user","content":"previous"}),
             ]),
@@ -221,7 +245,7 @@ async fn live_openai_catalog() -> Result<Option<jcode_base::provider::OpenAIMode
 
     let token = openai_access_token(None, &Arc::new(RwLock::new(creds))).await?;
     Ok(Some(
-        jcode_base::provider::fetch_openai_model_catalog(&token).await?,
+        jcode_base::provider::fetch_openai_model_catalog(&token, None).await?,
     ))
 }
 
@@ -381,4 +405,5 @@ include!("openai_tests/cache_affinity.rs");
 include!("openai_tests/persistent_cancellation.rs");
 
 include!("openai_tests/http_idle.rs");
+include!("openai_tests/speed.rs");
 include!("openai_tests/overload_retry.rs");

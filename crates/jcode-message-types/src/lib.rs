@@ -1,4 +1,10 @@
+pub mod ask;
+pub mod content_capacity;
 pub mod provider_native;
+mod shared_content;
+pub use shared_content::SharedContent;
+mod speed;
+pub use speed::{SpeedAvailability, SpeedMode, SpeedOption, WorkerSpeedStatus};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
@@ -16,13 +22,16 @@ pub struct ToolCall {
     pub thought_signature: Option<String>,
 }
 
+pub mod token_estimate;
+mod tool_prompt_size;
+pub use token_estimate::{Estimator, TokenFamily, estimate_text};
+
 /// Tool definition advertised to model providers.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     /// Prompt-visible text sent to the model by provider adapters.
-    /// Approximate prompt cost: description.len() / 4. Use
-    /// ToolDefinition::description_token_estimate() when reviewing tool bloat.
+    /// Use ToolDefinition::description_token_estimate() when reviewing tool bloat.
     pub description: String,
     pub input_schema: serde_json::Value,
     /// Provider-native deferred loading. A deferred definition is sent in the
@@ -61,49 +70,10 @@ impl ToolDefinition {
         defs.iter().filter(|d| !d.defer_loading).cloned().collect()
     }
 
-    /// Serialized size of the full tool definition payload sent to providers.
-    pub fn prompt_chars(&self) -> usize {
-        serde_json::json!({
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.input_schema,
-        })
-        .to_string()
-        .len()
-    }
-
     /// Approximate prompt-token cost of this tool's top-level description.
-    ///
-    /// This uses jcode's standard chars/4 heuristic, matching other token
-    /// budget estimates in the codebase.
-    pub fn description_token_estimate(&self) -> usize {
-        estimate_tokens(&self.description)
+    pub fn description_token_estimate(&self, family: TokenFamily) -> usize {
+        estimate_text(family, &self.description)
     }
-
-    /// Approximate prompt-token cost of the full tool definition payload.
-    pub fn prompt_token_estimate(&self) -> usize {
-        estimate_tokens(
-            &serde_json::json!({
-                "name": self.name,
-                "description": self.description,
-                "input_schema": self.input_schema,
-            })
-            .to_string(),
-        )
-    }
-
-    pub fn aggregate_prompt_chars(defs: &[ToolDefinition]) -> usize {
-        defs.iter().map(Self::prompt_chars).sum()
-    }
-
-    pub fn aggregate_prompt_token_estimate(defs: &[ToolDefinition]) -> usize {
-        defs.iter().map(Self::prompt_token_estimate).sum()
-    }
-}
-
-fn estimate_tokens(s: &str) -> usize {
-    const APPROX_CHARS_PER_TOKEN: usize = 4;
-    s.len() / APPROX_CHARS_PER_TOKEN
 }
 
 /// Role in conversation
@@ -120,13 +90,28 @@ pub struct SnapcompactArchive {
     pub source: String,
     /// Base64-encoded PNG images in chronological order.
     pub pages: Vec<String>,
+    /// Verifiable excerpts with original zero-based message and page references.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub index: String,
+    /// Model-extracted decisions and rules, labelled as derived, not verbatim.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub decisions: String,
+    /// Decisions extracted after this archive was applied, held for the next compaction.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub deferred_decisions: String,
+    /// Character ranges in `source`, one per page, when available.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub page_ranges: Vec<(usize, usize)>,
+    /// Renderer version and complete geometry. Empty legacy keys rebuild once.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub render_key: String,
 }
 
 /// A message in the conversation
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub role: Role,
-    pub content: Vec<ContentBlock>,
+    pub content: SharedContent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,16 +223,30 @@ pub enum ContentBlock {
         provider: String,
         item: serde_json::Value,
     },
+    #[serde(other)]
+    Unknown,
 }
 
 impl Message {
+    /// Mark a request-snapshot suffix message that will not be replayed.
+    /// This provenance is not serialized and does not change its content.
+    pub fn into_request_only(mut self) -> Self {
+        self.content.mark_request_only();
+        self
+    }
+
+    pub fn is_request_only(&self) -> bool {
+        self.content.is_request_only()
+    }
+
     pub fn user(text: &str) -> Self {
         Self {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         }
@@ -264,7 +263,7 @@ impl Message {
         });
         Self {
             role: Role::User,
-            content,
+            content: content.into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         }
@@ -276,7 +275,8 @@ impl Message {
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         }
@@ -298,7 +298,8 @@ impl Message {
                 tool_use_id: tool_use_id.to_string(),
                 content: content.to_string(),
                 is_error: if is_error { Some(true) } else { None },
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms,
         }
@@ -411,14 +412,76 @@ fn stable_hash_bytes(bytes: &[u8]) -> u64 {
 }
 
 pub fn extend_stable_hash(acc: u64, next: u64) -> u64 {
-    stable_hash_bytes(&[acc.to_le_bytes().as_slice(), next.to_le_bytes().as_slice()].concat())
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&acc.to_le_bytes());
+    bytes[8..].copy_from_slice(&next.to_le_bytes());
+    stable_hash_bytes(&bytes)
 }
 
-pub fn stable_message_hash(message: &Message) -> u64 {
-    match serde_json::to_vec(message) {
-        Ok(bytes) => stable_hash_bytes(&bytes),
-        Err(_) => stable_hash_bytes(format!("{:?}", message).as_bytes()),
+impl Message {
+    fn metadata_only(&self) -> impl serde::Serialize + '_ {
+        message_metadata::Metadata::new(self)
     }
+
+    /// Exact JSON length without rescanning a shared immutable payload.
+    pub fn serialized_json_bytes(&self) -> usize {
+        message_metadata::json_bytes(&self.metadata_only())
+            .map(|metadata| metadata.saturating_sub(2) + self.content.serialized_json_bytes())
+            .unwrap_or(0)
+    }
+}
+
+mod message_metadata;
+
+/// Streaming FNV-1a sink. JSON is consumed in serializer order without retaining
+/// an allocation proportional to the message payload.
+struct MessageHashWriter {
+    hash: u64,
+    len: usize,
+}
+
+impl std::io::Write for MessageHashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut hash = self.hash;
+        for &byte in bytes {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(STABLE_HASH_PRIME);
+        }
+        self.hash = hash;
+        self.len += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod message_hash_tests;
+
+pub fn stable_message_hash(message: &Message) -> u64 {
+    let metadata = match serde_json::to_vec(&message.metadata_only()) {
+        Ok(metadata) => metadata,
+        Err(_) => return stable_hash_bytes(format!("{:?}", message).as_bytes()),
+    };
+    message.content.cached_message_hash(&metadata, || {
+        let mut writer = MessageHashWriter {
+            hash: STABLE_HASH_SEED,
+            len: 0,
+        };
+        match serde_json::to_writer(&mut writer, message) {
+            Ok(()) => {
+                // Metadata contains the same envelope with an empty [] array.
+                // Populate the length cache from work already needed for the
+                // first hash, rather than scanning the content a second time.
+                message
+                    .content
+                    .record_serialized_json_bytes(writer.len.saturating_sub(metadata.len()) + 2);
+                writer.hash
+            }
+            Err(_) => stable_hash_bytes(format!("{:?}", message).as_bytes()),
+        }
+    })
 }
 
 /// Project a message down to the fields that actually influence a provider's
@@ -567,8 +630,9 @@ fn dynamic_system_context_message(system_dynamic: &str) -> Option<Message> {
     )))
 }
 
-/// Insert dynamic system context after the latest user turn or compaction boundary
-/// without disturbing the stable cached history prefix or moving on tool rounds.
+/// Insert dynamic system context after a stable user turn boundary. When the
+/// operator prompt was compacted away, a wake immediately after compaction
+/// can open the turn. Reminders arriving during tool rounds must not move it.
 pub fn messages_with_dynamic_system_context(
     messages: &[Message],
     system_dynamic: &str,
@@ -577,18 +641,31 @@ pub fn messages_with_dynamic_system_context(
         return messages.to_vec();
     };
 
-    let mut out = messages.to_vec();
-    let insert_at = out
+    let is_compaction = |message: &Message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::OpenAICompaction { .. }))
+    };
+    let insert_at = match messages
         .iter()
-        .rposition(|message| {
-            is_fresh_user_text_message(message)
-                || message
-                    .content
-                    .iter()
-                    .any(|block| matches!(block, ContentBlock::OpenAICompaction { .. }))
-        })
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
+        .rposition(|message| is_fresh_user_text_message(message) || is_compaction(message))
+    {
+        Some(idx)
+            if is_compaction(&messages[idx])
+                && messages
+                    .get(idx + 1)
+                    .is_some_and(Message::is_internal_system_reminder) =>
+        {
+            idx + 2
+        }
+        Some(idx) => idx + 1,
+        None => messages
+            .iter()
+            .position(Message::is_internal_system_reminder)
+            .map_or(0, |idx| idx + 1),
+    };
+    let mut out = messages.to_vec();
     out.insert(insert_at, dynamic_message);
     out
 }
@@ -838,6 +915,10 @@ pub enum StreamEvent {
         tier: String,
         requested: Option<String>,
     },
+    SpeedReported {
+        requested: Option<SpeedMode>,
+        actual: SpeedMode,
+    },
     /// Error occurred
     Error {
         message: String,
@@ -853,6 +934,9 @@ pub enum StreamEvent {
         /// Provider-native compaction artifact, if one was emitted.
         openai_encrypted_content: Option<String>,
     },
+    /// Actual model identifier reported by the upstream response. This is
+    /// attribution metadata, not a request to change the selected model.
+    ResolvedModel { model: String },
     /// Upstream provider info (e.g., which provider OpenRouter routed to)
     UpstreamProvider { provider: String },
     /// Native tool call from a provider bridge that needs execution by jcode
@@ -963,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_context_prepends_when_no_turn_boundary_exists() {
+    fn dynamic_context_follows_internal_reminder_without_a_fresh_prompt() {
         let messages = vec![
             Message::assistant_text("assistant"),
             Message::user("<system-reminder>\ninternal\n</system-reminder>"),
@@ -972,13 +1056,13 @@ mod tests {
         let out = messages_with_dynamic_system_context(&messages, "Time: 10:00:00 UTC");
 
         assert_eq!(out.len(), 3);
-        assert!(text_of(&out[0]).contains("Time: 10:00:00 UTC"));
-        assert_role_text(&out[1], Role::Assistant, "assistant");
+        assert_role_text(&out[0], Role::Assistant, "assistant");
         assert_role_text(
-            &out[2],
+            &out[1],
             Role::User,
             "<system-reminder>\ninternal\n</system-reminder>",
         );
+        assert!(text_of(&out[2]).contains("Time: 10:00:00 UTC"));
     }
 
     #[test]
@@ -989,7 +1073,8 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::OpenAICompaction {
                     encrypted_content: "compact".into(),
-                }],
+                }]
+                .into(),
                 timestamp: None,
                 tool_duration_ms: None,
             },
@@ -1029,7 +1114,8 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: "<system-reminder>\n# Memory\n</system-reminder>".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         };
@@ -1043,7 +1129,8 @@ mod tests {
                 ContentBlock::ReasoningTrace {
                     text: "history-only scratch".to_string(),
                 },
-            ],
+            ]
+            .into(),
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(7)),
             tool_duration_ms: Some(42),
         };
@@ -1162,4 +1249,24 @@ mod tool_use_block_tests {
             "absent signature must be omitted, got {json}"
         );
     }
+}
+/// Keepalive usage is separate from turn usage and never becomes transcript data.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CacheKeepaliveUsage {
+    pub attempted: u64,
+    pub warmed: u64,
+    /// Public-rate equivalent, including for subscription requests.
+    pub cost_micros: u64,
+    /// Worst-case reservations for requests without a definitive usage response.
+    pub unconfirmed_micros: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_hit: Option<CacheKeepaliveHit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CacheKeepaliveHit {
+    pub at_ms: i64,
+    pub model: String,
+    pub ttl_secs: u64,
+    pub cached_tokens: u64,
 }

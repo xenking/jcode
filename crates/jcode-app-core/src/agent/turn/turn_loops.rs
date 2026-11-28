@@ -1,0 +1,1682 @@
+use super::response_recovery::MalformedToolCallInfo;
+use super::streaming::NetworkRecoveryAction;
+use super::streaming::StreamUsageRecorder;
+use super::*;
+use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_println as println};
+
+#[path = "provider_prewarm.rs"]
+mod provider_prewarm;
+
+impl Agent {
+    async fn wait_for_network_recovery_blocking(
+        &mut self,
+        tracker: &mut crate::network_retry::NetworkRecoveryTracker,
+        reason: &str,
+        error_detail: &str,
+        offline_only: bool,
+        print_output: bool,
+        had_printed_text: bool,
+    ) -> NetworkRecoveryAction {
+        use crate::network_retry::{NetworkRecoveryOutcome, NetworkWaitNotice};
+
+        let cancel_signal = self.graceful_shutdown.clone();
+        let cancel_fut = async move {
+            cancel_signal.notified().await;
+        };
+        tokio::pin!(cancel_fut);
+
+        let session_id = self.session.id().to_owned();
+        let model = self.provider.model();
+        let mut printed_notice = false;
+
+        let outcome = tracker
+            .wait_for_recovery(
+                offline_only,
+                cancel_fut,
+                |notice| match notice {
+                    NetworkWaitNotice::Offline { listener_summary } => {
+                        logging::warn(&format!(
+                            "Network disconnect during turn for {}: {} ({}). Waiting for connectivity ({}).",
+                            session_id, reason, error_detail, listener_summary
+                        ));
+                        Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
+                            session_id: session_id.clone(),
+                            status: format!("waiting for network ({})", listener_summary),
+                            model: Some(model.clone()),
+                        }));
+                        if print_output && !printed_notice {
+                            printed_notice = true;
+                            if had_printed_text {
+                                eprintln!(
+                                    "\n[network disconnected; waiting for connectivity to resume...]"
+                                );
+                            } else {
+                                eprintln!(
+                                    "[network disconnected; waiting for connectivity to resume...]"
+                                );
+                            }
+                        }
+                    }
+                    NetworkWaitNotice::OnlineRetry {
+                        attempt,
+                        max,
+                        delay_secs,
+                    } => {
+                        logging::warn(&format!(
+                            "Transient network error during turn for {}: {} ({}). Retrying in {}s ({}/{}).",
+                            session_id, reason, error_detail, delay_secs, attempt, max
+                        ));
+                        Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
+                            session_id: session_id.clone(),
+                            status: format!("retrying connection ({}/{})", attempt, max),
+                            model: Some(model.clone()),
+                        }));
+                        if print_output && !printed_notice {
+                            printed_notice = true;
+                            if had_printed_text {
+                                eprintln!(
+                                    "\n[connection interrupted; retrying in {}s ({}/{})...]",
+                                    delay_secs, attempt, max
+                                );
+                            } else {
+                                eprintln!(
+                                    "[connection interrupted; retrying in {}s ({}/{})...]",
+                                    delay_secs, attempt, max
+                                );
+                            }
+                        }
+                    }
+                },
+                std::time::Duration::from_secs(20),
+                || {},
+            )
+            .await;
+
+        match outcome {
+            NetworkRecoveryOutcome::RestoredAfterOffline => {
+                logging::info(&format!(
+                    "Network connectivity restored for {}; automatically resuming turn",
+                    self.session.id()
+                ));
+                if print_output {
+                    eprintln!("[network restored; resuming...]");
+                }
+                NetworkRecoveryAction::Retry
+            }
+            NetworkRecoveryOutcome::RetryingWhileOnline { attempt, max } => {
+                logging::info(&format!(
+                    "Retrying turn for {} after transient network error ({}/{})",
+                    self.session.id(),
+                    attempt,
+                    max
+                ));
+                NetworkRecoveryAction::Retry
+            }
+            NetworkRecoveryOutcome::Cancelled => {
+                logging::info(&format!(
+                    "Turn cancelled while waiting for network recovery in {}",
+                    self.session.id()
+                ));
+                NetworkRecoveryAction::Cancelled
+            }
+            NetworkRecoveryOutcome::OnlineRetryBudgetExhausted { .. } => {
+                NetworkRecoveryAction::GiveUp
+            }
+        }
+    }
+
+    /// Run turns until no more tool calls
+    pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
+        let _runtime_activity =
+            crate::runtime_activity::global().try_enter_session(self.session.id())?;
+        self.ensure_session_lease()?;
+        self.ensure_cache_protection_allows_request()?;
+        let mut cache_turn =
+            crate::cache_keepalive::Turn::begin(&self.session, self.registry.compaction());
+        self.set_log_context();
+        let usage_turn_id = self.model_usage_turn_id();
+        self.provider.begin_turn(&usage_turn_id).await;
+        crate::session_metrics::record_turn(self.session.id());
+        // Mark this session as actively streaming for presence UIs (e.g. the
+        // macOS menu bar indicator). Cleared automatically on every exit path.
+        let _streaming_guard = crate::session::StreamingGuard::for_session(&self.session);
+        // Register this turn's cancel signal so session-level cancels reach
+        // this in-flight turn even through stale control handles (issue #428).
+        let _turn_cancel_guard = crate::turn_cancel_registry::register_active_turn(
+            self.session.id(),
+            self.graceful_shutdown.clone(),
+        );
+        let mut final_text = String::new();
+        let trace = trace_enabled();
+        let mut context_limit_retries = 0u32;
+        let mut incomplete_continuations = 0u32;
+        let mut empty_post_tool_continuations = 0u32;
+        let mut fable_guardrail_reconsiderations = 0u32;
+        let mut guardrail_retry_prompt = None;
+        let mut sequential_single_tool_rounds = 0u32;
+        let mut batch_nudge_pending = false;
+        let mut turn_tool_calls = 0usize;
+        let mut todo_nudge_sent = false;
+        let mut consecutive_malformed_tool_rounds = 0u32;
+        let mut network_recovery = crate::network_retry::NetworkRecoveryTracker::new();
+
+        'turn_loop: loop {
+            // Do not start another provider request once a cancel has been
+            // observed; the loop is re-entered by several recovery paths
+            // (issue #732, regression of #428).
+            if self.is_graceful_shutdown() {
+                logging::info("Cancel observed at turn-loop head - not starting another request");
+                break;
+            }
+            if let Some(block) = self.session.migration_lease_block() {
+                logging::info(&format!(
+                    "Session migrated mid-turn - stopping local turn loop: {block}"
+                ));
+                break;
+            }
+            let repaired = self.repair_missing_tool_outputs();
+            if repaired > 0 {
+                logging::warn(&format!(
+                    "Recovered {} missing tool output(s) before API call",
+                    repaired
+                ));
+            }
+            self.apply_pending_reasoning_effort();
+            self.log_unrecorded_setting_changes();
+            self.ensure_session_speed()?;
+            // Start provider transport setup before deriving and potentially
+            // compacting the request history. This is the first point where the
+            // stable request settings are available.
+            let mut tools = self.tool_definitions().await;
+            self.freeze_static_prompt();
+            self.record_prompt_inputs()?;
+            let mut split_prompt = self.build_system_prompt_split(None);
+            self.provider
+                .prewarm(&tools, &split_prompt.static_part)
+                .await;
+            let (messages, compaction_event) = self.messages_for_provider(None).await?;
+            if let Some(event) = compaction_event {
+                let route_switch_notice = self.route_switch_compaction_notice(&event);
+                // Reset cache tracker and tool lock on compaction since the message history changes
+                self.cache_tracker.reset();
+                self.kv_cache_monitor.reset();
+                self.tool_lock.unlock();
+                if print_output && let Some(notice) = route_switch_notice {
+                    crate::terminal_println!("{notice}");
+                } else if print_output {
+                    let tokens_str = event
+                        .pre_tokens
+                        .map(|t| format!(" ({} tokens)", t))
+                        .unwrap_or_default();
+                    crate::terminal_println!(
+                        "📦 Context compacted ({}){}",
+                        event.trigger,
+                        tokens_str
+                    );
+                }
+                // Compaction clears the tool lock, so rebuild the foreground
+                // request metadata rather than relying on the pre-compaction snapshot.
+                tools = self.tool_definitions().await;
+                split_prompt = self.build_system_prompt_split(None);
+            }
+
+            let tools = self.prepare_tools_for_request(tools, &messages)?;
+            let messages: std::sync::Arc<[Message]> = messages.into();
+            // Non-blocking memory: uses pending result from last turn, spawns check for next turn
+            let memory_pending =
+                self.build_memory_prompt_nonblocking_shared(std::sync::Arc::clone(&messages), None);
+            // Use split prompt for better caching - static content cached, dynamic not
+            self.log_prompt_prefix_accounting(&split_prompt, &tools);
+
+            // The request snapshot now owns everything the provider needs. Drop
+            // the session's derived transcript copy before the network wait.
+            self.session.release_provider_messages_cache();
+
+            let mut messages_with_memory: Vec<Message> = messages.iter().cloned().collect();
+            let mut ephemeral_memory = None;
+            if let Some(memory) = memory_pending.as_ref()
+                && let Some((message, persisted)) =
+                    self.prepare_memory_injection_message(&messages, memory)
+            {
+                let memory_count = memory.count.max(1);
+                let age_ms = memory.computed_at.elapsed().as_millis() as u64;
+                crate::memory::record_injected_prompt(&memory.prompt, memory_count, age_ms);
+                logging::info(&format!(
+                    "Memory injected as message ({} chars)",
+                    memory.prompt.len()
+                ));
+                if persisted {
+                    messages_with_memory.push(message);
+                } else {
+                    // An opted-out recall is absent from the next request, so
+                    // it must not carry a provider cache marker.
+                    ephemeral_memory = Some(message.into_request_only());
+                }
+            }
+            let before_reminders = messages_with_memory.len();
+            if Self::should_inject_batch_nudge(
+                batch_nudge_pending,
+                tools.iter().any(|tool| tool.name == "batch"),
+            ) {
+                messages_with_memory.push(self.append_model_reminder(Self::BATCH_NUDGE));
+                batch_nudge_pending = false;
+                sequential_single_tool_rounds = 0;
+            }
+            if !todo_nudge_sent
+                && turn_tool_calls > Self::TOOL_CALLS_BEFORE_TODO_NUDGE
+                && tools.iter().any(|tool| tool.name == "todo")
+                && crate::todo::load_todos(self.session.id())
+                    .map(|t| t.is_empty())
+                    .unwrap_or(false)
+            {
+                messages_with_memory.push(self.append_model_reminder(Self::TODO_NUDGE));
+                todo_nudge_sent = true;
+            }
+            // Background features (memory recall) can hit a plan limit with no
+            // visible failure. Surface it once through the agent so every UI
+            // shows the upgrade prompt instead of silently degrading.
+            // Agents without memory (auth smoke tests, headless probes) leave
+            // the notice for a user-facing session.
+            if let Some(notice) = self
+                .memory_enabled
+                .then(crate::subscription_notice::take)
+                .flatten()
+            {
+                crate::subscription_notice::show_upgrade_card(&notice, self.session.id());
+                messages_with_memory
+                    .push(self.append_model_reminder(&Self::plan_limit_reminder(&notice)));
+            }
+            if messages_with_memory.len() > before_reminders {
+                self.persist_session_best_effort("turn reminders");
+            }
+            self.record_client_cache_request(&messages_with_memory);
+
+            // Request-only messages follow every durable block. A reload nudge
+            // only makes this particular continuation valid on the wire.
+            messages_with_memory.extend(ephemeral_memory);
+            messages_with_memory.extend(guardrail_retry_prompt.take());
+            if let Some(mut nudge) =
+                super::messages::trailing_assistant_nudge(&messages_with_memory)
+            {
+                nudge.timestamp = None;
+                messages_with_memory.push(nudge.into_request_only());
+            }
+            let prompt_has_recent_tool_result =
+                Self::messages_end_with_tool_result(&messages_with_memory);
+
+            logging::debug_lazy(|| {
+                format!(
+                    "API call starting: {} messages, {} tools",
+                    messages_with_memory.len(),
+                    tools.len()
+                )
+            });
+            let cache_breaker_route = self.cache_breaker_route();
+            let api_start = Instant::now();
+
+            // Publish status for TUI to show during Task execution
+            Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
+                session_id: self.session.id().to_owned(),
+                status: "calling API".to_string(),
+                model: Some(self.provider.model()),
+            }));
+
+            let stamped = crate::config::config()
+                .features
+                .message_timestamps
+                .then(|| Message::with_timestamps(&messages_with_memory));
+            let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
+            self.enforce_worker_request()?;
+            self.last_status_detail = None;
+            self.provider.set_session_id(self.session.id());
+            let cache_capture = cache_turn
+                .as_ref()
+                .map(crate::cache_keepalive::Turn::request);
+            let completion = jcode_provider_core::cache_keepalive::Capture::scope(
+                cache_capture.clone(),
+                jcode_provider_core::with_pinned_worker_request(
+                    self.session.is_swarm_worker(),
+                    jcode_provider_core::with_account_limit_fail_fast(
+                        self.routing_fail_fast_limits,
+                        self.provider.complete_split(
+                            send_messages,
+                            &tools,
+                            &split_prompt.static_part,
+                            &split_prompt.dynamic_part,
+                            self.provider_session_id.as_deref(),
+                        ),
+                    ),
+                ),
+            )
+            .await;
+            self.sync_bound_account_route();
+            let mut stream = match completion {
+                Ok(stream) => stream,
+                Err(e) => {
+                    let err_chain = crate::util::format_error_chain(&e);
+                    if self.try_auto_compact_after_context_limit(&err_chain) {
+                        self.record_failed_account_route(&err_chain);
+                        context_limit_retries += 1;
+                        if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                            logging::warn(
+                                "Context-limit compaction retry limit reached; giving up",
+                            );
+                            return Err(anyhow::anyhow!(
+                                "Context limit exceeded after {} compaction retries",
+                                Self::MAX_CONTEXT_LIMIT_RETRIES
+                            ));
+                        }
+                        continue 'turn_loop;
+                    }
+                    if let Some(reason) =
+                        crate::network_retry::classify_network_interruption(e.as_ref())
+                    {
+                        match self
+                            .wait_for_network_recovery_blocking(
+                                &mut network_recovery,
+                                &reason,
+                                &err_chain,
+                                false,
+                                print_output,
+                                false,
+                            )
+                            .await
+                        {
+                            NetworkRecoveryAction::Retry => continue 'turn_loop,
+                            NetworkRecoveryAction::Cancelled => return Ok(final_text),
+                            NetworkRecoveryAction::GiveUp => {}
+                        }
+                    }
+                    self.record_failed_account_route(&err_chain);
+                    return Err(e);
+                }
+            };
+
+            // The provider returned an owned stream, so the request transcript
+            // copies are no longer needed while the response is consumed.
+            drop(stamped);
+            drop(messages_with_memory);
+            drop(memory_pending);
+            drop(messages);
+            drop(split_prompt);
+
+            // Successful API call - reset retry counter
+            context_limit_retries = 0;
+
+            logging::debug_lazy(|| {
+                format!(
+                    "API stream opened in {:.2}s",
+                    api_start.elapsed().as_secs_f64()
+                )
+            });
+            Agent::log_agent_provider_stream_lifecycle(
+                logging::LogLevel::Debug,
+                self,
+                "stream_opened",
+                api_start,
+                || vec![("mode", "blocking".to_string())],
+            );
+
+            Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
+                session_id: self.session.id().to_owned(),
+                status: "streaming".to_string(),
+                model: Some(self.provider.model()),
+            }));
+
+            let mut text_content = String::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut current_tool: Option<String> = None;
+            let mut streaming_tools: HashMap<String, (ToolCall, String)> = HashMap::new();
+            let mut generated_image_contexts: Vec<Vec<ContentBlock>> = Vec::new();
+            let mut usage_input: Option<u64> = None;
+            let mut usage_output: Option<u64> = None;
+            let mut usage_cache_read: Option<u64> = None;
+            let mut usage_cache_creation: Option<u64> = None;
+            let mut usage_recorder = StreamUsageRecorder::new(self.session.id());
+            let mut saw_message_end = false;
+            let mut stop_reason: Option<String> = None;
+            let mut _thinking_start: Option<Instant> = None;
+            let provider_name = self.provider.name().to_string();
+            let store_reasoning_content =
+                crate::provider::stores_reasoning_content_for_context(&provider_name);
+            let mut reasoning =
+                crate::message::TurnReasoning::new(&provider_name, store_reasoning_content);
+            let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
+            // Provider-executed tool items (e.g. native web search), stored
+            // verbatim at their position in the response for exact replay.
+            let mut provider_native_items =
+                jcode_message_types::provider_native::ProviderNativeItems::default();
+            // Track tool results from provider (already executed by Claude Code CLI)
+            let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
+                std::collections::HashMap::new();
+            let mut openai_native_compaction: Option<(String, usize)> = None;
+
+            let mut retry_after_compaction = false;
+            let mut retry_after_network_recovery = false;
+            let mut executed_native_tool = false;
+            while let Some(event) = stream.next().await {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(e) => {
+                        let err_str = crate::util::format_error_chain(&e);
+                        usage_recorder.finish();
+                        if self.try_auto_compact_after_context_limit(&err_str) {
+                            self.record_failed_account_route(&err_str);
+                            Agent::log_agent_provider_stream_lifecycle(
+                                logging::LogLevel::Warn,
+                                self,
+                                "stream_error_retry_after_compaction",
+                                api_start,
+                                || {
+                                    vec![
+                                        ("mode", "blocking".to_string()),
+                                        ("error", err_str.clone()),
+                                        (
+                                            "context_limit_retries",
+                                            (context_limit_retries + 1).to_string(),
+                                        ),
+                                    ]
+                                },
+                            );
+                            context_limit_retries += 1;
+                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                                logging::warn(
+                                    "Context-limit compaction retry limit reached; giving up",
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "Context limit exceeded after {} compaction retries",
+                                    Self::MAX_CONTEXT_LIMIT_RETRIES
+                                ));
+                            }
+                            retry_after_compaction = true;
+                            break;
+                        }
+                        if !executed_native_tool
+                            && !saw_message_end
+                            && let Some(reason) =
+                                crate::network_retry::classify_network_interruption(e.as_ref())
+                        {
+                            match self
+                                .wait_for_network_recovery_blocking(
+                                    &mut network_recovery,
+                                    &reason,
+                                    &err_str,
+                                    false,
+                                    print_output,
+                                    !text_content.is_empty(),
+                                )
+                                .await
+                            {
+                                NetworkRecoveryAction::Retry => {
+                                    retry_after_network_recovery = true;
+                                    break;
+                                }
+                                NetworkRecoveryAction::Cancelled => return Ok(final_text),
+                                NetworkRecoveryAction::GiveUp => {}
+                            }
+                        }
+                        self.record_failed_account_route(&err_str);
+                        Agent::log_agent_provider_stream_lifecycle(
+                            logging::LogLevel::Error,
+                            self,
+                            "stream_error",
+                            api_start,
+                            || vec![("mode", "blocking".to_string()), ("error", err_str)],
+                        );
+                        return Err(e);
+                    }
+                };
+
+                let input_tool_id = match &event {
+                    StreamEvent::ToolInputDeltaFor { id, .. }
+                    | StreamEvent::ToolUseEndFor { id } => Some(id.clone()),
+                    _ => current_tool.clone(),
+                };
+                match event {
+                    StreamEvent::ThinkingStart => {
+                        // Track start but don't print - wait for ThinkingDone
+                        _thinking_start = Some(Instant::now());
+                    }
+                    StreamEvent::ThinkingDelta(thinking_text) => {
+                        // Display reasoning content only if enabled
+                        if print_output && crate::config::config().display.show_thinking {
+                            crate::terminal_println!("💭 {}", thinking_text);
+                        }
+                        // Always capture reasoning text so it can be persisted as a
+                        // history-only trace, regardless of provider replay support.
+                        reasoning.push_text(&thinking_text);
+                    }
+                    StreamEvent::ThinkingSignatureDelta(signature) => {
+                        reasoning.push_signature(&signature);
+                    }
+                    StreamEvent::ThinkingEnd => {
+                        reasoning.finish_block(&mut provider_native_items, text_content.len());
+                        // Don't print here - ThinkingDone has accurate timing
+                        _thinking_start = None;
+                    }
+                    StreamEvent::ThinkingDone { duration_secs } => {
+                        // Bridge provides accurate wall-clock timing
+                        if print_output {
+                            println!("Thought for {:.1}s\n", duration_secs);
+                        }
+                    }
+                    StreamEvent::TextDelta(text) => {
+                        if print_output {
+                            crate::terminal_print!("{}", text);
+                            io::stdout().flush()?;
+                        }
+                        text_content.push_str(&text);
+                    }
+                    StreamEvent::TextSuffixReplace { old_text, new_text } => {
+                        if provider_native_items.replace_text_suffix(
+                            &mut text_content,
+                            &old_text,
+                            &new_text,
+                        ) && print_output
+                        {
+                            // Plain stdout cannot retract already printed deltas.
+                            // Still surface the real source links to CLI users.
+                            crate::terminal_print!("\n{}", new_text);
+                            io::stdout().flush()?;
+                        }
+                    }
+                    StreamEvent::ToolUseStart { id, name } => {
+                        if streaming_tools.contains_key(&id)
+                            || tool_calls.iter().any(|tool: &ToolCall| tool.id == id)
+                        {
+                            continue;
+                        }
+                        if trace {
+                            eprintln!("\n[trace] tool_use_start name={} id={}", name, id);
+                        }
+                        if print_output {
+                            print!("\n[{}] ", name);
+                            io::stdout().flush()?;
+                        }
+                        current_tool = Some(id.clone());
+                        streaming_tools.entry(id.clone()).or_insert_with(|| {
+                            (
+                                ToolCall {
+                                    id,
+                                    name,
+                                    input: serde_json::Value::Null,
+                                    intent: None,
+                                    thought_signature: None,
+                                },
+                                String::new(),
+                            )
+                        });
+                    }
+                    StreamEvent::ToolInputDelta(delta)
+                    | StreamEvent::ToolInputDeltaFor { delta, .. } => {
+                        if let Some((_, input)) = input_tool_id
+                            .as_ref()
+                            .and_then(|id| streaming_tools.get_mut(id))
+                        {
+                            input.push_str(&delta);
+                        }
+                    }
+                    StreamEvent::ToolUseEnd | StreamEvent::ToolUseEndFor { .. } => {
+                        if let Some((mut tool, current_tool_input)) = input_tool_id
+                            .as_ref()
+                            .and_then(|id| streaming_tools.remove(id))
+                        {
+                            // Parse the accumulated JSON
+                            let tool_input =
+                                ToolCall::parse_streamed_input_to_object(&current_tool_input);
+                            tool.input = tool_input.clone();
+                            tool.intent = ToolCall::intent_from_input(&tool_input);
+
+                            if trace {
+                                if current_tool_input.trim().is_empty() {
+                                    eprintln!("[trace] tool_input {} (empty)", tool.name);
+                                } else if tool_input == serde_json::Value::Null {
+                                    eprintln!(
+                                        "[trace] tool_input {} (raw) {}",
+                                        tool.name, current_tool_input
+                                    );
+                                } else {
+                                    let pretty = serde_json::to_string_pretty(&tool_input)
+                                        .unwrap_or_else(|_| tool_input.to_string());
+                                    eprintln!("[trace] tool_input {} {}", tool.name, pretty);
+                                }
+                            }
+
+                            if print_output {
+                                // Show brief tool info
+                                print_tool_summary(&tool);
+                            }
+
+                            tool_calls.push(tool);
+                            if current_tool == input_tool_id {
+                                current_tool = None;
+                            }
+                        }
+                    }
+                    StreamEvent::ToolUseSignatureFor { id, signature } => {
+                        if !signature.is_empty() {
+                            if let Some((tool, _)) = streaming_tools.get_mut(&id) {
+                                tool.thought_signature = Some(signature);
+                            } else if let Some(tool) =
+                                tool_calls.iter_mut().find(|tool| tool.id == id)
+                            {
+                                tool.thought_signature = Some(signature);
+                            }
+                        }
+                    }
+                    StreamEvent::ToolUseSignature(signature) => {
+                        // Attach Gemini 3 thought signature to the most recent
+                        // tool call so it can be persisted and replayed.
+                        if let Some(tool) = tool_calls.last_mut()
+                            && !signature.is_empty()
+                        {
+                            tool.thought_signature = Some(signature);
+                        }
+                    }
+                    StreamEvent::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        executed_native_tool = true;
+                        // SDK already executed this tool, store the result
+                        if trace {
+                            eprintln!(
+                                "[trace] sdk_tool_result id={} is_error={} content_len={}",
+                                tool_use_id,
+                                is_error,
+                                content.len()
+                            );
+                        }
+                        sdk_tool_results.insert(tool_use_id, (content, is_error));
+                    }
+                    StreamEvent::GeneratedImage {
+                        id,
+                        path,
+                        metadata_path,
+                        output_format,
+                        revised_prompt,
+                    } => {
+                        if trace {
+                            eprintln!(
+                                "[trace] generated_image id={} format={} path={} metadata={}",
+                                id,
+                                output_format,
+                                path,
+                                metadata_path.as_deref().unwrap_or("none")
+                            );
+                        }
+                        if print_output {
+                            let summary = crate::message::generated_image_summary(
+                                &path,
+                                metadata_path.as_deref(),
+                                &output_format,
+                                revised_prompt.as_deref(),
+                            );
+                            eprintln!(
+                                "\n[{}] {}",
+                                crate::message::GENERATED_IMAGE_TOOL_NAME,
+                                summary
+                            );
+                        }
+                        if self.provider.supports_image_input() {
+                            if let Some(blocks) =
+                                crate::message::generated_image_visual_context_blocks(
+                                    &path,
+                                    metadata_path.as_deref(),
+                                    &output_format,
+                                    revised_prompt.as_deref(),
+                                )
+                            {
+                                generated_image_contexts.push(blocks);
+                            } else {
+                                crate::logging::warn(&format!(
+                                    "Generated image was not attached as visual context: {}",
+                                    path
+                                ));
+                            }
+                        }
+                    }
+                    StreamEvent::TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                        cache_read_input_tokens,
+                        cache_creation_input_tokens,
+                    } => {
+                        if let Some(input) = input_tokens {
+                            usage_input = Some(input);
+                        }
+                        if let Some(output) = output_tokens {
+                            usage_output = Some(output);
+                        }
+                        if cache_read_input_tokens.is_some() {
+                            usage_cache_read = cache_read_input_tokens;
+                        }
+                        if cache_creation_input_tokens.is_some() {
+                            usage_cache_creation = cache_creation_input_tokens;
+                        }
+                        usage_recorder.observe(
+                            self.provider.name(),
+                            &self.provider.model(),
+                            [
+                                usage_input,
+                                usage_output,
+                                usage_cache_read,
+                                usage_cache_creation,
+                            ],
+                        );
+                        if let Some(input) = usage_input {
+                            self.update_compaction_usage_from_stream(
+                                input,
+                                usage_cache_read,
+                                usage_cache_creation,
+                            );
+                        }
+                        if trace {
+                            eprintln!(
+                                "[trace] token_usage input={} output={} cache_read={} cache_write={}",
+                                usage_input.unwrap_or(0),
+                                usage_output.unwrap_or(0),
+                                usage_cache_read.unwrap_or(0),
+                                usage_cache_creation.unwrap_or(0)
+                            );
+                        }
+                    }
+                    StreamEvent::ConnectionType { connection } => {
+                        if trace {
+                            eprintln!("[trace] connection_type={}", connection);
+                        }
+                        crate::telemetry::record_connection_type(&connection);
+                        self.last_connection_type = Some(connection);
+                    }
+                    StreamEvent::ConnectionPhase { phase } => {
+                        if trace {
+                            eprintln!("[trace] connection_phase={}", phase);
+                        }
+                    }
+                    StreamEvent::StatusDetail { detail } => {
+                        if trace {
+                            eprintln!("[trace] status_detail={}", detail);
+                        }
+                        self.last_status_detail = Some(detail);
+                    }
+                    StreamEvent::SpeedReported { .. } => {}
+                    StreamEvent::ServiceTier { tier, .. } => {
+                        if trace {
+                            eprintln!("[trace] provider_service_tier={tier}");
+                        }
+                    }
+                    StreamEvent::ResolvedModel { model } => {
+                        usage_recorder.resolve_model(model);
+                    }
+                    StreamEvent::RetryRollback { attempt, max } => {
+                        // Preserve reported usage from the failed attempt, but
+                        // never let its model or counters bleed into the retry.
+                        usage_recorder.finish();
+                        usage_input = None;
+                        usage_output = None;
+                        usage_cache_read = None;
+                        usage_cache_creation = None;
+                        // Transient transport fault mid-stream; the provider is
+                        // replaying the request. Discard this attempt's partial
+                        // output so the replay doesn't duplicate it in history.
+                        logging::warn(&format!(
+                            "Mid-stream retry rollback (attempt {}/{}): discarding partial output ({} text chars, {} tool calls)",
+                            attempt,
+                            max,
+                            text_content.len(),
+                            tool_calls.len(),
+                        ));
+                        if print_output && !text_content.is_empty() {
+                            // Already-printed text can't be unprinted on a plain
+                            // stdout stream; mark the discontinuity instead.
+                            println!("\n[connection interrupted, retrying response from the top]");
+                            io::stdout().flush()?;
+                        }
+                        text_content.clear();
+                        tool_calls.clear();
+                        current_tool = None;
+                        streaming_tools.clear();
+                        sdk_tool_results.clear();
+                        generated_image_contexts.clear();
+                        reasoning.clear();
+                        openai_reasoning_items.clear();
+                        provider_native_items.clear();
+                        openai_native_compaction = None;
+                        saw_message_end = false;
+                        stop_reason = None;
+                    }
+                    StreamEvent::ProviderNative { provider, item } => {
+                        if print_output
+                            && let Some(display) =
+                                jcode_message_types::provider_native::provider_native_display(
+                                    &provider, &item,
+                                )
+                        {
+                            match display.output {
+                                None => print!("\n[{}] ", display.name),
+                                Some(output) => println!(
+                                    "\n[{}] {}",
+                                    display.name,
+                                    crate::util::truncate_str(&output, 200)
+                                ),
+                            }
+                            io::stdout().flush()?;
+                        }
+                        provider_native_items.push(text_content.len(), provider, item);
+                    }
+                    StreamEvent::TextDone => provider_native_items.finish_text(text_content.len()),
+                    StreamEvent::MessageEnd {
+                        stop_reason: reason,
+                    } => {
+                        saw_message_end = true;
+                        if reason.is_some() {
+                            stop_reason = reason;
+                        }
+                        // Don't break yet - wait for SessionId which comes after MessageEnd
+                        // (but stream close will also end the loop for providers without SessionId)
+                    }
+                    StreamEvent::SessionId(sid) => {
+                        if trace {
+                            eprintln!("[trace] session_id {}", sid);
+                        }
+                        self.provider_session_id = Some(sid.clone());
+                        self.session.apply_route(crate::session::Route {
+                            provider_session_id: Some(sid),
+                            ..self.session.route()
+                        });
+                        // We've received session_id, can exit the loop now
+                        if saw_message_end {
+                            break;
+                        }
+                    }
+                    StreamEvent::UpstreamProvider { provider } => {
+                        // Log upstream provider for local trace output
+                        if trace {
+                            eprintln!("[trace] upstream_provider={}", provider);
+                        }
+                        self.last_upstream_provider = Some(provider);
+                    }
+                    StreamEvent::OpenAIReasoning {
+                        id,
+                        summary,
+                        encrypted_content,
+                        status,
+                    } => {
+                        if store_reasoning_content {
+                            openai_reasoning_items.push(ContentBlock::OpenAIReasoning {
+                                id,
+                                summary,
+                                encrypted_content,
+                                status,
+                            });
+                        }
+                    }
+                    StreamEvent::Compaction {
+                        trigger,
+                        pre_tokens,
+                        openai_encrypted_content,
+                    } => {
+                        if let Some(encrypted_content) = openai_encrypted_content {
+                            openai_native_compaction
+                                .get_or_insert((encrypted_content, self.session.message_count()));
+                        }
+                        if print_output {
+                            let tokens_str = pre_tokens
+                                .map(|t| format!(" ({} tokens)", t))
+                                .unwrap_or_default();
+                            crate::terminal_println!(
+                                "📦 Context compacted ({}){}",
+                                trigger,
+                                tokens_str
+                            );
+                        }
+                    }
+                    StreamEvent::NativeToolCall {
+                        request_id,
+                        tool_name,
+                        input,
+                    } => {
+                        executed_native_tool = true;
+                        // Execute native tool and send result back to SDK bridge
+                        if trace {
+                            eprintln!(
+                                "[trace] native_tool_call request_id={} tool={}",
+                                request_id, tool_name
+                            );
+                        }
+                        let ctx = ToolContext {
+                            session_id: self.session.id().to_owned(),
+                            message_id: self.session.id().to_owned(),
+                            tool_call_id: request_id.clone(),
+                            working_dir: self.working_dir().map(PathBuf::from),
+                            stdin_request_tx: self.stdin_request_tx.clone(),
+                            graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
+                            execution_mode: ToolExecutionMode::AgentTurn,
+                        };
+                        crate::telemetry::record_tool_call();
+                        let tool_result = super::tool_handoff::execute_with_background(
+                            self.registry.clone(),
+                            tool_name.clone(),
+                            ToolCall::normalize_input_to_object(input),
+                            ctx,
+                        )
+                        .await;
+                        if tool_result.is_err() {
+                            crate::telemetry::record_tool_failure();
+                        }
+                        let native_result = match tool_result {
+                            Ok(output) => NativeToolResult::success(request_id, output.output),
+                            Err(e) => NativeToolResult::error(request_id, e.to_string()),
+                        };
+                        // Send result back to SDK bridge
+                        if let Some(sender) = self.provider.native_result_sender() {
+                            let _ = sender.send(native_result).await;
+                        }
+                    }
+                    StreamEvent::Error {
+                        message,
+                        retry_after_secs,
+                    } => {
+                        if trace {
+                            eprintln!("[trace] stream_error {}", message);
+                        }
+                        usage_recorder.finish();
+                        if self.try_auto_compact_after_context_limit(&message) {
+                            Agent::log_agent_provider_stream_lifecycle(
+                                logging::LogLevel::Warn,
+                                self,
+                                "stream_event_retry_after_compaction",
+                                api_start,
+                                || {
+                                    vec![
+                                        ("mode", "blocking".to_string()),
+                                        ("error", message.clone()),
+                                        (
+                                            "context_limit_retries",
+                                            (context_limit_retries + 1).to_string(),
+                                        ),
+                                    ]
+                                },
+                            );
+                            context_limit_retries += 1;
+                            if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
+                                logging::warn(
+                                    "Context-limit compaction retry limit reached; giving up",
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "Context limit exceeded after {} compaction retries",
+                                    Self::MAX_CONTEXT_LIMIT_RETRIES
+                                ));
+                            }
+                            retry_after_compaction = true;
+                            break;
+                        }
+                        if retry_after_secs.is_none()
+                            && !executed_native_tool
+                            && !saw_message_end
+                            && let Some(reason) = crate::network_retry::classify_message(&message)
+                        {
+                            match self
+                                .wait_for_network_recovery_blocking(
+                                    &mut network_recovery,
+                                    &reason,
+                                    &message,
+                                    false,
+                                    print_output,
+                                    !text_content.is_empty(),
+                                )
+                                .await
+                            {
+                                NetworkRecoveryAction::Retry => {
+                                    retry_after_network_recovery = true;
+                                    break;
+                                }
+                                NetworkRecoveryAction::Cancelled => return Ok(final_text),
+                                NetworkRecoveryAction::GiveUp => {}
+                            }
+                        }
+                        Agent::log_agent_provider_stream_lifecycle(
+                            logging::LogLevel::Error,
+                            self,
+                            "stream_event_error",
+                            api_start,
+                            || {
+                                vec![
+                                    ("mode", "blocking".to_string()),
+                                    ("error", message.clone()),
+                                    (
+                                        "retry_after_secs",
+                                        retry_after_secs
+                                            .map(|seconds| seconds.to_string())
+                                            .unwrap_or_else(|| "none".to_string()),
+                                    ),
+                                ]
+                            },
+                        );
+                        return Err(StreamError::new(message, retry_after_secs).into());
+                    }
+                }
+            }
+
+            usage_recorder.finish();
+            if retry_after_compaction {
+                Agent::log_agent_provider_stream_lifecycle(
+                    logging::LogLevel::Debug,
+                    self,
+                    "retry_after_compaction",
+                    api_start,
+                    || vec![("mode", "blocking".to_string())],
+                );
+                continue 'turn_loop;
+            }
+            if !retry_after_network_recovery
+                && !saw_message_end
+                && !executed_native_tool
+                && !self.is_graceful_shutdown()
+                && text_content.is_empty()
+                && tool_calls.is_empty()
+                && streaming_tools.is_empty()
+                && reasoning.text_len() == 0
+                && provider_native_items.is_empty()
+            {
+                match self
+                    .wait_for_network_recovery_blocking(
+                        &mut network_recovery,
+                        "stream ended unexpectedly without message completion",
+                        "stream EOF before message_end",
+                        true,
+                        print_output,
+                        false,
+                    )
+                    .await
+                {
+                    NetworkRecoveryAction::Retry => {
+                        retry_after_network_recovery = true;
+                    }
+                    NetworkRecoveryAction::Cancelled => return Ok(final_text),
+                    NetworkRecoveryAction::GiveUp => {}
+                }
+            }
+            if retry_after_network_recovery {
+                Agent::log_agent_provider_stream_lifecycle(
+                    logging::LogLevel::Info,
+                    self,
+                    "retry_after_network_recovery",
+                    api_start,
+                    || vec![("mode", "blocking".to_string())],
+                );
+                continue 'turn_loop;
+            }
+            network_recovery.record_success();
+            let api_elapsed = api_start.elapsed();
+
+            Agent::log_agent_provider_stream_lifecycle(
+                logging::LogLevel::Info,
+                self,
+                "stream_complete",
+                api_start,
+                || {
+                    vec![
+                        ("mode", "blocking".to_string()),
+                        ("saw_message_end", saw_message_end.to_string()),
+                        ("input", usage_input.unwrap_or(0).to_string()),
+                        ("output", usage_output.unwrap_or(0).to_string()),
+                        ("cache_read", usage_cache_read.unwrap_or(0).to_string()),
+                        ("cache_write", usage_cache_creation.unwrap_or(0).to_string()),
+                    ]
+                },
+            );
+
+            if usage_input.is_some()
+                || usage_output.is_some()
+                || usage_cache_read.is_some()
+                || usage_cache_creation.is_some()
+            {
+                crate::telemetry::record_token_usage(
+                    usage_input.unwrap_or(0),
+                    usage_output.unwrap_or(0),
+                    usage_cache_read,
+                    usage_cache_creation,
+                );
+                let output = usage_output.unwrap_or(0);
+                let total = self
+                    .effective_context_tokens_from_usage(
+                        usage_input.unwrap_or(0),
+                        usage_cache_read,
+                        usage_cache_creation,
+                    )
+                    .saturating_add(output);
+                crate::session_metrics::record_token_usage(self.session.id(), total, output);
+                if saw_message_end {
+                    self.record_completed_context_observation(total.saturating_sub(output))
+                        .await;
+                }
+            }
+
+            if print_output
+                && (usage_input.is_some()
+                    || usage_output.is_some()
+                    || usage_cache_read.is_some()
+                    || usage_cache_creation.is_some())
+            {
+                let input = usage_input.unwrap_or(0);
+                let output = usage_output.unwrap_or(0);
+                let cache_read = usage_cache_read.unwrap_or(0);
+                let cache_creation = usage_cache_creation.unwrap_or(0);
+                let cache_str = if usage_cache_read.is_some() || usage_cache_creation.is_some() {
+                    format!(
+                        " cache_read: {} cache_write: {}",
+                        cache_read, cache_creation
+                    )
+                } else {
+                    String::new()
+                };
+                print!(
+                    "\n[Tokens] upload: {} download: {}{}\n",
+                    input, output, cache_str
+                );
+                io::stdout().flush()?;
+            }
+
+            if saw_message_end {
+                if let (Some(turn), Some(capture)) = (&cache_turn, cache_capture) {
+                    turn.accept(capture);
+                }
+                self.note_shake_provider_response(usage_cache_read).await;
+            }
+            // Store usage for debug queries
+            self.last_usage = TokenUsage {
+                input_tokens: usage_input.unwrap_or(0),
+                output_tokens: usage_output.unwrap_or(0),
+                cache_read_input_tokens: usage_cache_read,
+                cache_creation_input_tokens: usage_cache_creation,
+            };
+
+            let visible_text_is_empty = text_content.trim().is_empty();
+
+            // Add assistant message to history. Avoid persisting whitespace-only text as a
+            // successful visible answer: some OpenRouter/Kimi tool continuations can finish
+            // cleanly with only spaces despite non-zero output tokens. Persisting that makes the
+            // UI look like the agent stopped after tools with no explanation.
+            let mut content_blocks = Vec::new();
+            if !provider_native_items.is_empty() {
+                content_blocks.extend(provider_native_items.interleave(&text_content));
+            } else if !text_content.is_empty() && !visible_text_is_empty {
+                content_blocks.push(ContentBlock::Text {
+                    text: text_content.clone(),
+                    cache_control: None,
+                });
+            }
+            reasoning.append_history(&mut content_blocks);
+            if store_reasoning_content {
+                content_blocks.extend(openai_reasoning_items.iter().cloned());
+            }
+            for tc in &tool_calls {
+                content_blocks.push(tc.to_tool_use_block());
+            }
+
+            let assistant_message_id = if !content_blocks.is_empty() {
+                crate::telemetry::record_assistant_response();
+                let token_usage = Some(crate::session::StoredTokenUsage {
+                    prompt_tokens: Some(self.effective_context_tokens_from_usage(
+                        self.last_usage.input_tokens,
+                        self.last_usage.cache_read_input_tokens,
+                        self.last_usage.cache_creation_input_tokens,
+                    )),
+                    input_tokens: self.last_usage.input_tokens,
+                    output_tokens: self.last_usage.output_tokens,
+                    cache_read_input_tokens: self.last_usage.cache_read_input_tokens,
+                    cache_creation_input_tokens: self.last_usage.cache_creation_input_tokens,
+                    request_elapsed_ms: Some(api_elapsed.as_millis() as u64),
+                });
+                let message_id =
+                    self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);
+                self.push_embedding_snapshot_if_semantic(&text_content);
+                self.session.save()?;
+                self.record_model_turn_usage(&usage_turn_id);
+                Some(message_id)
+            } else {
+                None
+            };
+
+            let cache_breaker_invalidated = !saw_message_end || openai_native_compaction.is_some();
+            if let Some((encrypted_content, compacted_count)) = openai_native_compaction.take() {
+                let _ = self.apply_openai_native_compaction(encrypted_content, compacted_count)?;
+            }
+
+            self.observe_cache_protection(cache_breaker_route, cache_breaker_invalidated)?;
+
+            // If stop_reason indicates truncation (e.g. max_tokens), discard tool calls
+            // with null/empty inputs since they were likely truncated mid-generation.
+            // This prevents executing broken tool calls and instead requests a continuation.
+            self.filter_truncated_tool_calls(
+                stop_reason.as_deref(),
+                &mut tool_calls,
+                assistant_message_id.as_ref(),
+            );
+
+            if tool_calls.is_empty() && !generated_image_contexts.is_empty() {
+                for blocks in generated_image_contexts.drain(..) {
+                    self.add_message(Role::User, blocks);
+                }
+                self.session.save()?;
+                logging::info(
+                    "Continuing turn so model can inspect generated image visual context",
+                );
+                continue;
+            }
+
+            // If no tool calls, we're done
+            if tool_calls.is_empty() {
+                if let Some(prompt) = self.fable_guardrail_retry_prompt(
+                    stop_reason.as_deref(),
+                    &mut fable_guardrail_reconsiderations,
+                ) {
+                    guardrail_retry_prompt = Some(prompt);
+                    continue;
+                }
+                if self.maybe_continue_empty_post_tool_response(
+                    visible_text_is_empty,
+                    prompt_has_recent_tool_result,
+                    stop_reason.as_deref(),
+                    &mut empty_post_tool_continuations,
+                )? {
+                    continue;
+                }
+                if self.maybe_continue_incomplete_response(
+                    stop_reason.as_deref(),
+                    &mut incomplete_continuations,
+                )? {
+                    continue;
+                }
+                // Surface silent guardrail/refusal stops instead of returning
+                // an empty final answer with no explanation.
+                if let Some(notice) = Self::provider_guardrail_notice(
+                    stop_reason.as_deref(),
+                    visible_text_is_empty,
+                    reasoning.has_text(),
+                ) {
+                    logging::warn(&format!(
+                        "{}: turn ended with no visible output (stop_reason={:?})",
+                        Self::empty_turn_log_event(stop_reason.as_deref()),
+                        stop_reason
+                    ));
+                    if print_output {
+                        println!("\n[provider guardrail] {}", notice);
+                    }
+                    if text_content.trim().is_empty() {
+                        text_content = format!("[provider guardrail] {}", notice);
+                    }
+                }
+                logging::info("Turn complete - no tool calls, returning");
+                if print_output {
+                    println!();
+                }
+                final_text = text_content;
+                if saw_message_end
+                    && !self.is_graceful_shutdown()
+                    && matches!(stop_reason.as_deref(), Some("end_turn" | "stop_sequence"))
+                    && let Some(turn) = &mut cache_turn
+                {
+                    turn.park_on_drop();
+                }
+                break;
+            }
+
+            logging::debug_lazy(|| format!("Turn has {} tool calls to execute", tool_calls.len()));
+
+            // If provider handles tools internally (like Claude Code CLI), only run native tools locally
+            if self.provider.handles_tools_internally() {
+                tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
+                if tool_calls.is_empty() {
+                    if !generated_image_contexts.is_empty() {
+                        for blocks in generated_image_contexts.drain(..) {
+                            self.add_message(Role::User, blocks);
+                        }
+                        self.session.save()?;
+                        logging::info(
+                            "Continuing turn so model can inspect generated image visual context",
+                        );
+                        continue;
+                    }
+                    logging::info("Provider handles tools internally - task complete");
+                    break;
+                }
+                logging::info("Provider handles tools internally - executing native tools locally");
+            }
+
+            turn_tool_calls += tool_calls.len();
+            let used_batch = tool_calls.iter().any(|tc| tc.name == "batch");
+            sequential_single_tool_rounds = Self::update_sequential_tool_rounds(
+                sequential_single_tool_rounds,
+                tool_calls.len(),
+                used_batch,
+            );
+            if sequential_single_tool_rounds >= Self::SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE {
+                batch_nudge_pending = true;
+            }
+
+            // Execute tools and add results
+            let mut malformed_calls: Vec<MalformedToolCallInfo> = Vec::new();
+            let mut executed_valid_call = false;
+            let mut tool_results_dirty = false;
+            let mut ambient_cycle_ended = false;
+            let mut parallel_reads = super::parallel_reads::ParallelReads::default();
+            for (tool_index, tc) in tool_calls.iter().cloned().enumerate() {
+                let message_id = assistant_message_id
+                    .clone()
+                    .unwrap_or_else(|| self.session.id().to_owned());
+
+                if parallel_reads.is_empty() {
+                    parallel_reads = self
+                        .start_parallel_reads(
+                            &tool_calls[tool_index..],
+                            &sdk_tool_results,
+                            &message_id,
+                        )
+                        .await;
+                }
+
+                if let Some(error_msg) = tc.validation_error() {
+                    malformed_calls.push(MalformedToolCallInfo {
+                        name: tc.name.clone(),
+                        error: error_msg.clone(),
+                    });
+                    logging::warn(&error_msg);
+                    Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                        session_id: self.session.id().to_owned(),
+                        message_id: message_id.clone(),
+                        tool_call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        status: ToolStatus::Error,
+                        intent: tc.intent.clone(),
+                        title: None,
+                    }));
+                    if print_output {
+                        println!("\n  → {}", error_msg);
+                    }
+                    self.add_message(
+                        Role::User,
+                        vec![ContentBlock::ToolResult {
+                            tool_use_id: tc.id,
+                            content: error_msg,
+                            is_error: Some(true),
+                        }],
+                    );
+                    tool_results_dirty = true;
+                    continue;
+                }
+
+                // A call that passed validation is genuinely valid even if
+                // the tool itself later fails: it resets the malformed-round
+                // bound in handle_malformed_tool_round below.
+                executed_valid_call = true;
+                self.validate_tool_allowed(&tc.name)?;
+
+                let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
+
+                // Check if SDK already executed this tool
+                if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
+                    // For native tools, ignore SDK errors and execute locally
+                    if is_native_tool && sdk_is_error {
+                        if trace {
+                            eprintln!(
+                                "[trace] sdk_error_for_native_tool name={} id={}, executing locally",
+                                tc.name, tc.id
+                            );
+                        }
+                        // Fall through to local execution below
+                    } else {
+                        if trace {
+                            eprintln!(
+                                "[trace] using_sdk_result name={} id={} is_error={}",
+                                tc.name, tc.id, sdk_is_error
+                            );
+                        }
+                        if print_output {
+                            print!("\n  → ");
+                            let preview = if sdk_content.len() > 200 {
+                                format!("{}...", crate::util::truncate_str(&sdk_content, 200))
+                            } else {
+                                sdk_content.clone()
+                            };
+                            println!("{}", preview.lines().next().unwrap_or("(done via SDK)"));
+                        }
+
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id().to_owned(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: if sdk_is_error {
+                                ToolStatus::Error
+                            } else {
+                                ToolStatus::Completed
+                            },
+                            intent: tc.intent.clone(),
+                            title: None,
+                        }));
+
+                        self.add_message(
+                            Role::User,
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: tc.id,
+                                content: sdk_content,
+                                is_error: if sdk_is_error { Some(true) } else { None },
+                            }],
+                        );
+                        tool_results_dirty = true;
+                        continue;
+                    }
+                }
+
+                // SDK didn't execute this tool, run it locally
+                if print_output {
+                    print!("\n  → ");
+                    io::stdout().flush()?;
+                }
+
+                let ctx = ToolContext {
+                    session_id: self.session.id().to_owned(),
+                    message_id: message_id.clone(),
+                    tool_call_id: tc.id.clone(),
+                    working_dir: self.working_dir().map(PathBuf::from),
+                    stdin_request_tx: self.stdin_request_tx.clone(),
+                    graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
+                    execution_mode: ToolExecutionMode::AgentTurn,
+                };
+
+                if trace {
+                    eprintln!("[trace] tool_exec_start name={} id={}", tc.name, tc.id);
+                }
+                Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                    session_id: self.session.id().to_owned(),
+                    message_id: message_id.clone(),
+                    tool_call_id: tc.id.clone(),
+                    tool_name: tc.name.clone(),
+                    status: ToolStatus::Running,
+                    intent: tc.intent.clone(),
+                    title: None,
+                }));
+
+                logging::debug_lazy(|| format!("Tool starting: {}", tc.name));
+                let tool_start = Instant::now();
+
+                // Publish status for TUI to show during Task execution
+                Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
+                    session_id: self.session.id().to_owned(),
+                    status: format!("running {}", tc.name),
+                    model: Some(self.provider.model()),
+                }));
+
+                let result = if let Some((handle, started)) = parallel_reads.take(&tc.id) {
+                    super::tool_handoff::wait_for_started_read(
+                        tc.name.clone(),
+                        tc.input.clone(),
+                        ctx,
+                        started,
+                        handle,
+                    )
+                    .await
+                } else {
+                    super::tool_handoff::execute_with_background(
+                        self.registry.clone(),
+                        tc.name.clone(),
+                        tc.input.clone(),
+                        ctx,
+                    )
+                    .await
+                };
+                crate::telemetry::record_tool_call();
+                self.unlock_tools_if_needed(&tc.name);
+                let tool_elapsed = tool_start.elapsed();
+                logging::debug_lazy(|| {
+                    format!(
+                        "Tool finished: {} in {:.2}s",
+                        tc.name,
+                        tool_elapsed.as_secs_f64()
+                    )
+                });
+
+                match result {
+                    Ok(output) => {
+                        if tc.name == "end_ambient_cycle"
+                            && crate::ambient_session::is_ambient_session_registered(
+                                &self.session.id(),
+                            )
+                        {
+                            ambient_cycle_ended = true;
+                        }
+                        let output = cap_tool_output_for_history(&tc.name, output);
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id().to_owned(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: ToolStatus::Completed,
+                            intent: tc.intent.clone(),
+                            title: output.title.clone(),
+                        }));
+
+                        if trace {
+                            eprintln!(
+                                "[trace] tool_exec_done name={} id={}\n{}",
+                                tc.name, tc.id, output.output
+                            );
+                        }
+                        if print_output {
+                            let preview = if output.output.len() > 200 {
+                                format!("{}...", crate::util::truncate_str(&output.output, 200))
+                            } else {
+                                output.output.clone()
+                            };
+                            println!("{}", preview.lines().next().unwrap_or("(done)"));
+                        }
+
+                        let codemode =
+                            crate::tool::codemode_ledger::output_summary(&tc.name, &output);
+                        let ask = crate::tool::ask_output_record(&tc.name, &output);
+                        let mut blocks = tool_output_to_content_blocks(tc.id, output);
+                        if self.provider.name().eq_ignore_ascii_case("openai")
+                            && self.native_deferred_mcp()
+                        {
+                            crate::provider::openai_request::freeze_deferred_tools(
+                                &mut blocks,
+                                &tools,
+                            );
+                        }
+                        self.add_tool_result(
+                            blocks,
+                            tool_elapsed.as_millis() as u64,
+                            codemode,
+                            ask,
+                        );
+                        tool_results_dirty = true;
+                    }
+                    Err(e) => {
+                        crate::telemetry::record_tool_failure();
+                        Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
+                            session_id: self.session.id().to_owned(),
+                            message_id: message_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            status: ToolStatus::Error,
+                            intent: tc.intent.clone(),
+                            title: None,
+                        }));
+
+                        let error_msg = format!("Error: {}", e);
+                        if trace {
+                            eprintln!(
+                                "[trace] tool_exec_error name={} id={} {}",
+                                tc.name, tc.id, error_msg
+                            );
+                        }
+                        if print_output {
+                            println!("{}", error_msg);
+                        }
+                        self.add_tool_result(
+                            vec![ContentBlock::ToolResult {
+                                tool_use_id: tc.id,
+                                content: error_msg,
+                                is_error: Some(true),
+                            }],
+                            tool_elapsed.as_millis() as u64,
+                            crate::tool::codemode_ledger::error_summary(&e),
+                            None,
+                        );
+                        tool_results_dirty = true;
+                    }
+                }
+            }
+
+            if tool_results_dirty {
+                self.session.save()?;
+            }
+
+            if ambient_cycle_ended {
+                break;
+            }
+
+            if !generated_image_contexts.is_empty() {
+                for blocks in generated_image_contexts.drain(..) {
+                    self.add_message(Role::User, blocks);
+                }
+                self.session.save()?;
+            }
+
+            // Bounded recovery for repeated malformed tool calls (e.g. a
+            // model emitting null arguments): correct with the expected
+            // schema, then end the turn with an actionable error instead of
+            // retrying the same malformed round forever.
+            self.handle_malformed_tool_round(
+                &malformed_calls,
+                executed_valid_call,
+                &mut consecutive_malformed_tool_rounds,
+                &tools,
+            )?;
+
+            if print_output {
+                println!();
+            }
+
+            // Check for soft interrupts (e.g. Telegram messages) and inject them for the next turn
+            let injected = self.inject_soft_interrupts();
+            if !injected.is_empty() {
+                let total_chars: usize = injected.iter().map(|item| item.content.len()).sum();
+                logging::info(&format!(
+                    "Soft interrupt injected into headless turn ({} message(s), {} chars)",
+                    injected.len(),
+                    total_chars
+                ));
+            }
+        }
+
+        Ok(final_text)
+    }
+}
+
+#[cfg(test)]
+#[path = "turn_loops_tests.rs"]
+mod tests;

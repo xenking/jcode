@@ -145,7 +145,9 @@ pub use render_core_adapter::{
     styled_line_to_line,
 };
 
-pub use render_full::{render_markdown_with_width, thread_render_count};
+pub use render_full::{
+    render_markdown_with_width, render_markdown_with_width_and_prose_color, thread_render_count,
+};
 pub use render_lazy::render_markdown_lazy;
 pub use render_support::extract_copy_targets_from_rendered_lines;
 
@@ -1015,6 +1017,7 @@ fn is_closing_fence(line: &str, fence_char: char, min_len: usize) -> bool {
     trimmed[fence_len..].trim().is_empty()
 }
 
+#[cfg(test)]
 fn count_unescaped_double_dollar(line: &str) -> usize {
     let bytes = line.as_bytes();
     let mut count = 0usize;

@@ -92,7 +92,7 @@ pub(super) async fn run_replay(
         session_id: if app.is_remote {
             app.remote_session_id.clone()
         } else {
-            Some(app.session.id.clone())
+            Some(app.session.id().to_owned())
         },
     })
 }
@@ -419,6 +419,8 @@ pub(super) fn apply_replay_event(
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                codemode: None,
+                ask: None,
             });
         }
         ReplayEvent::StartProcessing => {
@@ -461,6 +463,8 @@ pub(super) fn apply_replay_event(
                 duration_secs: None,
                 title: title.clone(),
                 tool_data: None,
+                codemode: None,
+                ask: None,
             });
         }
         ReplayEvent::SwarmStatus { members } => {
@@ -587,7 +591,7 @@ mod tests {
                     },
                     Some(false),
                 );
-                pane.app.diagram_mode = crate::config::DiagramDisplayMode::None;
+                pane.app.diagram.hide();
                 pane.app.push_display_message(DisplayMessage {
                     role: "assistant".to_string(),
                     content: jcode_tui_mermaid::image_widget_placeholder_markdown(hash),
@@ -595,6 +599,8 @@ mod tests {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    codemode: None,
+                    ask: None,
                 });
                 pane
             })

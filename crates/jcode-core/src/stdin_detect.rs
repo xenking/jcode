@@ -258,25 +258,22 @@ pub mod linux {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use libc::{
+        PROC_PIDLISTFDS, PROX_FDTYPE_PIPE, PROX_FDTYPE_VNODE, proc_fdinfo, proc_pidfdinfo,
+        proc_pidinfo,
+    };
     use std::mem;
 
-    // libproc bindings
-    unsafe extern "C" {
-        fn proc_pidinfo(
-            pid: i32,
-            flavor: i32,
-            arg: u64,
-            buffer: *mut libc::c_void,
-            buffersize: i32,
-        ) -> i32;
-    }
-
-    const PROC_PIDLISTFDS: i32 = 1;
+    const PROC_PIDFDVNODEPATHINFO: i32 = 2;
 
     #[repr(C)]
-    struct proc_fdinfo {
-        proc_fd: i32,
-        proc_fdtype: u32,
+    struct VnodeFdInfoWithPath {
+        open_flags: u32,
+        status: u32,
+        offset: libc::off_t,
+        file_type: i32,
+        guard_flags: u32,
+        vnode: libc::vnode_info_path,
     }
 
     // Thread info
@@ -322,18 +319,16 @@ mod macos {
     }
 
     fn stdin_is_interactive(pid: i32) -> bool {
-        // Get list of file descriptors
-        let fd_size = mem::size_of::<proc_fdinfo>() as i32;
-        let buf_size = fd_size * 256; // up to 256 fds
-        let mut buf = vec![0u8; buf_size as usize];
+        let mut fds = [const { mem::MaybeUninit::<proc_fdinfo>::uninit() }; 256];
+        let fd_size = mem::size_of::<proc_fdinfo>();
 
         let ret = unsafe {
             proc_pidinfo(
                 pid,
                 PROC_PIDLISTFDS,
                 0,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf_size,
+                fds.as_mut_ptr().cast(),
+                mem::size_of_val(&fds) as i32,
             )
         };
 
@@ -341,20 +336,41 @@ mod macos {
             return false;
         }
 
-        let num_fds = ret / fd_size;
-        let fds = unsafe {
-            std::slice::from_raw_parts(buf.as_ptr() as *const proc_fdinfo, num_fds as usize)
-        };
-
-        // Check if fd 0 exists and is a pipe or vnode (pty)
-        for fd in fds {
+        for fd in fds.iter().take(ret as usize / fd_size) {
+            // proc_pidinfo initialized the complete records counted in ret.
+            let fd = unsafe { fd.assume_init_ref() };
             if fd.proc_fd == 0 {
-                // fd type 1 = vnode (could be pty), 6 = pipe
-                return fd.proc_fdtype == 1 || fd.proc_fdtype == 6;
+                return match fd.proc_fdtype as i32 {
+                    PROX_FDTYPE_PIPE => true,
+                    PROX_FDTYPE_VNODE => stdin_vnode_is_terminal(pid),
+                    _ => false,
+                };
             }
         }
 
         false
+    }
+
+    fn stdin_vnode_is_terminal(pid: i32) -> bool {
+        let mut info = mem::MaybeUninit::<VnodeFdInfoWithPath>::uninit();
+        let size = mem::size_of::<VnodeFdInfoWithPath>() as i32;
+        let ret = unsafe {
+            proc_pidfdinfo(
+                pid,
+                0,
+                PROC_PIDFDVNODEPATHINFO,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if ret != size {
+            return false;
+        }
+        // A vnode can also be a file or /dev/null. Only terminal nodes can
+        // make the coarse thread-wait heuristic relevant to stdin forwarding.
+        let info = unsafe { info.assume_init() };
+        let path = info.vnode.vip_path.as_flattened();
+        path.iter().take(8).map(|byte| *byte as u8).eq(*b"/dev/tty")
     }
 
     fn is_thread_waiting(pid: i32) -> bool {

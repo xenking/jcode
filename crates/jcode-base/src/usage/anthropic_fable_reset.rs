@@ -1,14 +1,25 @@
 //! Fable earned resets using Claude Code 2.1.322's `cedar_ember` contract.
 //! See docs/anthropic-fable-resets.md for primary-source evidence.
 
-use super::anthropic_reset::{authorize, fresh_access_token, get_json, reset_client};
+use super::ResetMode;
+#[cfg(test)]
+use super::anthropic_reset::reset_client;
+use super::anthropic_reset::{authorize, fresh_access_token, get_json, reset_client_for};
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
 const BASE: &str = "https://api.anthropic.com";
 const STATUS: &str = "/api/oauth/usage?cedar_ember=1&skip_spend=1";
+
+// Sorted field order preserves the legacy JSON map's wire bytes.
+#[derive(Serialize)]
+struct ResetRequest<'a> {
+    grant_id: &'a str,
+    program: &'static str,
+    request_id: &'a str,
+}
 
 struct InvalidateOnDrop<'a>(&'a str);
 
@@ -19,24 +30,58 @@ impl Drop for InvalidateOnDrop<'_> {
 }
 
 #[derive(Debug, Deserialize)]
-struct Status {
+pub(super) struct Status {
     eligible: bool,
     at_limit: bool,
     exhausted: Vec<String>,
-    grants: Vec<Grant>,
+    #[serde(default)]
+    next_grant_id: Option<String>,
+    pub(super) grants: Vec<Grant>,
 }
 
 #[derive(Debug, Deserialize)]
-struct Grant {
-    id: String,
-    resets_left: u64,
+pub(super) struct Grant {
+    pub(super) id: String,
+    pub(super) resets_left: u64,
     starts_at: Option<String>,
-    ends_at: Option<String>,
+    pub(super) ends_at: Option<String>,
     clears: Vec<String>,
     paused: bool,
     usable_now: bool,
     gives_back_weekly: bool,
     blocking: Vec<String>,
+    #[serde(default)]
+    pub(super) label: Option<String>,
+}
+
+/// What a redemption answers to: the daemon's own retry rules, or one grant a
+/// person reviewed and confirmed.
+#[derive(Clone, Copy)]
+pub(super) enum Spend<'a> {
+    Automatic(ResetMode),
+    Saved(&'a str),
+}
+
+/// The grant the server selects for a confirmed manual redemption. The
+/// provider's own `usable_now` decides, so a saved reset can be spent before
+/// any wall, but never a paused, blocked, spent or lapsed one.
+pub(super) fn saved_grant(status: &Status, now: chrono::DateTime<chrono::Utc>) -> Option<&Grant> {
+    let next = status.next_grant_id.as_deref()?;
+    if !status.eligible {
+        return None;
+    }
+    status.grants.iter().find(|grant| {
+        grant.id == next
+            && valid_id(&grant.id)
+            && grant.resets_left > 0
+            && !grant.paused
+            && grant.usable_now
+            && grant.blocking.is_empty()
+            && grant
+                .ends_at
+                .as_deref()
+                .is_none_or(|at| chrono::DateTime::parse_from_rfc3339(at).is_ok_and(|at| at > now))
+    })
 }
 
 fn valid_id(id: &str) -> bool {
@@ -74,7 +119,7 @@ fn eligible_grant(status: &Status, now: chrono::DateTime<chrono::Utc>) -> Option
     })
 }
 
-fn profile_identity(profile: &serde_json::Value) -> Result<(String, String)> {
+pub(super) fn profile_identity(profile: &serde_json::Value) -> Result<(String, String)> {
     let extract = |path| {
         profile
             .pointer(path)
@@ -88,7 +133,11 @@ fn profile_identity(profile: &serde_json::Value) -> Result<(String, String)> {
     Ok((extract("/account/uuid")?, extract("/organization/uuid")?))
 }
 
-async fn status(client: &reqwest::Client, base: &str, token: &str) -> Result<Option<Status>> {
+pub(super) async fn status(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+) -> Result<Option<Status>> {
     let value = get_json(client, &format!("{base}{STATUS}"), token).await?;
     let Some(block) = value.get("cedar_ember") else {
         return Ok(None);
@@ -112,6 +161,15 @@ async fn status(client: &reqwest::Client, base: &str, token: &str) -> Result<Opt
 /// `None` is deliberately unsupported: background retry must pin a named login.
 /// This never purchases usage credits or redeems the `juniper_tide` program.
 pub(crate) async fn auto_reset_fable_usage(account_label: Option<String>) -> Result<bool> {
+    auto_reset_fable_usage_with(account_label, ResetMode::AtWall).await
+}
+
+/// [`auto_reset_fable_usage`] for either reason in [`ResetMode`]. The same
+/// account lock and pending marker guard both.
+pub(crate) async fn auto_reset_fable_usage_with(
+    account_label: Option<String>,
+    mode: ResetMode,
+) -> Result<bool> {
     if !crate::config::Config::load()
         .provider
         .anthropic_auto_fable_reset
@@ -122,23 +180,70 @@ pub(crate) async fn auto_reset_fable_usage(account_label: Option<String>) -> Res
         return Ok(false);
     };
     let token = fresh_access_token(Some(&label)).await?;
-    let client = reset_client()?;
-    redeem(
+    let client = reset_client_for(Some(&label)).await?;
+    redeem_with(
         &client,
         BASE,
         &token,
         &label,
         &crate::storage::jcode_dir()?.join("fable-resets"),
+        Spend::Automatic(mode),
     )
     .await
 }
 
+/// A usable grant that lapses within `within_secs`. The provider's own
+/// `usable_now` decides whether it may be spent before the wall.
+fn expiring_grant(
+    status: &Status,
+    now: chrono::DateTime<chrono::Utc>,
+    within_secs: i64,
+) -> Option<&Grant> {
+    if !status.eligible {
+        return None;
+    }
+    status.grants.iter().find(|grant| {
+        grant.gives_back_weekly
+            && valid_id(&grant.id)
+            && grant.resets_left > 0
+            && !grant.paused
+            && grant.usable_now
+            && grant.blocking.is_empty()
+            && grant.ends_at.as_deref().is_some_and(|at| {
+                chrono::DateTime::parse_from_rfc3339(at).is_ok_and(|at| {
+                    let left = at.timestamp() - now.timestamp();
+                    left > 0 && left <= within_secs
+                })
+            })
+    })
+}
+
+#[cfg(test)]
 async fn redeem(
     client: &reqwest::Client,
     base: &str,
     token: &str,
     label: &str,
     root: &std::path::Path,
+) -> Result<bool> {
+    redeem_with(
+        client,
+        base,
+        token,
+        label,
+        root,
+        Spend::Automatic(ResetMode::AtWall),
+    )
+    .await
+}
+
+pub(super) async fn redeem_with(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    label: &str,
+    root: &std::path::Path,
+    spend: Spend<'_>,
 ) -> Result<bool> {
     // The profile and usage requests use the exact same pinned token.
     let profile = get_json(client, &format!("{base}/api/oauth/profile"), token).await?;
@@ -175,7 +280,11 @@ async fn redeem(
     };
     // A concurrent claimant cleared the quota. Retry is safe without spending
     // anything or erasing its possibly uncertain durable journal.
-    if waited && !before.at_limit && before.exhausted.is_empty() {
+    if matches!(spend, Spend::Automatic(ResetMode::AtWall))
+        && waited
+        && !before.at_limit
+        && before.exhausted.is_empty()
+    {
         super::anthropic_reset::invalidate_anthropic_usage_reset_state(Some(label));
         return Ok(true);
     }
@@ -185,7 +294,15 @@ async fn redeem(
     if marker.exists() {
         return Ok(false);
     }
-    let Some(grant) = eligible_grant(&before, chrono::Utc::now()) else {
+    let now = chrono::Utc::now();
+    let grant = match spend {
+        Spend::Automatic(ResetMode::AtWall) => eligible_grant(&before, now),
+        Spend::Automatic(ResetMode::Expiring { within_secs }) => {
+            expiring_grant(&before, now, within_secs)
+        }
+        Spend::Saved(id) => saved_grant(&before, now).filter(|grant| grant.id == id),
+    };
+    let Some(grant) = grant else {
         return Ok(false);
     };
     let grant_id = grant.id.clone();
@@ -207,7 +324,7 @@ async fn redeem(
     std::fs::File::open(root)?.sync_all()?;
     let _invalidate = InvalidateOnDrop(label);
     let response = authorize(client.post(format!("{base}/api/organizations/{organization}/reset_rate_limits")), token)
-        .json(&serde_json::json!({"program":"cedar_ember", "grant_id":grant_id, "request_id":request_id}))
+        .json(&ResetRequest { grant_id: &grant_id, program: "cedar_ember", request_id: &request_id })
         .send().await.context("Fable reset outcome uncertain. Pending marker retained; check Claude Usage before reconciliation.")?;
     anyhow::ensure!(
         response.status().is_success(),
@@ -217,19 +334,38 @@ async fn redeem(
     #[derive(Deserialize)]
     struct Claim {
         result: String,
+        #[serde(default)]
         cleared: Vec<String>,
     }
     let claim: Claim = response
         .json()
         .await
         .context("Unrecognized Fable reset result; pending marker retained")?;
+    let saved = matches!(spend, Spend::Saved(_));
     if claim.result != "reset"
-        || !before
-            .exhausted
-            .iter()
-            .all(|limit| limit == "seven_day" || claim.cleared.contains(limit))
+        || (!saved
+            && !before
+                .exhausted
+                .iter()
+                .all(|limit| limit == "seven_day" || claim.cleared.contains(limit)))
     {
+        // These answers say nothing was spent, so a person may try again later
+        // without the marker suppressing every future claim on this account.
+        if saved
+            && matches!(
+                claim.result.as_str(),
+                "not_limited" | "ineligible" | "unavailable" | "cooldown"
+            )
+        {
+            std::fs::remove_file(&marker)?;
+        }
         return Ok(false);
+    }
+    // A confirmed claim is the whole answer for a saved reset: it may be
+    // spent with no limit reached, so there is no wall left to verify clear.
+    if saved {
+        std::fs::remove_file(&marker)?;
+        return Ok(true);
     }
     let Some(after) = status(client, base, token).await? else {
         return Ok(false);
@@ -246,6 +382,28 @@ async fn redeem(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_request_matches_legacy_bytes_after_sources_drop_without_sending() {
+        for value in ["", "dummy-id", "雪\"\\\n\u{0000}"] {
+            let source = value.to_owned();
+            let expected = serde_json::to_vec(&serde_json::json!({
+                "program": "cedar_ember", "grant_id": source, "request_id": source
+            }))
+            .unwrap();
+            let builder = reqwest::Client::new()
+                .post("https://example.invalid/reset")
+                .json(&super::ResetRequest {
+                    grant_id: &source,
+                    program: "cedar_ember",
+                    request_id: &source,
+                });
+            drop(source);
+            let request = builder.build().unwrap();
+            assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+        }
+    }
+
     fn fixture() -> Status {
         serde_json::from_value(serde_json::json!({
             "eligible":true,"at_limit":true,"exhausted":["seven_day_overage_included"],
@@ -253,6 +411,24 @@ mod tests {
                 "ends_at":"2027-03-09T07:59:00Z","clears":["five_hour","seven_day_overage_included"],
                 "paused":false,"usable_now":true,"gives_back_weekly":true,"blocking":[]}]
         })).unwrap()
+    }
+    #[test]
+    fn expiring_mode_takes_a_usable_grant_due_soon_without_the_wall() {
+        let now = chrono::DateTime::parse_from_rfc3339("2027-03-09T07:50:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut value = fixture();
+        value.at_limit = false;
+        value.exhausted.clear();
+        // Nine minutes left: inside the ten-minute sweep.
+        assert!(expiring_grant(&value, now, 600).is_some());
+        assert!(eligible_grant(&value, now).is_none(), "not at the wall");
+        // Eleven minutes left: not yet.
+        let early = now - chrono::Duration::minutes(2);
+        assert!(expiring_grant(&value, early, 600).is_none());
+        // The provider's own `usable_now` still decides.
+        value.grants[0].usable_now = false;
+        assert!(expiring_grant(&value, now, 600).is_none());
     }
     #[test]
     fn actual_cli_schema_selects_fable_not_session_grants() {
@@ -298,6 +474,15 @@ mod tests {
             .unwrap(),
             ("acct".into(), "org".into())
         );
+    }
+    #[test]
+    fn recorded_profile_carries_both_identities() {
+        let profile: serde_json::Value = serde_json::from_str(include_str!(
+            "fixtures/claude_oauth_profile_real_max_20x.json"
+        ))
+        .unwrap();
+        let (account, organization) = profile_identity(&profile).unwrap();
+        assert_ne!(account, organization);
     }
     #[test]
     fn fable_automatic_reset_is_independently_opt_in() {

@@ -5,29 +5,43 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSoftInterrupt {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<jcode_session_types::Attachment>,
     content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     images: Vec<(String, String)>,
     urgent: bool,
     source: PersistedSoftInterruptSource,
+    #[serde(default)]
+    after_yield: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    fifo_queue: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    system_reminder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PersistedSoftInterruptSource {
+    JarvisUser,
     User,
     System,
     BackgroundTask,
+    FileActivity,
 }
 
 impl From<SoftInterruptSource> for PersistedSoftInterruptSource {
     fn from(value: SoftInterruptSource) -> Self {
         match value {
             SoftInterruptSource::User => Self::User,
+            SoftInterruptSource::JarvisUser => Self::JarvisUser,
             SoftInterruptSource::System => Self::System,
             SoftInterruptSource::BackgroundTask => Self::BackgroundTask,
+            SoftInterruptSource::FileActivity => Self::FileActivity,
         }
     }
 }
@@ -36,8 +50,10 @@ impl From<PersistedSoftInterruptSource> for SoftInterruptSource {
     fn from(value: PersistedSoftInterruptSource) -> Self {
         match value {
             PersistedSoftInterruptSource::User => Self::User,
+            PersistedSoftInterruptSource::JarvisUser => Self::JarvisUser,
             PersistedSoftInterruptSource::System => Self::System,
             PersistedSoftInterruptSource::BackgroundTask => Self::BackgroundTask,
+            PersistedSoftInterruptSource::FileActivity => Self::FileActivity,
         }
     }
 }
@@ -45,11 +61,16 @@ impl From<PersistedSoftInterruptSource> for SoftInterruptSource {
 impl From<SoftInterruptMessage> for PersistedSoftInterrupt {
     fn from(value: SoftInterruptMessage) -> Self {
         Self {
+            attachments: value.attachments,
             content: value.content,
             images: value.images,
             urgent: value.urgent,
             source: value.source.into(),
+            after_yield: value.mode != jcode_agent_runtime::QueuedMessageMode::Steer,
+            fifo_queue: matches!(value.mode, jcode_agent_runtime::QueuedMessageMode::Queue | jcode_agent_runtime::QueuedMessageMode::InFlightQueue),
             client_id: value.client_id,
+            system_reminder: value.system_reminder,
+            active_skill: value.active_skill,
         }
     }
 }
@@ -57,11 +78,24 @@ impl From<SoftInterruptMessage> for PersistedSoftInterrupt {
 impl From<PersistedSoftInterrupt> for SoftInterruptMessage {
     fn from(value: PersistedSoftInterrupt) -> Self {
         Self {
+            attachments: value.attachments,
             content: value.content,
             images: value.images,
             urgent: value.urgent,
             source: value.source.into(),
+            mode: if value.fifo_queue {
+                jcode_agent_runtime::QueuedMessageMode::Queue
+            } else if value.after_yield {
+                jcode_agent_runtime::QueuedMessageMode::AfterYield
+            } else {
+                jcode_agent_runtime::QueuedMessageMode::Steer
+            },
             client_id: value.client_id,
+            system_reminder: value.system_reminder,
+            active_skill: value.active_skill,
+            // Editing holds are per-connection; a daemon restart drops them so
+            // a crash can never strand a queued prompt.
+            editing_by: None,
         }
     }
 }
@@ -97,14 +131,11 @@ pub fn take(session_id: &str) -> Result<Vec<SoftInterruptMessage>> {
 }
 
 pub fn overwrite(session_id: &str, interrupts: &[SoftInterruptMessage]) -> Result<()> {
-    let path = path_for_session(session_id)?;
     if interrupts.is_empty() {
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
-        }
-        return Ok(());
+        return clear(session_id);
     }
 
+    let path = path_for_session(session_id)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -121,7 +152,14 @@ pub fn append(session_id: &str, interrupt: SoftInterruptMessage) -> Result<()> {
 }
 
 pub fn clear(session_id: &str) -> Result<()> {
-    overwrite(session_id, &[])
+    let path = path_for_session(session_id)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow::Error::new(error).context(format!(
+            "Cannot clear persisted soft interrupts for {session_id}"
+        ))),
+    }
 }
 
 /// Drop persisted interrupts whose caller id is in `client_ids`, returning the

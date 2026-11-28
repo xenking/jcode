@@ -66,10 +66,7 @@ fn changelog_override_is_cleared_after_a_render_test_panics() {
     });
     assert!(panic.is_err());
     assert!(
-        unseen_changelog_entries_override()
-            .lock()
-            .unwrap()
-            .is_none(),
+        !unseen_changelog_entries_override_is_set(),
         "a failed render test must not leak its changelog fixture"
     );
 }
@@ -102,6 +99,12 @@ impl Provider for MockProvider {
 fn ensure_test_jcode_home_if_unset() {
     static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
 
+    if std::env::var_os("JCODE_HOME").is_some() {
+        return;
+    }
+    let Ok(_env_lock) = crate::storage::test_env_lock().try_lock() else {
+        return;
+    };
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }

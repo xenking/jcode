@@ -39,6 +39,8 @@ pub struct SshConnectOptions {
     pub client_name: String,
     /// Desktop inline response rendering capability, false for other clients.
     pub supports_user_response: bool,
+    /// Whether this client renders applets.
+    pub supports_applets: bool,
     pub request_timeout: Option<Duration>,
     /// Private key used exclusively for this connection (`IdentitiesOnly`).
     /// Managed hosts authorize a fresh key per connection, so agent and
@@ -63,6 +65,7 @@ impl Default for SshConnectOptions {
             connect_timeout: Duration::from_secs(30),
             client_name: defaults.client_name,
             supports_user_response: false,
+            supports_applets: false,
             request_timeout: defaults.request_timeout,
             identity_file: None,
             known_hosts_file: None,
@@ -754,6 +757,7 @@ mod tests {
         serde_json::to_string(&ServerFrame::reply(
             1,
             ApiEvent::HelloOk {
+                runtime_identity: None,
                 version: API_VERSION_MAJOR,
                 server: "fake-ssh".into(),
                 capabilities: vec![],

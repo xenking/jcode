@@ -1,4 +1,7 @@
 use super::state_ui_history_marker::parse_compacted_history_marker;
+#[path = "state_ui_messages_compacted_history.rs"]
+mod compacted_history;
+
 use super::state_ui_storage::{
     compact_display_message_tool_data, compact_display_messages_for_storage,
 };
@@ -30,6 +33,13 @@ fn display_message_from_stored_message(
         return Some(swarm);
     }
     match message.display_role {
+        Some(crate::session::StoredDisplayRole::JarvisUser) => {
+            Some(DisplayMessage::jarvis_user(text))
+        }
+        Some(crate::session::StoredDisplayRole::FileActivity) => {
+            super::remote_notifications::typed_file_activity_display_message(&text)
+                .or_else(|| Some(DisplayMessage::system(text)))
+        }
         Some(crate::session::StoredDisplayRole::System) => Some(DisplayMessage::system(text)),
         Some(crate::session::StoredDisplayRole::BackgroundTask) => {
             Some(DisplayMessage::background_task(text))
@@ -99,7 +109,8 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
             }
             ContentBlock::OpenAICompaction { .. }
             | ContentBlock::ToolReference { .. }
-            | ContentBlock::ProviderNative { .. } => {}
+            | ContentBlock::ProviderNative { .. }
+            | ContentBlock::Unknown => {}
         }
     }
     parts.join("\n\n")
@@ -111,6 +122,18 @@ impl App {
     /// even after another detail has replaced the status label.
     pub(super) fn apply_status_detail(&mut self, detail: String) {
         const OVERLOAD_PREFIX: &str = "OpenAI reported server overload";
+        // This is an authoritative daemon result, not the pre-request cached
+        // baseline. Retain the measured reduction after transport status moves on.
+        if detail.starts_with("🧊 Cache cold · reduced ")
+            && !self
+                .display_messages
+                .iter()
+                .rev()
+                .take_while(|message| message.role != "user")
+                .any(|message| message.role == "system" && message.content == detail)
+        {
+            self.push_display_message(DisplayMessage::system(detail.clone()));
+        }
         if detail.starts_with(OVERLOAD_PREFIX)
             && !self
                 .display_messages
@@ -127,6 +150,7 @@ impl App {
     }
 
     pub fn push_display_message(&mut self, mut message: DisplayMessage) {
+        message.normalize_jarvis_role();
         if is_background_task_lifecycle_message(&message.content) {
             if matches!(message.role.as_str(), "user" | "system") {
                 message.role = "background_task".to_string();
@@ -170,6 +194,7 @@ impl App {
 
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
         messages.retain_mut(|message| {
+            message.normalize_jarvis_role();
             if !is_background_task_lifecycle_message(&message.content) {
                 return true;
             }
@@ -185,6 +210,7 @@ impl App {
         }
         compact_display_messages_for_storage(&mut messages);
         self.display_messages = messages;
+        self.swarm_notifications.clear_receipts();
         self.attempt_committed_assistant_messages = 0;
         self.sync_compacted_history_lazy_from_display_messages();
         self.bump_display_messages_version();
@@ -269,23 +295,42 @@ impl App {
         let session_id = self
             .remote_session_id
             .as_deref()
-            .unwrap_or(&self.session.id);
+            .unwrap_or(self.session.id());
+        let goals = match crate::todo::load_goals(session_id) {
+            Ok(goals) => goals,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Cannot determine automatic followup eligibility for {session_id}: {error:#}"
+                ));
+                return true;
+            }
+        };
         crate::todo::todo_requires_user_auth(todo)
-            || crate::todo::todo_goal_cannot_complete(
-                todo,
-                &crate::todo::load_goals(session_id).unwrap_or_default(),
-            )
+            // Handed to a swarm worker: the owner works it and reports back.
+            || crate::todo::todo_assigned_elsewhere(todo, session_id)
+            // Spawned workers still running will wake this session when done.
+            || self.has_working_swarm_members(session_id)
+            || crate::todo::todo_goal_cannot_complete(todo, &goals)
             || crate::todo::todo_waits_on_running_task(todo, |task_id| {
                 self.running_todo_await_dependency(task_id)
                     || self.running_todo_background_dependency(task_id).is_some()
             })
     }
 
+    /// Whether any swarm member spawned by `session_id` is still working.
+    pub(super) fn has_working_swarm_members(&self, session_id: &str) -> bool {
+        self.remote_swarm_members.iter().any(|member| {
+            member.session_id != session_id
+                && member.report_back_to_session_id.as_deref() == Some(session_id)
+                && crate::todo::swarm_member_is_working(&member.status)
+        })
+    }
+
     pub(super) fn running_todo_await_dependency(&self, task_id: &str) -> bool {
         let session_id = self
             .remote_session_id
             .as_deref()
-            .unwrap_or(&self.session.id);
+            .unwrap_or(self.session.id());
         crate::todo::await_dependency::running(&crate::storage::runtime_dir(), task_id, session_id)
     }
 
@@ -296,7 +341,7 @@ impl App {
         let session_id = self
             .remote_session_id
             .as_deref()
-            .unwrap_or(&self.session.id);
+            .unwrap_or(self.session.id());
         if std::path::Path::new(task_id)
             .file_name()
             .and_then(|s| s.to_str())
@@ -527,18 +572,18 @@ impl App {
         &mut self,
         manifest: &crate::overnight::OvernightManifest,
     ) -> bool {
-        if manifest.coordinator_session_id != self.session.id {
+        if manifest.coordinator_session_id != self.session.id() {
             return false;
         }
-        let Ok(latest_session) = crate::session::Session::load(&self.session.id) else {
+        let Ok(latest_session) = crate::session::Session::load(self.session.id()) else {
             return false;
         };
-        if latest_session.messages.len() <= self.session.messages.len() {
+        if latest_session.message_count() <= self.session.message_count() {
             return false;
         }
 
-        let appended: Vec<DisplayMessage> = latest_session.messages[self.session.messages.len()..]
-            .iter()
+        let appended: Vec<DisplayMessage> = latest_session
+            .iter_messages_from(self.session.message_count())
             .filter_map(display_message_from_stored_message)
             .collect();
         self.session = latest_session;
@@ -673,18 +718,6 @@ impl App {
         }
     }
 
-    pub(super) fn clear_display_messages(&mut self) {
-        self.compacted_history_lazy = CompactedHistoryLazyState::default();
-        // The transcript is about to be discarded; forget where the live reasoning
-        // block started so a stale offset can't slice the new stream.
-        self.reasoning_block_start = None;
-        self.turn_reasoning_traces.clear();
-        if !self.display_messages.is_empty() {
-            self.display_messages.clear();
-            self.bump_display_messages_version();
-        }
-    }
-
     /// Terminal-style clear (Ctrl+L): append a viewport-height blank spacer
     /// and snap to the bottom, so the screen shows a clean prompt while the
     /// whole transcript stays one scroll-up away, exactly like a terminal's
@@ -738,57 +771,6 @@ impl App {
         self.scroll_offset = 0;
         self.auto_scroll_paused = false;
         self.set_status_notice("View cleared (context kept)");
-    }
-
-    pub(super) fn apply_compacted_history_window(
-        &mut self,
-        mut messages: Vec<DisplayMessage>,
-        images: Vec<crate::session::RenderedImage>,
-        total_messages: usize,
-        visible_messages: usize,
-        remaining_messages: usize,
-        hidden_user_prompts: usize,
-    ) {
-        let recent_history = self.recent_history_window_active();
-        compact_display_messages_for_storage(&mut messages);
-        carry_over_tool_durations(&self.display_messages, &mut messages);
-        self.display_messages = messages;
-        self.remote_side_pane_images = images;
-        self.invalidate_side_pane_images_signature();
-        self.compacted_history_lazy = CompactedHistoryLazyState {
-            total_messages,
-            visible_messages,
-            remaining_messages,
-            hidden_user_prompts,
-            pending_request_visible: None,
-        };
-        if recent_history {
-            // Once the current transcript is fully visible, its original
-            // compaction marker (if any) becomes the next lazy history source.
-            self.sync_compacted_history_lazy_from_display_messages();
-        }
-        self.auto_scroll_paused = true;
-        // Older messages are prepended above the current view. If the reader had
-        // an anchor captured (they scrolled up to trigger this load), leave the
-        // scroll position for the next render to resolve so the content under
-        // them stays put instead of teleporting to the new absolute top. Only
-        // fall back to the top when there is no anchor to honor.
-        if self.pending_history_anchor.is_none() {
-            self.scroll_offset = 0;
-        }
-        self.bump_display_messages_version();
-        self.note_runtime_memory_event_force(
-            "compacted_history_loaded",
-            "display_history_lazy_window",
-        );
-        if remaining_messages > 0 {
-            self.set_status_notice(format!(
-                "Loaded {} compacted messages · {} older hidden",
-                visible_messages, remaining_messages
-            ));
-        } else if total_messages > 0 {
-            self.set_status_notice(format!("Loaded all {} compacted messages", total_messages));
-        }
     }
 
     /// Number of wrapped lines from the top of the chat viewport that should be
@@ -974,6 +956,58 @@ impl App {
         }
     }
 
+    /// The expanded prompt history (Alt+E) lists the last few prompts above
+    /// the viewport. A lazily loaded transcript may hold only one or two of
+    /// them, which makes the toggle look dead, so pull older history in until
+    /// the list is full. Returns true when a load was started.
+    pub(super) fn maybe_backfill_expanded_prompt_history(&mut self) -> bool {
+        const MAX_LOADS_PER_TOGGLE: u8 = 8;
+        if !crate::tui::ui::viewport::prompt_history_expanded()
+            || self.compacted_history_lazy.remaining_messages == 0
+            || self
+                .compacted_history_lazy
+                .pending_request_visible
+                .is_some()
+            || self.recent_history_paging.request.is_some()
+            || self.pending_history_anchor.is_some()
+            || self.prompt_history_backfill.1 >= MAX_LOADS_PER_TOGGLE
+        {
+            return false;
+        }
+        // Wait for a frame that includes the previous load before asking again.
+        let total = crate::tui::ui::last_total_wrapped_lines();
+        if self.prompt_history_backfill.0 == Some(total) {
+            return false;
+        }
+        let scroll = crate::tui::ui::last_resolved_chat_scroll();
+        let offscreen_prompts = crate::tui::ui::last_chat_frame().map_or(0, |frame| {
+            frame
+                .wrapped_user_prompt_starts
+                .partition_point(|line| *line < scroll)
+        });
+        if offscreen_prompts >= crate::tui::ui::viewport::EXPANDED_PROMPT_PREVIEW_COUNT {
+            return false;
+        }
+        let next_visible = self
+            .compacted_history_lazy
+            .visible_messages
+            .saturating_add(COMPACTED_HISTORY_CHUNK_MESSAGES)
+            .min(self.compacted_history_lazy.total_messages);
+        if next_visible <= self.compacted_history_lazy.visible_messages {
+            return false;
+        }
+        self.prompt_history_backfill = (Some(total), self.prompt_history_backfill.1 + 1);
+        if self.auto_scroll_paused {
+            self.capture_history_anchor(0);
+        }
+        if self.is_remote {
+            self.compacted_history_lazy.pending_request_visible = Some(next_visible);
+        } else {
+            self.apply_local_compacted_history_window(next_visible);
+        }
+        true
+    }
+
     pub(super) fn take_pending_compacted_history_load(&mut self) -> Option<usize> {
         if self
             .recent_history_paging
@@ -1080,7 +1114,15 @@ impl App {
                     .content
                     .rsplit_once(" Hidden user prompts: ")
                     .and_then(|(_, count)| count.strip_suffix('.'))
-                    .and_then(|count| count.parse::<usize>().ok())
+                    .and_then(|count| match count.parse::<usize>() {
+                        Ok(count) => Some(count),
+                        Err(error) => {
+                            crate::logging::warn(&format!(
+                                "Invalid compacted-history hidden prompt count: {error}"
+                            ));
+                            None
+                        }
+                    })
             });
         // New servers include the authoritative offset. A remote startup stub
         // has no transcript, and a retained local snapshot may be stale.
@@ -1123,6 +1165,8 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: msg.tool_data,
+                codemode: None,
+                ask: None,
             })
             .collect();
         self.apply_compacted_history_window(

@@ -42,6 +42,7 @@ pub(super) fn summarize_ws_input(items: &[Value]) -> WsInputStats {
     stats
 }
 
+#[cfg(test)]
 pub(super) fn persistent_ws_input_item_hashes(input: &[Value]) -> Vec<u64> {
     input
         .iter()
@@ -66,15 +67,32 @@ fn replay_identity(item: &Value) -> Value {
                             })
                     }) =>
         {
-            let text: String = item
-                .get("content")
-                .and_then(Value::as_array)
+            // Match the projected text actually saved in history, including
+            // the citation replacement applied when output_item.done arrives.
+            let text: String = item["content"]
+                .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .filter_map(|part| {
+                    part.get("text").and_then(Value::as_str).map(|text| {
+                        jcode_provider_openai::stream::render_openai_output_text(
+                            text,
+                            part.get("annotations"),
+                        )
+                    })
+                })
                 .collect();
             serde_json::json!({"type":"message", "role":"assistant", "text":text})
         }
+        Some("reasoning") => serde_json::json!({
+            "type": "reasoning",
+            "id": item.get("id").unwrap_or(&Value::Null),
+            "summary": item.get("summary").and_then(Value::as_array).into_iter().flatten()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("summary_text"))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            "encrypted_content": item.get("encrypted_content").and_then(Value::as_str),
+        }),
         Some("function_call" | "custom_tool_call") => {
             let arguments = item
                 .get("arguments")
@@ -96,6 +114,120 @@ fn replay_identity(item: &Value) -> Value {
         }
         _ => item.clone(),
     }
+}
+
+/// Indices into the full request and the server's original output, respectively.
+#[derive(Debug)]
+pub(super) struct OutputReplayMismatch<'a> {
+    pub(super) input_index: usize,
+    pub(super) output_index: usize,
+    pub(super) current: Option<&'a Value>,
+    pub(super) previous: &'a Value,
+}
+
+pub(super) fn replay_item_type(item: Option<&Value>) -> &'static str {
+    match item
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+    {
+        Some("reasoning") => "reasoning",
+        Some("message") => "message",
+        Some("function_call") => "function_call",
+        Some("custom_tool_call") => "custom_tool_call",
+        Some("function_call_output") => "function_call_output",
+        Some("additional_tools") => "additional_tools",
+        Some("web_search_call") => "web_search_call",
+        Some("image_generation_call") => "image_generation_call",
+        Some("compaction") => "compaction",
+        Some(_) => "other",
+        None => "missing",
+    }
+}
+
+/// Match only the replayed part of the prior output. The full-input builder
+/// inserts each client callback (and its deferred tool definitions) immediately
+/// after its call, before the next server item. Keep those items in the delta.
+pub(super) fn persistent_ws_replay_positions<'a>(
+    input: &'a [Value],
+    start: usize,
+    output: &'a [Value],
+) -> Result<Vec<usize>, OutputReplayMismatch<'a>> {
+    let original = match match_replay_order(input, start, output.iter().enumerate()) {
+        Ok(positions) => return Ok(positions),
+        Err(original) => original,
+    };
+    // The server stream can interleave reasoning, text and client calls. The
+    // agent persists text/hosted tools, then reasoning, then client tool calls.
+    // Compare in that representation without changing order within a group.
+    let mut ordered: Vec<_> = output.iter().enumerate().collect();
+    ordered.sort_by_key(|(_, item)| match replay_item_type(Some(item)) {
+        "reasoning" => 1,
+        "function_call" | "custom_tool_call" => 2,
+        _ => 0,
+    });
+    if ordered
+        .iter()
+        .enumerate()
+        .all(|(index, (source, _))| index == *source)
+    {
+        return Err(original);
+    }
+    match_replay_order(input, start, ordered.into_iter()).map_err(|_| original)
+}
+
+fn match_replay_order<'a>(
+    input: &'a [Value],
+    mut index: usize,
+    output: impl Iterator<Item = (usize, &'a Value)>,
+) -> Result<Vec<usize>, OutputReplayMismatch<'a>> {
+    let mut positions = Vec::with_capacity(output.size_hint().0);
+    for (output_index, previous) in output {
+        let identity = replay_identity(previous);
+        let current = input.get(index);
+        if !current.is_some_and(|item| replay_identity(item) == identity) {
+            // The stream omits reasoning with neither a summary nor encrypted
+            // data. Do not omit non-empty reasoning or ignore a changed ID.
+            if replay_item_type(Some(previous)) == "reasoning"
+                && identity["summary"].as_array().is_some_and(Vec::is_empty)
+                && identity["encrypted_content"].is_null()
+            {
+                continue;
+            }
+            // The agent does not persist whitespace-only assistant text. The
+            // previous response still owns it, so a new user message can follow
+            // it without replaying the full input or advancing the cursor.
+            if identity["type"] == "message"
+                && identity["role"] == "assistant"
+                && identity["text"]
+                    .as_str()
+                    .is_some_and(|text| text.trim().is_empty())
+                && current.is_some_and(|item| item["type"] == "message" && item["role"] == "user")
+            {
+                continue;
+            }
+            return Err(OutputReplayMismatch {
+                input_index: index,
+                output_index,
+                current,
+                previous,
+            });
+        }
+        positions.push(index);
+        index += 1;
+        if matches!(
+            replay_item_type(Some(previous)),
+            "function_call" | "custom_tool_call"
+        ) && input.get(index).is_some_and(|item| {
+            replay_item_type(Some(item)) == "function_call_output"
+                && item.get("call_id") == current.and_then(|call| call.get("call_id"))
+        }) {
+            index += 1;
+            if replay_item_type(input.get(index)) == "additional_tools" {
+                index += 1;
+            }
+        }
+    }
+    Ok(positions)
 }
 
 /// Explain replay failures without logging tool names, arguments or content.
@@ -137,15 +269,20 @@ pub(super) fn log_ws_replayed_calls(items: &[Value], previous_output: &[Value]) 
 /// successful tool response. Erasing those items replays the assistant's calls
 /// on the next previous_response_id continuation and disrupts cache reuse.
 /// A nonempty final array remains authoritative.
+#[cfg(test)]
 pub(super) fn observe_ws_response_output(text: &str, output: &mut Vec<Value>) {
-    // Token deltas dominate the stream. Only completed output events need a
-    // second parse for response-chain bookkeeping.
+    // Wire adapter for existing fixtures. Production passes the already parsed
+    // envelope to observe_ws_response_output_event instead of parsing again.
     if !text.contains("response.output_item.done") && !text.contains("response.completed") {
         return;
     }
     let Ok(event) = serde_json::from_str::<Value>(text) else {
         return;
     };
+    observe_ws_response_output_event(&event, output);
+}
+
+pub(super) fn observe_ws_response_output_event(event: &Value, output: &mut Vec<Value>) {
     match event.get("type").and_then(Value::as_str) {
         Some("response.output_item.done") => {
             if let Some(item) = event.get("item") {
@@ -155,19 +292,21 @@ pub(super) fn observe_ws_response_output(text: &str, output: &mut Vec<Value>) {
         Some("response.completed") => {
             let completed_output = event.pointer("/response/output").and_then(Value::as_array);
             if completed_output.is_none_or(|items| items.is_empty()) && !output.is_empty() {
-                jcode_base::logging::info(&format!(
-                    "WS_RESPONSE_OUTPUT: preserving streamed output; completed_output_present={} completed_output_items={} streamed_output_items={} streamed_tool_calls={}",
-                    completed_output.is_some(),
-                    completed_output.map_or(0, Vec::len),
-                    output.len(),
-                    output
-                        .iter()
-                        .filter(|item| matches!(
-                            item.get("type").and_then(Value::as_str),
-                            Some("function_call" | "custom_tool_call")
-                        ))
-                        .count(),
-                ));
+                jcode_base::logging::debug_lazy(|| {
+                    format!(
+                        "WS_RESPONSE_OUTPUT: preserving streamed output; completed_output_present={} completed_output_items={} streamed_output_items={} streamed_tool_calls={}",
+                        completed_output.is_some(),
+                        completed_output.map_or(0, Vec::len),
+                        output.len(),
+                        output
+                            .iter()
+                            .filter(|item| matches!(
+                                item.get("type").and_then(Value::as_str),
+                                Some("function_call" | "custom_tool_call")
+                            ))
+                            .count(),
+                    )
+                });
             }
             if let Some(items) = completed_output.filter(|items| !items.is_empty()) {
                 *output = items.clone();
@@ -180,28 +319,22 @@ pub(super) fn observe_ws_response_output(text: &str, output: &mut Vec<Value>) {
 pub(super) fn persistent_ws_incremental_items(
     input: &[Value],
     start_index: usize,
-    previous_output: &[Value],
+    replay_positions: Vec<usize>,
 ) -> (Vec<Value>, usize) {
-    let mut skipped_items = 0usize;
-    // Consume matches once, so an additional identical client-injected message
-    // is not lost. Never remove unrelated assistant messages or tool calls.
-    let mut remaining: Vec<Value> = previous_output.iter().map(replay_identity).collect();
-    let incremental_items = input[start_index..]
+    let skipped = replay_positions.len();
+    let mut positions = replay_positions.into_iter().peekable();
+    let incremental_items = input
         .iter()
-        .filter_map(|item| {
-            let identity = replay_identity(item);
-            if let Some(index) = remaining.iter().position(|output| *output == identity) {
-                remaining.remove(index);
-                skipped_items += 1;
-                None
-            } else if item.get("type").and_then(Value::as_str) == Some("reasoning") {
-                // Reasoning store items are already owned by previous_response_id.
-                skipped_items += 1;
+        .enumerate()
+        .skip(start_index)
+        .filter_map(|(index, item)| {
+            if positions.peek() == Some(&index) {
+                positions.next();
                 None
             } else {
                 Some(item.clone())
             }
         })
         .collect();
-    (incremental_items, skipped_items)
+    (incremental_items, skipped)
 }

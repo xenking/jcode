@@ -6,16 +6,22 @@ use crate::auth;
 mod accessors;
 mod account_fetch;
 pub use account_fetch::fetch_oauth_account_usage;
+mod anthropic_banked;
 mod anthropic_fable_reset;
 mod anthropic_reset;
-pub(crate) use anthropic_fable_reset::auto_reset_fable_usage;
+mod anthropic_saved_reset;
+mod imported_banked;
+pub(crate) use anthropic_fable_reset::{auto_reset_fable_usage, auto_reset_fable_usage_with};
 mod anthropic_response;
 pub(crate) use anthropic_response::invalidate_auth_failure as invalidate_anthropic_usage_auth_failure;
 pub use anthropic_response::record_anthropic_response_limits;
 mod api_keys;
 mod banked;
-pub use banked::{AccountBankedResets, cached_account_banked_resets};
+pub use banked::{
+    AccountBankedResets, anthropic_resets_line, cached_account_banked_resets, provider_resets_line,
+};
 mod cache;
+mod credits;
 mod disk_cache;
 mod display;
 mod flight;
@@ -23,27 +29,67 @@ mod local_activity;
 mod model;
 mod openai_helpers;
 mod openai_response;
+mod openai_seat;
 pub use openai_response::{openai_response_generation, record_openai_response_limits};
 mod openai_reset;
-pub(crate) use openai_reset::auto_reset_weekly_usage;
+pub(crate) use openai_reset::{auto_reset_weekly_usage, auto_reset_weekly_usage_with};
+
+/// Why an earned reset is spent automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetMode {
+    /// The account is at its limit: the provider's own exhaustion checks apply.
+    AtWall,
+    /// A grant lapses within this many seconds and its window has used quota.
+    /// Redeeming now restores that quota instead of losing the grant.
+    Expiring { within_secs: i64 },
+}
+#[cfg(test)]
+mod anthropic_org_tests;
+#[cfg(test)]
+mod anthropic_probe_tests;
+#[cfg(test)]
+mod loopback_tests;
+#[cfg(test)]
+mod egress_tests;
 mod provider_fetch;
+mod redacted_dump;
+pub use redacted_dump::dump_redacted_usage;
 mod remote_accounts;
+mod routing_readings;
+#[cfg(test)]
+mod routing_readings_tests;
+#[cfg(test)]
+mod credit_pool_tests;
+#[cfg(test)]
+pub(crate) use remote_accounts::run_remote_account_test_in_subprocess;
 mod startup_snapshot;
 pub use accessors::*;
+pub use anthropic_banked::AnthropicBankedResets;
+pub use jcode_usage_types::{BankedGrant, BankedGrantStatus};
+pub use anthropic_saved_reset::{
+    PendingSavedClaudeReset, SavedClaudeResetUnavailable, consume_saved_claude_reset,
+    prepare_saved_claude_reset,
+};
 pub use anthropic_reset::{
     AnthropicLimitResetOffer, AnthropicLimitResetOutcome, AnthropicLimitResetUnavailable,
     PendingAnthropicLimitReset, consume_anthropic_limit_reset,
     invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
 };
 use api_keys::enqueue_api_key_usage_tasks;
+pub(crate) use cache::hydrate_persisted_account_usage;
 use cache::*;
 pub use cache::{
     account_known_exhausted, cached_account_usage_snapshot, cached_account_usage_status_snapshot,
+    cached_account_usage_windows, cached_anthropic_usage_for_label,
 };
+pub use credits::credits_line;
 pub use disk_cache::{
     export_last_good as export_limits_snapshot, import_last_good as import_limits_snapshot,
 };
-pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
+pub use jcode_usage_types::{
+    AccountIdentity, CredentialKind, CreditUnit, CreditsReport, CreditsState, OpenAiResetCredits,
+    ProviderUsage, ProviderUsageProgress, SpendCap, UsageLimit,
+};
 pub use model::*;
 pub use openai_reset::{
     OpenAiUsageResetOutcome, PendingOpenAiUsageReset, consume_openai_usage_reset,
@@ -55,13 +101,19 @@ pub use remote_accounts::{
     clear_remote_account_usage, remote_account_banked_resets, remote_account_list,
     remote_account_usage_received, set_remote_account_usage,
 };
+pub(crate) use routing_readings::{
+    account_grants, anthropic_account_readings, cursor_readings, openai_account_balances,
+    openai_account_readings, opencode_readings,
+};
 pub use startup_snapshot::{
     AccountUsageStartupPublisher, hydrate_remote_account_usage,
     hydrate_remote_account_usage_for_generation,
 };
 
 use anyhow::{Context, Result};
-pub use display::{format_reset_time, format_usage_bar};
+pub use display::{
+    format_reset_compact, format_reset_time, format_usage_bar, resets_summary, usage_reading,
+};
 use display::{format_token_count, humanize_key, provider_usage_cache_is_fresh};
 use openai_helpers::{parse_openai_usage_payload, usage_percent_to_ratio};
 use std::collections::HashMap;
@@ -70,11 +122,39 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-/// Usage API endpoint
-const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage?at_wall=1&skip_spend=1";
+/// Anthropic OAuth API root. Usage, saved resets and session resets live under it.
+const OAUTH_API_BASE: &str = "https://api.anthropic.com/api/oauth";
 
-/// OpenAI ChatGPT usage endpoint
-const OPENAI_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+/// First read: the usage windows and the saved-reset (`cedar_ember`) program.
+const SAVED_RESETS_QUERY: &str = "cedar_ember=1&skip_spend=1";
+
+/// [`SAVED_RESETS_QUERY`] without `skip_spend`: a credits seat (enterprise)
+/// states its balance in the `spend` block, which `skip_spend` answers with
+/// `null`, so its credits would never be read.
+const SAVED_RESETS_WITH_SPEND_QUERY: &str = "cedar_ember=1";
+
+/// The first-read query for a login, by how its plan is paid.
+fn usage_query_for_plan(plan: Option<&str>) -> &'static str {
+    match auth::account_identity::default_kind("claude", plan, false) {
+        jcode_usage_types::CredentialKind::Credits => SAVED_RESETS_WITH_SPEND_QUERY,
+        _ => SAVED_RESETS_QUERY,
+    }
+}
+
+fn usage_query(account_label: Option<&str>) -> &'static str {
+    let plan = account_label.and_then(|label| {
+        auth::claude::list_accounts()
+            .ok()?
+            .into_iter()
+            .find(|account| account.label == label)?
+            .subscription_type
+    });
+    usage_query_for_plan(plan.as_deref())
+}
+
+/// Second read, only when no saved reset is spendable: the session-reset
+/// (`juniper_tide`) program.
+const SESSION_RESET_QUERY: &str = "at_wall=1&skip_spend=1";
 
 /// Cache duration (refresh every 5 minutes - usage data is slow-changing)
 const CACHE_DURATION: Duration = Duration::from_secs(300);
@@ -110,36 +190,73 @@ static PROVIDER_USAGE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<String, (Instant, ProviderUsage)>>,
 > = std::sync::OnceLock::new();
 
-async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> Result<UsageData> {
+async fn fetch_anthropic_usage_data(
+    access_token: String,
+    cache_key: String,
+    account_label: Option<&str>,
+) -> Result<UsageData> {
+    let account_label = account_label.map(str::to_owned);
     flight::fetch(cache_key.clone(), || {
-        fetch_anthropic_usage_data_uncached(access_token, cache_key, USAGE_URL)
+        fetch_anthropic_usage_data_uncached(access_token, cache_key, OAUTH_API_BASE, account_label)
     })
     .await
+}
+
+/// One authorized `GET {base}/usage?{query}`.
+fn usage_request(
+    client: &reqwest::Client,
+    base: &str,
+    query: &str,
+    access_token: &str,
+) -> reqwest::RequestBuilder {
+    crate::provider::anthropic::apply_claude_account_headers(
+        client.get(format!("{base}/usage?{query}")),
+        access_token,
+    )
+}
+
+/// The session-reset block, read only when no saved reset can be spent.
+/// Any failure is unknown (`None`), never a denial, and never fails the usage read.
+async fn read_session_reset(
+    client: &reqwest::Client,
+    base: &str,
+    access_token: &str,
+) -> Option<serde_json::Value> {
+    let response = usage_request(client, base, SESSION_RESET_QUERY, access_token)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        crate::logging::info(&format!(
+            "Claude session-reset lookup answered HTTP {}",
+            response.status().as_u16()
+        ));
+        return None;
+    }
+    let body: serde_json::Value = response.json().await.ok()?;
+    body.get("juniper_tide")
+        .filter(|block| block.is_object())
+        .cloned()
 }
 
 async fn fetch_anthropic_usage_data_uncached(
     access_token: String,
     cache_key: String,
-    url: &str,
+    base: &str,
+    account_label: Option<String>,
 ) -> Result<UsageData> {
     let mut request_log = flight::RequestLog::new(&cache_key);
     let probe_started = Instant::now();
-    let client = crate::provider::shared_http_client();
-    let response = crate::provider::anthropic::apply_oauth_attribution_headers(
-        client
-            .get(url)
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-            .header(
-                "User-Agent",
-                crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
-            )
-            .header("Authorization", format!("Bearer {}", access_token))
-            .header("anthropic-beta", "oauth-2025-04-20"),
-        &crate::provider::anthropic::new_oauth_request_id(),
+    // Quota meters leave from the same egress as the account's inference.
+    let client = crate::egress::client("claude", account_label.as_deref()).await?;
+    let response = usage_request(
+        &client,
+        base,
+        usage_query(account_label.as_deref()),
+        &access_token,
     )
-    .send()
-    .await;
+        .send()
+        .await;
 
     let response = match response {
         Ok(response) => response,
@@ -193,51 +310,22 @@ async fn fetch_anthropic_usage_data_uncached(
             .as_ref()
             .and_then(|window| window.utilization)
             .is_some();
-    let reset_status = serde_json::json!({ "juniper_tide": data.juniper_tide });
-    let usage = UsageData {
-        five_hour: data
-            .five_hour
-            .as_ref()
-            .and_then(|w| w.utilization)
-            .map(usage_percent_to_ratio)
-            .unwrap_or(0.0),
-        five_hour_resets_at: data.five_hour.as_ref().and_then(|w| w.resets_at.clone()),
-        seven_day: data
-            .seven_day
-            .as_ref()
-            .and_then(|w| w.utilization)
-            .map(usage_percent_to_ratio)
-            .unwrap_or(0.0),
-        seven_day_resets_at: data.seven_day.as_ref().and_then(|w| w.resets_at.clone()),
-        seven_day_opus: data
-            .seven_day_opus
-            .as_ref()
-            .and_then(|w| w.utilization)
-            .map(usage_percent_to_ratio),
-        model_scoped: data
-            .limits
-            .into_iter()
-            .filter(|limit| limit.kind.as_deref() == Some("weekly_scoped"))
-            .filter_map(|limit| {
-                let model_name = limit.scope?.model?.display_name?;
-                Some(ModelScopedUsageWindow {
-                    model_name,
-                    utilization: usage_percent_to_ratio(limit.percent?),
-                    resets_at: limit.resets_at,
-                })
-            })
-            .collect(),
-        extra_usage_enabled: data
-            .extra_usage
-            .as_ref()
-            .and_then(|e| e.is_enabled)
-            .unwrap_or(false),
-        fetched_at: Some(Instant::now()),
-        last_success_at: Some(Instant::now()),
-        refresh_after: None,
-        last_error: None,
+    let spendable_saved_reset = anthropic_banked::banked_from_status(
+        &serde_json::json!({"cedar_ember": data.cedar_ember}),
+        None,
+        chrono::Utc::now(),
+    )
+    .is_some_and(|banked| banked.usable_count > 0);
+    let session_reset = if spendable_saved_reset {
+        None
+    } else {
+        read_session_reset(&client, base, &access_token).await
     };
-
+    let reset_status = serde_json::json!({
+        "juniper_tide": session_reset.or(data.juniper_tide.clone()),
+        "cedar_ember": data.cedar_ember,
+    });
+    let usage = usage_data_from_response(&data);
     if let Some(label) = cache_key.strip_prefix("label:")
         && quota_known
         && !usage.is_stale()
@@ -256,6 +344,85 @@ async fn fetch_anthropic_usage_data_uncached(
     let usage = disk_cache::store_success_with_reset_status(&cache_key, &usage, Some(reset_status));
     store_anthropic_usage(cache_key, usage.clone());
     Ok(usage)
+}
+
+/// The structured limit of one `kind` (`session` is the five-hour window,
+/// `weekly_all` the seven-day one). Newer responses can carry a window only
+/// here, with the flat field null.
+fn structured_limit<'a>(
+    data: &'a UsageResponse,
+    kind: &str,
+) -> Option<&'a model::StructuredUsageLimit> {
+    data.limits
+        .iter()
+        .find(|limit| limit.kind.as_deref() == Some(kind) && limit.percent.is_some())
+}
+
+/// The cached usage sample a successful Anthropic usage response describes.
+fn usage_data_from_response(data: &UsageResponse) -> UsageData {
+    let flat = |window: &Option<model::UsageWindow>| {
+        window.as_ref().and_then(|window| window.utilization)
+    };
+    let session = structured_limit(data, "session");
+    let weekly = structured_limit(data, "weekly_all");
+    let mut model_scoped: Vec<ModelScopedUsageWindow> = data
+        .limits
+        .iter()
+        .filter(|limit| limit.kind.as_deref() == Some("weekly_scoped"))
+        .filter_map(|limit| {
+            let model_name = limit.scope.as_ref()?.model.as_ref()?.display_name.clone()?;
+            Some(ModelScopedUsageWindow {
+                model_name,
+                utilization: usage_percent_to_ratio(limit.percent?),
+                resets_at: limit.resets_at.clone(),
+            })
+        })
+        .collect();
+    if let Some(sonnet) = data.seven_day_sonnet.as_ref()
+        && let Some(percent) = sonnet.utilization
+        && !model_scoped
+            .iter()
+            .any(|window| window.model_name.eq_ignore_ascii_case("sonnet"))
+    {
+        model_scoped.push(ModelScopedUsageWindow {
+            model_name: "Sonnet".to_string(),
+            utilization: usage_percent_to_ratio(percent),
+            resets_at: sonnet.resets_at.clone(),
+        });
+    }
+    UsageData {
+        // A window the response does not report is unknown, never 0% used.
+        five_hour: flat(&data.five_hour)
+            .or(session.and_then(|limit| limit.percent))
+            .map(usage_percent_to_ratio)
+            .unwrap_or(-1.0),
+        five_hour_resets_at: data
+            .five_hour
+            .as_ref()
+            .and_then(|w| w.resets_at.clone())
+            .or_else(|| session.and_then(|limit| limit.resets_at.clone())),
+        seven_day: flat(&data.seven_day)
+            .or(weekly.and_then(|limit| limit.percent))
+            .map(usage_percent_to_ratio)
+            .unwrap_or(-1.0),
+        seven_day_resets_at: data
+            .seven_day
+            .as_ref()
+            .and_then(|w| w.resets_at.clone())
+            .or_else(|| weekly.and_then(|limit| limit.resets_at.clone())),
+        seven_day_opus: flat(&data.seven_day_opus).map(usage_percent_to_ratio),
+        model_scoped,
+        extra_usage_enabled: data
+            .extra_usage
+            .as_ref()
+            .and_then(|e| e.is_enabled)
+            .unwrap_or(false),
+        credits: credits::claude_credits(data),
+        fetched_at: Some(Instant::now()),
+        last_success_at: Some(Instant::now()),
+        refresh_after: None,
+        last_error: None,
+    }
 }
 
 /// A failed request keeps any last-known limits, but marks them as stale and
@@ -438,6 +605,24 @@ fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
         });
     if let Some((label, mut details)) = oauth_details {
         details.push(("Account label".to_string(), label.to_string()));
+        let provider = if source_key.starts_with("openai:") {
+            "openai"
+        } else {
+            "claude"
+        };
+        report.account = auth::account_identity::oauth_identity(provider, label);
+        // An account paid in credits that reports neither limits nor a balance
+        // is unreadable. Say so instead of leaving it to read as an empty meter.
+        if report.error.is_none()
+            && report.limits.is_empty()
+            && report.credits.is_none()
+            && report
+                .account
+                .as_ref()
+                .is_some_and(|account| account.kind == jcode_usage_types::CredentialKind::Credits)
+        {
+            report.credits = Some(jcode_usage_types::CreditsReport::default());
+        }
         // Replace rather than duplicate local values if a caller reattaches.
         report
             .extra_info
@@ -549,6 +734,16 @@ fn activity_source_has_dedicated_report(source_key: &str) -> bool {
             if source_key == format!("openai-compatible:{}", crate::auth::muse::PROFILE_ID) {
                 return crate::auth::muse::has_cached_auth();
             }
+            // A labelled API key is reported by the API-key module under its
+            // own name while it exists.
+            if let Some(account) = jcode_routing_policy::AccountId::parse(source_key)
+                && account.label().is_some()
+                && crate::provider_catalog::api_key_accounts(account.provider())
+                    .iter()
+                    .any(|candidate| candidate.id == account)
+            {
+                return true;
+            }
             // Direct OpenAI-compatible profiles are reported by the API-key
             // module whenever their key is configured.
             source_key
@@ -634,23 +829,23 @@ fn enqueue_anthropic_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<Provide
 
     let active_label = auth::claude::active_account_label();
     let account_count = accounts.len();
+    let identities = auth::account_identity::oauth_identities();
     for account in accounts {
+        let identity = identities
+            .iter()
+            .find(|identity| identity.provider == "claude" && identity.label == account.label);
         let label = if account_count > 1 {
             let active_marker = if active_label.as_deref() == Some(&account.label) {
                 " ✦"
             } else {
                 ""
             };
-            let email_suffix = account
-                .email
-                .as_deref()
-                .map(mask_email)
-                .map(|m| format!(" ({})", m))
-                .unwrap_or_default();
-            format!(
-                "Anthropic - {}{}{}",
-                account.label, email_suffix, active_marker
-            )
+            // The user's name, or organization or email, plus the plan. The
+            // internal id is the last resort, never the only thing shown.
+            let who = identity.map_or(account.label.as_str(), |identity| {
+                identity.display_name.as_str()
+            });
+            format!("Anthropic - {who}{active_marker}")
         } else {
             let email_suffix = account
                 .email

@@ -522,7 +522,11 @@ fn history_event_for_session_with_messages(
 
 fn user_history_message(content: &str) -> crate::protocol::HistoryMessage {
     crate::protocol::HistoryMessage {
+        codemode: None,
+        ask: None,
+        attachments: Vec::new(),
         response_stats: None,
+        timestamp_ms: None,
         role: "user".to_string(),
         content: content.to_string(),
         tool_calls: None,
@@ -539,6 +543,8 @@ fn history_event_for_session(session_id: &str) -> crate::protocol::ServerEvent {
         provider_name: Some("claude".to_string()),
         provider_model: Some("claude-sonnet-4-20250514".to_string()),
         subagent_model: None,
+        pinned_skill: None,
+        pinned_skills: None,
         agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
@@ -566,6 +572,8 @@ fn history_event_for_session(session_id: &str) -> crate::protocol::ServerEvent {
         reasoning_effort: None,
         service_tier: None,
         available_service_tiers: None,
+        speed_mode: Default::default(),
+        speed_options: Vec::new(),
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
@@ -1685,6 +1693,7 @@ fn test_local_session_picker_switch_is_never_consumed_and_keeps_plan_graph_state
                     session_id: "session_target_456".to_string(),
                 },
                 external_path: None,
+                user_intention: None,
                 todo_statuses: Vec::new(),
             },
         ]),
@@ -1748,7 +1757,7 @@ fn test_local_session_picker_switch_is_never_consumed_and_keeps_plan_graph_state
 /// set_streaming_preview_diagram on a complete fenced block).
 fn seed_streaming_preview(app: &mut App, hash: u64) {
     crate::tui::mermaid::clear_active_diagrams();
-    app.streaming.streaming_text = "```mermaid\ngraph TD; A-->B\n```".to_string();
+    app.streaming.streaming_text = ("```mermaid\ngraph TD; A-->B\n```".to_string()).into();
     app.is_processing = true;
     crate::tui::mermaid::set_streaming_preview_diagram(hash, 320, 240, Some("preview".to_string()));
     assert_eq!(

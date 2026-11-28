@@ -2,12 +2,14 @@
 //!
 //! Pure state machine: keys in, an optional `AskResponse` out. Rendered as an
 //! inline view above the composer, so it reuses the passive inline renderer.
-use crate::protocol::{AskAnswer, AskQuestion, AskResponse};
+use crate::protocol::{AskAnswer, AskKind, AskQuestion, AskResponse};
 use crossterm::event::KeyCode;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AskPickerState {
-    pub request_id: String,
+    request_id: String,
+    tool_call_id: String,
+    kind: AskKind,
     pub questions: Vec<AskQuestion>,
     /// Index of the question currently shown.
     pub current: usize,
@@ -26,15 +28,36 @@ pub(crate) enum AskKeyOutcome {
 
 impl AskPickerState {
     pub fn new(request_id: String, questions: Vec<AskQuestion>) -> Self {
+        Self::for_tool_call(request_id, String::new(), AskKind::Question, questions)
+    }
+
+    pub fn for_tool_call(
+        request_id: String,
+        tool_call_id: String,
+        kind: AskKind,
+        questions: Vec<AskQuestion>,
+    ) -> Self {
         let n = questions.len();
         Self {
             request_id,
+            tool_call_id,
+            kind,
             questions,
             current: 0,
             cursor: 0,
             chosen: vec![Vec::new(); n],
             other: vec![String::new(); n],
         }
+    }
+
+    /// Whether this picker is the open question for tool call `id`.
+    pub(crate) fn answers_tool_call(&self, id: &str) -> bool {
+        self.tool_call_id == id
+    }
+
+    /// Approval prompts raised by the client itself. They must be answered at the terminal.
+    pub(crate) fn needs_terminal_input(&self) -> bool {
+        self.kind.is_human_approval()
     }
 
     fn question(&self) -> &AskQuestion {
@@ -86,6 +109,8 @@ impl AskPickerState {
                         .filter_map(|i| question.options.get(i).map(|o| o.label.clone()))
                         .collect(),
                     other: Some(self.other[q].trim().to_string()).filter(|s| !s.is_empty()),
+                    comments: Default::default(),
+                    ..Default::default()
                 }
             })
             .collect();
@@ -194,6 +219,50 @@ impl AskPickerState {
             title,
             status: Some(keys.to_string()),
             lines,
+            wrap_head: true,
+        }
+    }
+}
+
+impl super::App {
+    pub(super) fn open_ask_picker(
+        &mut self,
+        request_id: String,
+        tool_call_id: String,
+        kind: AskKind,
+        questions: Vec<AskQuestion>,
+    ) {
+        if questions.is_empty() {
+            return;
+        }
+        let picker = AskPickerState::for_tool_call(request_id, tool_call_id, kind, questions);
+        self.inline_interactive_state = None;
+        self.set_inline_view(picker.view());
+        self.ask_picker = Some(picker);
+        self.set_status_notice("The agent is asking you a question");
+    }
+
+    /// Route a key to the open ask picker. Returns the reply once finished.
+    pub(super) fn handle_ask_picker_key(&mut self, code: KeyCode) -> Option<(String, AskResponse)> {
+        let picker = self.ask_picker.as_mut()?;
+        match picker.handle_key(code) {
+            AskKeyOutcome::Pending => {
+                let view = picker.view();
+                self.set_inline_view(view);
+                None
+            }
+            AskKeyOutcome::Done(response) => {
+                let request_id = picker.request_id.clone();
+                self.dismiss_ask_picker();
+                Some((request_id, response))
+            }
+        }
+    }
+
+    pub(super) fn dismiss_ask_picker(&mut self) {
+        if self.ask_picker.take().is_some() {
+            self.clear_inline_view();
+            self.sync_btw_card();
         }
     }
 }
@@ -271,35 +340,5 @@ mod tests {
             AskKeyOutcome::Pending
         ));
         assert_eq!(done(s.handle_key(KeyCode::Esc)), AskResponse::declined());
-    }
-}
-
-impl super::App {
-    pub(super) fn open_ask_picker(&mut self, request_id: String, questions: Vec<AskQuestion>) {
-        if questions.is_empty() {
-            return;
-        }
-        let picker = AskPickerState::new(request_id, questions);
-        self.inline_interactive_state = None;
-        self.inline_view_state = Some(picker.view());
-        self.ask_picker = Some(picker);
-        self.set_status_notice("The agent is asking you a question");
-    }
-
-    /// Route a key to the open ask picker. Returns the reply once finished.
-    pub(super) fn handle_ask_picker_key(&mut self, code: KeyCode) -> Option<(String, AskResponse)> {
-        let picker = self.ask_picker.as_mut()?;
-        match picker.handle_key(code) {
-            AskKeyOutcome::Pending => {
-                self.inline_view_state = Some(picker.view());
-                None
-            }
-            AskKeyOutcome::Done(response) => {
-                let request_id = picker.request_id.clone();
-                self.ask_picker = None;
-                self.inline_view_state = None;
-                Some((request_id, response))
-            }
-        }
     }
 }

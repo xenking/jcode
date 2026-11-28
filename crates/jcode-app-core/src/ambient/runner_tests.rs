@@ -12,6 +12,52 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+#[test]
+fn empty_completed_cycles_are_quiet_but_work_and_failures_notify() {
+    use crate::ambient::{AmbientCycleResult, CycleStatus};
+    let mut result = AmbientCycleResult {
+        summary: "Nothing needed".into(),
+        memories_modified: 0,
+        compactions: 0,
+        proactive_work: None,
+        next_schedule: None,
+        started_at: chrono::Utc::now(),
+        ended_at: chrono::Utc::now(),
+        status: CycleStatus::Complete,
+        conversation: None,
+    };
+    assert!(!super::cycle_should_notify(&result, 0));
+    assert!(super::cycle_should_notify(&result, 1));
+    result.proactive_work = Some("Fixed bug".into());
+    assert!(super::cycle_should_notify(&result, 0));
+    result.proactive_work = None;
+    result.memories_modified = 1;
+    assert!(super::cycle_should_notify(&result, 0));
+    result.memories_modified = 0;
+    result.status = CycleStatus::Incomplete;
+    assert!(super::cycle_should_notify(&result, 0));
+}
+
+#[test]
+fn cycle_errors_are_short_and_do_not_expose_provider_details() {
+    assert_eq!(
+        super::cycle_error_reason(&anyhow::anyhow!("HTTP 401 secret token")),
+        "Provider authentication failed"
+    );
+    assert_eq!(
+        super::cycle_error_reason(&anyhow::anyhow!("Unsupported OpenAI model 'x'")),
+        "Configured model is unavailable"
+    );
+    assert_eq!(
+        super::cycle_error_reason(&anyhow::anyhow!("HTTP 429")),
+        "Provider rate limit reached"
+    );
+    assert_eq!(
+        super::cycle_error_reason(&anyhow::anyhow!("private request body")),
+        "Ambient agent failed; check logs for details"
+    );
+}
+
 #[path = "runner_live_delivery_tests.rs"]
 mod live_delivery;
 
@@ -52,6 +98,93 @@ impl Drop for ResetConfigCache {
     fn drop(&mut self) {
         Config::invalidate_cache();
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ambient_nudge_burst_is_consumed_by_one_wake() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    let handle = runner.clone();
+    let waiting = tokio::spawn(async move { handle.wait_for_wake(Duration::from_secs(30)).await });
+    runner.nudge();
+    tokio::task::yield_now().await;
+    assert!(
+        !waiting.is_finished(),
+        "the first nudge opens a debounce window"
+    );
+    for _ in 0..100 {
+        runner.nudge();
+    }
+    waiting.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), runner.wait_for_nudge())
+            .await
+            .is_err()
+    );
+    runner.nudge();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), runner.wait_for_nudge())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn ambient_runner_observes_external_state_and_queue_replacements_after_nudge() {
+    use crate::ambient::{AmbientManager, AmbientState, ScheduleRequest};
+
+    let _guard = crate::storage::lock_test_env();
+    let _cache = ResetConfigCache;
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _enabled = EnvVarGuard::unset("JCODE_AMBIENT_ENABLED");
+    std::fs::write(Config::path().unwrap(), "[ambient]\nenabled = false\n").unwrap();
+    Config::invalidate_cache();
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    let task = tokio::spawn(runner.clone().run_loop(Arc::new(TestProvider)));
+    tokio::task::yield_now().await;
+    assert!(matches!(runner.state().await.status, AmbientStatus::Idle));
+    assert_eq!(runner.queue_json().await, "[]");
+
+    AmbientState {
+        status: AmbientStatus::Disabled,
+        ..AmbientState::default()
+    }
+    .save()
+    .unwrap();
+    let id = AmbientManager::new()
+        .unwrap()
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(10),
+            wake_at: None,
+            context: "scheduled by another handle".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test".into(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: vec![],
+            git_branch: None,
+            additional_context: None,
+        })
+        .unwrap();
+    runner.nudge();
+    let refreshed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(runner.state().await.status, AmbientStatus::Disabled)
+                && runner.queue_json().await.contains(&id)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    task.abort();
+    let _ = task.await;
+    refreshed.expect("both on-disk replacements must be visible after a relevant wake");
 }
 
 #[test]
@@ -146,6 +279,8 @@ async fn running_loop_observes_enable_edit_without_cache_invalidation() {
 #[derive(Clone, Default)]
 struct StreamingTestProvider {
     responses: Arc<StdMutex<VecDeque<Vec<StreamEvent>>>>,
+    requested_models: Arc<StdMutex<Vec<String>>>,
+    supplied_tools: Arc<StdMutex<Vec<Vec<ToolDefinition>>>>,
 }
 
 impl StreamingTestProvider {
@@ -182,10 +317,11 @@ impl Provider for StreamingTestProvider {
     async fn complete(
         &self,
         _messages: &[Message],
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
         _system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        self.supplied_tools.lock().unwrap().push(tools.to_vec());
         let events = self
             .responses
             .lock()
@@ -204,8 +340,88 @@ impl Provider for StreamingTestProvider {
         "test"
     }
 
+    fn set_model(&self, model: &str) -> Result<()> {
+        self.requested_models
+            .lock()
+            .unwrap()
+            .push(model.to_string());
+        Ok(())
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn configured_route_receives_and_executes_ambient_end_tool() {
+    let _guard = crate::storage::lock_test_env();
+    let _cache = ResetConfigCache;
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _provider_env = EnvVarGuard::unset("JCODE_AMBIENT_PROVIDER");
+    let _model_env = EnvVarGuard::unset("JCODE_AMBIENT_MODEL");
+    std::fs::write(
+        Config::path().unwrap(),
+        "[ambient]\nprovider = 'openai'\nmodel = 'gpt-6.1-terra'\n",
+    )
+    .unwrap();
+    Config::invalidate_cache();
+    let mock = StreamingTestProvider::default();
+    mock.queue_response(vec![
+        StreamEvent::ToolUseStart {
+            id: "call_end".into(),
+            name: "end_ambient_cycle".into(),
+        },
+        StreamEvent::ToolInputDelta(
+            r#"{"summary":"Nothing to do","memories_modified":0,"compactions":0}"#.into(),
+        ),
+        StreamEvent::ToolUseEnd,
+        StreamEvent::MessageEnd {
+            stop_reason: Some("tool_use".into()),
+        },
+    ]);
+    mock.queue_response(vec![
+        StreamEvent::TextDelta("Done".into()),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".into()),
+        },
+    ]);
+    let original: Arc<dyn Provider> = Arc::new(mock.clone());
+    let routed = super::configured_cycle_provider(&original).await.unwrap();
+    assert_eq!(
+        mock.requested_models.lock().unwrap().as_slice(),
+        ["openai-oauth:gpt-6.1-terra"]
+    );
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    let result = runner
+        .run_cycle_with_visible_launcher(&routed, false, || unreachable!())
+        .await
+        .unwrap();
+    assert!(matches!(
+        result.status,
+        crate::ambient::CycleStatus::Complete
+    ));
+    assert!(!super::cycle_should_notify(&result, 0));
+    let requests = mock.supplied_tools.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "a completed cycle must not make another model request"
+    );
+    let tool = requests[0]
+        .iter()
+        .find(|tool| tool.name == "end_ambient_cycle")
+        .expect("tool must reach provider");
+    assert!(!tool.defer_loading);
+    for field in ["summary", "memories_modified", "compactions", "intent"] {
+        assert!(
+            tool.input_schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item == field)
+        );
     }
 }
 
@@ -253,7 +469,7 @@ async fn assert_visible_launch_error_falls_back(error_kind: std::io::ErrorKind) 
         "headless fallback should capture an agent conversation"
     );
     assert!(
-        result.summary.contains("forced end after 2 attempts"),
+        result.summary.contains("two attempts"),
         "headless fallback should return the headless agent result"
     );
 }
@@ -286,7 +502,10 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
         None,
         Some("Parent".to_string()),
     );
-    parent.working_dir = Some(temp.path().display().to_string());
+    parent.apply_workspace(crate::session::Workspace {
+        working_dir: Some(temp.path().display().to_string()),
+        ..parent.workspace()
+    });
     parent.save().expect("save parent session");
 
     let item = ScheduledItem {
@@ -295,11 +514,11 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
         context: "Follow up later".to_string(),
         priority: Priority::Normal,
         target: ScheduleTarget::Spawn {
-            parent_session_id: parent.id.clone(),
+            parent_session_id: parent.id().to_owned(),
         },
-        created_by_session: parent.id.clone(),
+        created_by_session: parent.id().to_owned(),
         created_at: chrono::Utc::now(),
-        working_dir: parent.working_dir.clone(),
+        working_dir: parent.working_dir().map(str::to_owned),
         task_description: Some("Follow up later".to_string()),
         relevant_files: vec!["src/lib.rs".to_string()],
         git_branch: None,
@@ -308,21 +527,21 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
 
     let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
     let child_session_id = runner
-        .spawn_session_for_scheduled_item(&provider, &item, &parent.id)
+        .spawn_session_for_scheduled_item(&provider, &item, parent.id())
         .await
         .expect("spawned scheduled task should succeed");
 
-    assert_ne!(child_session_id, parent.id);
+    assert_ne!(child_session_id, parent.id());
 
     let child = Session::load(&child_session_id).expect("load spawned child session");
-    assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
-    assert_eq!(child.working_dir, parent.working_dir);
-    assert!(child.messages.iter().any(|message| {
+    assert_eq!(child.parent_id(), Some(parent.id()));
+    assert_eq!(child.working_dir(), parent.working_dir());
+    assert!(child.iter_messages().any(|message| {
         message.role == Role::User
             && message.content_preview().contains("[Scheduled task]")
             && message.content_preview().contains("Follow up later")
     }));
-    assert!(child.messages.iter().any(|message| {
+    assert!(child.iter_messages().any(|message| {
         message.role == Role::Assistant
             && message
                 .content_preview()

@@ -216,8 +216,7 @@ pub(crate) async fn bounded_output_for(
     limit: usize,
     operation: WorkspaceOperation,
 ) -> Option<(std::process::ExitStatus, Vec<u8>)> {
-    let mut timing = super::cloud_latency::Span::new("workspace_command");
-    timing.operation(operation.label());
+    let timing = super::cloud_latency::Span::new("workspace_command").during(operation.label());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -343,14 +342,14 @@ fn parse(bytes: &[u8]) -> Option<GitInfo> {
         info.dirty_total += 1;
         if info.dirty_files.len() < 10 {
             info.dirty_files.push(DirtyFile::new(
-                super::app::helpers::porcelain_status_letter(x, y),
+                super::git_porcelain::porcelain_status_letter(x, y),
                 path,
             ));
         }
     }
     let numstat = records.collect::<Vec<_>>().join(&0);
     let text = String::from_utf8_lossy(&numstat);
-    let stats = super::app::helpers::parse_numstat(&text);
+    let stats = super::git_porcelain::parse_numstat(&text);
     for (added, removed) in stats.values() {
         info.added_total += added.unwrap_or(0);
         info.removed_total += removed.unwrap_or(0);
@@ -374,6 +373,7 @@ fn probe_wake() -> &'static tokio::sync::Notify {
 /// Each probe spawns a shell and git (plus ssh for the cloud side). A
 /// backgrounded window shows nothing, so it only needs a slow safety refresh;
 /// regaining focus or a repo-mutating tool wakes the workers immediately.
+#[cfg(not(test))]
 fn probe_period() -> Duration {
     // Seed once from the state carried across a client re-exec, so a window
     // that was already in the background keeps the slow period.
@@ -404,6 +404,7 @@ pub(crate) fn refresh_soon() {
 
 /// Sleep until the next SSH probe is due: the focus-dependent period, or an
 /// earlier wake from focus regain or a repo-mutating tool.
+#[cfg(not(test))]
 pub(crate) async fn wait_for_next_probe() {
     let _ = tokio::time::timeout(probe_period(), probe_wake().notified()).await;
 }

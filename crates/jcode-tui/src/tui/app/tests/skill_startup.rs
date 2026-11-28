@@ -68,12 +68,15 @@ fn skill_startup_minimal_client_includes_global_skills_before_history() {
         // populate with project skills. Use an empty explicit project here.
         let project = home.join("empty-project");
         std::fs::create_dir_all(&project).unwrap();
-        app.session.working_dir = Some(project.to_string_lossy().into_owned());
+        app.session.apply_workspace(crate::session::Workspace {
+            working_dir: Some(project.to_string_lossy().into_owned()),
+            ..app.session.workspace()
+        });
         assert!(app.remote_skills.is_empty());
-        assert!(app.session.messages.is_empty());
+        assert!(app.session.has_no_messages());
         assert_eq!(
             startup_skill_commands(&mut app, "/"),
-            vec!["/startup-global"]
+            vec!["/native-ui", "/startup-global"]
         );
         assert_eq!(
             startup_skill_commands(&mut app, "/startup-g"),
@@ -81,7 +84,7 @@ fn skill_startup_minimal_client_includes_global_skills_before_history() {
         );
         assert_eq!(
             crate::tui::TuiState::available_skills(&app),
-            vec!["startup-global"]
+            vec!["native-ui", "startup-global"]
         );
     });
 }
@@ -96,15 +99,21 @@ fn skill_startup_minimal_clients_keep_project_overlays_separate() {
         write_startup_skill(&b, "startup-project-b");
         let mut first = App::new_for_remote_with_options(None, false);
         let mut second = App::new_for_remote_with_options(None, false);
-        first.session.working_dir = Some(a.to_string_lossy().into_owned());
-        second.session.working_dir = Some(b.to_string_lossy().into_owned());
+        first.session.apply_workspace(crate::session::Workspace {
+            working_dir: Some(a.to_string_lossy().into_owned()),
+            ..first.session.workspace()
+        });
+        second.session.apply_workspace(crate::session::Workspace {
+            working_dir: Some(b.to_string_lossy().into_owned()),
+            ..second.session.workspace()
+        });
         assert_eq!(
             startup_skill_commands(&mut first, "/"),
-            vec!["/startup-global", "/startup-project-a"]
+            vec!["/native-ui", "/startup-global", "/startup-project-a"]
         );
         assert_eq!(
             startup_skill_commands(&mut second, "/"),
-            vec!["/startup-global", "/startup-project-b"]
+            vec!["/native-ui", "/startup-global", "/startup-project-b"]
         );
         assert!(
             first
@@ -120,6 +129,11 @@ fn skill_startup_minimal_clients_keep_project_overlays_separate() {
 
 #[test]
 fn skill_startup_ssh_history_replaces_warmed_empty_candidates_without_local_skills() {
+    if super::commands_dispatch::ssh_test_runs_in_child(
+        "skill_startup_ssh_history_replaces_warmed_empty_candidates_without_local_skills",
+    ) {
+        return;
+    }
     with_skill_startup_home(|home| {
         write_startup_skill(home, "startup-local-secret");
         crate::env::set_var("JCODE_SSH_REMOTE", "fixture-host");

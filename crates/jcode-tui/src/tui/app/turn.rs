@@ -1,6 +1,9 @@
 #[path = "turn_system_reminder.rs"]
-mod system_reminder;
+pub(super) mod system_reminder;
 use super::*;
+#[path = "turn_prepared_turn.rs"]
+mod prepared_turn;
+
 use crate::message::ToolDefinition;
 
 /// Keep raw JSON separate for every in-flight call. Unkeyed providers address
@@ -13,27 +16,6 @@ struct PendingStreamingTools {
 impl PendingStreamingTools {
     fn start(&mut self, tool: ToolCall) {
         self.calls.push((tool, String::new()));
-    }
-
-    fn input(&mut self, id: Option<&str>, delta: &str) {
-        let call = match id {
-            Some(id) => self.calls.iter_mut().find(|(tool, _)| tool.id == id),
-            None => self.calls.last_mut(),
-        };
-        if let Some((_, input)) = call {
-            input.push_str(delta);
-        }
-    }
-
-    fn finish(&mut self, id: Option<&str>) -> Option<ToolCall> {
-        let index = match id {
-            Some(id) => self.calls.iter().position(|(tool, _)| tool.id == id)?,
-            None => self.calls.len().checked_sub(1)?,
-        };
-        let (mut tool, input) = self.calls.remove(index);
-        tool.input = ToolCall::parse_streamed_input_to_object(&input);
-        tool.refresh_intent_from_input();
-        Some(tool)
     }
 
     fn signature(&mut self, id: &str, signature: &str) {
@@ -109,12 +91,18 @@ impl App {
                 return Ok(());
             }
 
-            let (provider_messages, compaction_event) = self.messages_for_provider();
+            let (mut provider_messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
-                self.handle_compaction_event(event);
+                self.handle_compaction_event(event, None);
+                provider_messages = self.messages_for_provider().0;
             }
 
-            let tools = self.registry.definitions(None).await;
+            let mut tools = self.registry.definitions(None).await;
+            let pinned = self.session.pinned_skill_names();
+            tools.retain(|tool| {
+                !crate::agent_profile::tools_withheld_without_mode(pinned)
+                    .any(|name| name == tool.name)
+            });
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending = self.build_memory_prompt_nonblocking(&provider_messages);
             // Use split prompt for better caching - static content cached, dynamic not.
@@ -143,13 +131,15 @@ impl App {
             // Clone data needed for the API call to avoid borrow issues
             // The future would hold references across the select! which conflicts with handle_key
             let provider = self.provider.clone();
-            let mut provider_messages = provider_messages;
             let cache_signature_len = provider_messages.len();
             if let Some(pending) = &memory_pending {
-                provider_messages.push(Message::user(&format!(
-                    "<system-reminder>\n{}\n</system-reminder>",
-                    pending.prompt
-                )));
+                provider_messages.push(
+                    Message::user(&format!(
+                        "<system-reminder>\n{}\n</system-reminder>",
+                        pending.prompt
+                    ))
+                    .into_request_only(),
+                );
             }
             let request_messages = if crate::config::config().features.message_timestamps {
                 Message::with_timestamps(&provider_messages)
@@ -325,8 +315,8 @@ impl App {
             let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
-            let mut reasoning_content = String::new();
-            let mut reasoning_signature = String::new();
+            let mut reasoning =
+                crate::message::TurnReasoning::new(&provider_name, store_reasoning_content);
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
             // Provider-executed tool items (e.g. native web search), stored
             // verbatim at their position in the response for exact replay.
@@ -393,19 +383,14 @@ impl App {
                                         tool_calls.extend(pending_tools.drain());
                                         if !text_content.is_empty() || !tool_calls.is_empty() {
                                             let mut content_blocks = Vec::new();
+                                            content_blocks.extend(provider_native_items.anthropic_thinking().cloned());
                                             if !text_content.is_empty() {
                                                 content_blocks.push(ContentBlock::Text {
                                                     text: format!("{}\n\n[generation interrupted by user]", text_content),
                                                     cache_control: None,
                                                 });
                                             }
-                                            crate::message::push_reasoning_blocks(
-                                                &mut content_blocks,
-                                                &provider_name,
-                                                &reasoning_content,
-                                                Some(&reasoning_signature),
-                                                store_reasoning_content,
-                                            );
+                                            reasoning.append_history(&mut content_blocks);
                                             if store_reasoning_content {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
                                             }
@@ -416,7 +401,7 @@ impl App {
                                                 let content_clone = content_blocks.clone();
                                                 self.add_provider_message(Message {
                                                     role: Role::Assistant,
-                                                    content: content_blocks,
+                                                    content: content_blocks.into(),
                                                     timestamp: Some(chrono::Utc::now()),
                                                     tool_duration_ms: None,
                                                 });
@@ -437,6 +422,8 @@ impl App {
                                                     duration_secs: self.display_turn_duration_secs(),
                                                     title: None,
                                                     tool_data: None,
+                                                    codemode: None,
+                                                    ask: None,
                                                 });
                                                 }
                                             }
@@ -456,19 +443,14 @@ impl App {
                                             tool_calls.extend(pending_tools.drain());
                                             // Build content blocks for partial response
                                             let mut content_blocks = Vec::new();
+                                            content_blocks.extend(provider_native_items.anthropic_thinking().cloned());
                                             if !text_content.is_empty() {
                                                 content_blocks.push(ContentBlock::Text {
                                                     text: text_content.clone(),
                                                     cache_control: None,
                                                 });
                                             }
-                                            crate::message::push_reasoning_blocks(
-                                                &mut content_blocks,
-                                                &provider_name,
-                                                &reasoning_content,
-                                                Some(&reasoning_signature),
-                                                store_reasoning_content,
-                                            );
+                                            reasoning.append_history(&mut content_blocks);
                                             if store_reasoning_content {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
                                             }
@@ -479,7 +461,7 @@ impl App {
                                             if !content_blocks.is_empty() {
                                                 self.add_provider_message(Message {
                                                     role: Role::Assistant,
-                                                    content: content_blocks,
+                                                    content: content_blocks.into(),
                                                     timestamp: Some(chrono::Utc::now()),
                                                     tool_duration_ms: None,
                                                 });
@@ -496,6 +478,8 @@ impl App {
                                                     duration_secs: None,
                                                     title: None,
                                                     tool_data: None,
+                                                    codemode: None,
+                                                    ask: None,
                                                 });
                                                 }
                                             }
@@ -509,12 +493,13 @@ impl App {
                                             duration_secs: None,
                                             title: None,
                                             tool_data: None,
+                                            codemode: None,
+                                            ask: None,
                                         });
                                         // Clear streaming state and continue with new turn
                                         self.clear_streaming_render_state();
                                         self.streaming_tool_calls.clear();
                                         self.stream_buffer = StreamBuffer::new();
-                                        reasoning_content.clear();
                                         interleaved = true;
                                         // Continue to next iteration of outer loop (new API call)
                                         break;
@@ -618,7 +603,7 @@ impl App {
                                         ) {
                                             let ops = self.stream_buffer.flush();
                                             self.apply_stream_ops(ops);
-                                            let mut corrected = self.streaming.streaming_text.clone();
+                                            let mut corrected = self.streaming.streaming_text.to_string();
                                             if crate::message::replace_text_suffix(
                                                 &mut corrected, &old_text, &new_text,
                                             ).is_some() {
@@ -631,6 +616,7 @@ impl App {
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
                                         self.streaming.response_output.tool();
+                                        self.turn_tool_call_seen = true;
                                         self.usage_reset.openai_quota_rejected = false;
                                         // Tool input JSON is still provider-generated output and is
                                         // included in provider output-token usage. Keep the TPS timer
@@ -721,6 +707,8 @@ impl App {
                                                 duration_secs: None,
                                                 title: None,
                                                 tool_data: Some(tool.clone()),
+                                                codemode: None,
+                                                ask: None,
                                             });
 
                                             tool_calls.push(tool);
@@ -793,6 +781,7 @@ impl App {
                                         self.update_terminal_title();
                                     }
                                     StreamEvent::ConnectionPhase { phase } => {
+                                        self.stream_message_ended = false;
                                         let was_connecting = matches!(
                                             self.status,
                                             ProcessingStatus::Connecting(_)
@@ -819,6 +808,7 @@ impl App {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
                                     }
+                                    StreamEvent::SpeedReported { .. } => {}
                                     StreamEvent::ServiceTier { tier, requested } => {
                                         self.remote_reported_service_tier = Some((requested, tier.clone()));
                                         self.status_detail = Some(format!("Provider tier: {tier}"));
@@ -833,7 +823,17 @@ impl App {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
                                     }
+                                    StreamEvent::ResolvedModel { model } => {
+                                        call_usage.resolved_model = jcode_provider_core::nonempty_response_model(Some(&model)).map(str::to_string);
+                                    }
                                     StreamEvent::RetryRollback { attempt, max } => {
+                                        // Account for any observed failed-attempt usage, then
+                                        // clear its response model before the next attempt.
+                                        crate::telemetry::record_simple_completion_usage(
+                                            Some(self.session.id()), &provider_name, &model_at_request_start,
+                                            crate::telemetry::UsageSource::Agent,
+                                            std::mem::take(&mut call_usage),
+                                        );
                                         // Transient transport fault mid-stream; the provider is
                                         // replaying the request from the top. Discard the partial
                                         // attempt (accumulators + on-screen streaming render) so
@@ -851,8 +851,7 @@ impl App {
                                         pending_tools.clear();
                                         generated_image_contexts.clear();
                                         sdk_tool_results.clear();
-                                        reasoning_content.clear();
-                                        reasoning_signature.clear();
+                                        reasoning.clear();
                                         openai_reasoning_items.clear();
                                         provider_native_items.clear();
                                         openai_native_compaction = None;
@@ -915,9 +914,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ThinkingSignatureDelta(signature) => {
-                                        if store_reasoning_content {
-                                            reasoning_signature.push_str(&signature);
-                                        }
+                                        reasoning.push_signature(&signature);
                                     }
                                     StreamEvent::ThinkingDelta(thinking_text) => {
                                         self.resume_streaming_tps();
@@ -945,7 +942,7 @@ impl App {
                                         // Always capture reasoning text so it can be
                                         // persisted as a history-only trace, regardless
                                         // of provider replay support.
-                                        reasoning_content.push_str(&thinking_text);
+                                        reasoning.push_text(&thinking_text);
                                         // When reasoning text is hidden, the status flip to
                                         // "thinking…" is the only visible signal, so repaint
                                         // promptly on the first delta.
@@ -954,6 +951,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ThinkingEnd => {
+                                        reasoning.finish_block(&mut provider_native_items, text_content.len());
                                         self.pause_streaming_tps(true);
                                         self.thinking_start = None;
                                         self.thinking_buffer.clear();
@@ -1074,6 +1072,8 @@ impl App {
                                                 duration_secs: None,
                                                 title: None,
                                                 tool_data: Some(tool_call),
+                                                codemode: None,
+                                                ask: None,
                                             });
                                             self.status = ProcessingStatus::Streaming;
                                         }
@@ -1112,6 +1112,8 @@ impl App {
                                             duration_secs: None,
                                             title: Some("Generated image".to_string()),
                                             tool_data: Some(tool_call),
+                                            codemode: None,
+                                            ask: None,
                                         });
                                         if let Some(image) = crate::message::generated_image_rendered_image(
                                             &id,
@@ -1150,7 +1152,7 @@ impl App {
                                             session_id: self.session_id().to_string(),
                                             message_id: self.session_id().to_string(),
                                             tool_call_id: request_id.clone(),
-                                            working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
+                                            working_dir: self.session.working_dir().map(PathBuf::from),
                                             stdin_request_tx: None,
                                             graceful_shutdown_signal: None,
                                             execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
@@ -1235,7 +1237,7 @@ impl App {
             // Record before the interleave early-continue: an interrupted call
             // still consumed whatever the provider reported.
             crate::telemetry::record_simple_completion_usage(
-                Some(&self.session.id),
+                Some(self.session.id()),
                 &provider_name,
                 &model_at_request_start,
                 crate::telemetry::UsageSource::Agent,
@@ -1257,13 +1259,7 @@ impl App {
                     cache_control: None,
                 });
             }
-            crate::message::push_reasoning_blocks(
-                &mut content_blocks,
-                &provider_name,
-                &reasoning_content,
-                Some(&reasoning_signature),
-                store_reasoning_content,
-            );
+            reasoning.append_history(&mut content_blocks);
             if store_reasoning_content {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
@@ -1276,7 +1272,7 @@ impl App {
                 let content_clone = content_blocks.clone();
                 self.add_provider_message(Message {
                     role: Role::Assistant,
-                    content: content_blocks,
+                    content: content_blocks.into(),
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,
                 });
@@ -1319,6 +1315,8 @@ impl App {
                         duration_secs: duration,
                         title: None,
                         tool_data: None,
+                        codemode: None,
+                        ask: None,
                     });
                     self.push_turn_footer(duration);
                 }
@@ -1326,8 +1324,8 @@ impl App {
                 // Had tool calls - only display text that came AFTER the last tool
                 // (text before each tool was already committed in ToolUseEnd handler)
                 if !self.streaming.streaming_text.is_empty() {
-                    let content =
-                        self.collapse_reasoning_for_commit(self.streaming.streaming_text.clone());
+                    let content = self
+                        .collapse_reasoning_for_commit(self.streaming.streaming_text.to_string());
                     if !content.trim().is_empty() {
                         self.push_display_message(DisplayMessage {
                             role: "assistant".to_string(),
@@ -1336,6 +1334,8 @@ impl App {
                             duration_secs: duration,
                             title: None,
                             tool_data: None,
+                            codemode: None,
+                            ask: None,
                         });
                     }
                 }
@@ -1353,7 +1353,7 @@ impl App {
                     for blocks in generated_image_contexts.drain(..) {
                         self.add_provider_message(Message {
                             role: Role::User,
-                            content: blocks.clone(),
+                            content: blocks.clone().into(),
                             timestamp: Some(chrono::Utc::now()),
                             tool_duration_ms: None,
                         });
@@ -1380,13 +1380,13 @@ impl App {
 
                 let message_id = assistant_message_id
                     .clone()
-                    .unwrap_or_else(|| self.session.id.clone());
+                    .unwrap_or_else(|| self.session.id().to_owned());
 
                 // Check if SDK already executed this tool
                 if let Some((sdk_content, sdk_is_error)) = sdk_tool_results.remove(&tc.id) {
                     // Use SDK result
                     Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                        session_id: self.session.id.clone(),
+                        session_id: self.session.id().to_owned(),
                         message_id: message_id.clone(),
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
@@ -1424,7 +1424,8 @@ impl App {
                             tool_use_id: tc.id.clone(),
                             content: sdk_content,
                             is_error: if sdk_is_error { Some(true) } else { None },
-                        }],
+                        }]
+                        .into(),
                         timestamp: Some(chrono::Utc::now()),
                         tool_duration_ms: None,
                     });
@@ -1442,17 +1443,17 @@ impl App {
 
                 // Execute locally
                 let ctx = ToolContext {
-                    session_id: self.session.id.clone(),
+                    session_id: self.session.id().to_owned(),
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
-                    working_dir: self.session.working_dir.as_deref().map(PathBuf::from),
+                    working_dir: self.session.working_dir().map(PathBuf::from),
                     stdin_request_tx: None,
                     graceful_shutdown_signal: None,
                     execution_mode: crate::tool::ToolExecutionMode::AgentTurn,
                 };
 
                 Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                    session_id: self.session.id.clone(),
+                    session_id: self.session.id().to_owned(),
                     message_id: message_id.clone(),
                     tool_call_id: tc.id.clone(),
                     tool_name: tc.name.clone(),
@@ -1510,6 +1511,8 @@ impl App {
                                                     duration_secs: self.display_turn_duration_secs(),
                                                     title: None,
                                                     tool_data: None,
+                                                    codemode: None,
+                                                    ask: None,
                                                 });
                                                 }
                                             }
@@ -1576,7 +1579,7 @@ impl App {
                             let mut needs_redraw = false;
                             match bus_event {
                                 Ok(BusEvent::SubagentStatus(status)) => {
-                                    if status.session_id == self.session.id {
+                                    if status.session_id == self.session.id() {
                                         let display = if let Some(model) = &status.model {
                                             format!("{} · {}", status.status, model)
                                         } else {
@@ -1587,13 +1590,13 @@ impl App {
                                     }
                                 }
                                 Ok(BusEvent::BatchProgress(progress)) => {
-                                    if progress.session_id == self.session.id {
+                                    if progress.session_id == self.session.id() {
                                         self.batch_progress = Some(progress);
                                         needs_redraw = true;
                                     }
                                 }
                                 Ok(BusEvent::SidePanelUpdated(update)) => {
-                                    if update.session_id == self.session.id {
+                                    if update.session_id == self.session.id() {
                                         self.set_side_panel_snapshot(update.snapshot);
                                         needs_redraw = true;
                                     }
@@ -1624,7 +1627,7 @@ impl App {
                 let (output, is_error, tool_title) = match result {
                     Ok(o) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
+                            session_id: self.session.id().to_owned(),
                             message_id: message_id.clone(),
                             tool_call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),
@@ -1636,7 +1639,7 @@ impl App {
                     }
                     Err(e) => {
                         Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
-                            session_id: self.session.id.clone(),
+                            session_id: self.session.id().to_owned(),
                             message_id: message_id.clone(),
                             tool_call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),
@@ -1681,7 +1684,7 @@ impl App {
                 for blocks in generated_image_contexts.drain(..) {
                     self.add_provider_message(Message {
                         role: Role::User,
-                        content: blocks.clone(),
+                        content: blocks.clone().into(),
                         timestamp: Some(chrono::Utc::now()),
                         tool_duration_ms: None,
                     });

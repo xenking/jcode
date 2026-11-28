@@ -50,18 +50,25 @@ fn route_method_display(route: &crate::tui::PickerOption) -> String {
         return api_method_display(&route.api_method);
     };
     // Only the catalog identity prefix is authoritative, not later diagnostics.
-    let identity = format!("account {label} · ");
-    let detail = route
-        .detail
-        .trim_start_matches("[global] ")
-        .trim_start_matches("[session] ");
-    let email = detail
-        .strip_prefix(&identity)
-        .and_then(|rest| rest.split(" · ").next())
-        .filter(|email| email.contains('@') && !email.chars().any(char::is_whitespace));
-    match email {
-        Some(email) => format!("oauth · {email}"),
-        None => api_method_display(&route.api_method),
+    let identity = jcode_provider_core::parse_route_account_identity(&route.detail)
+        .filter(|identity| identity.label == label);
+    // The account's icon leads wherever the account is named. The daemon's
+    // resolved icon wins; an older daemon sends none, so derive the default.
+    let icon = route
+        .icon
+        .clone()
+        .or_else(|| {
+            let account =
+                jcode_provider_core::route_pool_key(&route.api_method).unwrap_or_default();
+            crate::routing_accounts::resolved_account_icon(&account)
+        })
+        .map(|icon| format!("{icon} "))
+        .unwrap_or_default();
+    // The user's name for the login (`team · Max 20x`), else its email. The
+    // internal label is the last resort.
+    match identity.and_then(|identity| identity.display_name.or(identity.email())) {
+        Some(name) => format!("{icon}oauth · {name}"),
+        None => format!("{icon}{}", api_method_display(&route.api_method)),
     }
 }
 
@@ -130,7 +137,7 @@ fn picker_entry_pretty_name(entry: &crate::tui::PickerEntry) -> String {
         },
         None => (entry.name.as_str(), String::new()),
     };
-    match crate::tui::app::helpers::model_names::pretty_known_model_family(base) {
+    match jcode_provider_core::model_names::pretty_known_model_family(base) {
         Some(pretty) => format!("{pretty}{suffix}"),
         None => entry.name.clone(),
     }
@@ -345,6 +352,14 @@ fn account_inline_interactive_state_label(entry: &crate::tui::PickerEntry) -> &'
     entry.account_state_label().unwrap_or("-")
 }
 
+fn picker_header_count_str(filtered_count: usize, total: usize) -> String {
+    if filtered_count == total {
+        format!(" ({})", total)
+    } else {
+        format!(" ({}/{})", filtered_count, total)
+    }
+}
+
 fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: usize) -> usize {
     let marker_width = 3usize;
     let is_preview = picker.preview;
@@ -380,9 +395,11 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
         return (marker_width + title_width + state_width).min(max_width);
     }
 
+    let count_str = picker_header_count_str(picker.filtered.len(), picker.entries.len());
     let mut max_model_len = display_width(picker.primary_label());
     let mut max_provider_len = display_width(picker.secondary_label(is_preview));
-    let mut max_via_len = display_width(picker.tertiary_label());
+    let mut max_via_len =
+        display_width(picker.tertiary_label()) + display_width(count_str.as_str());
 
     for &fi in picker.filtered.iter().take(WIDTH_SCAN_LIMIT) {
         let entry = &picker.entries[fi];
@@ -476,7 +493,7 @@ pub(super) fn model_suggestion_lines(
     let hint = model_picker_top_hint(picker);
     let hint_rows = usize::from(available_rows > 1);
     let notice_rows = usize::from(notice.is_some() && available_rows > hint_rows + 1);
-    let visible = crate::tui::app::COMMAND_SUGGESTION_VISIBLE_LIMIT
+    let visible = crate::tui::composer_grammar::COMMAND_SUGGESTION_VISIBLE_LIMIT
         .min(available_rows - hint_rows - notice_rows)
         .min(picker.filtered.len());
     let start = selected.saturating_sub(visible - 1);
@@ -619,8 +636,10 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
 
     let show_account_provider_badge =
         is_account_picker && account_picker_shows_provider_badge(picker);
+    let count_str = picker_header_count_str(filtered_count, total);
     let mut max_provider_len = display_width(picker.secondary_label(is_preview));
-    let mut max_via_len = display_width(picker.tertiary_label());
+    let mut max_via_len =
+        display_width(picker.tertiary_label()) + display_width(count_str.as_str());
     let mut max_model_len = display_width(picker.primary_label());
     let mut max_account_title_len = display_width("ACCOUNT");
     let mut max_account_state_len = display_width("STATE");
@@ -774,11 +793,6 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
     if !picker.filter.is_empty() {
         meta_parts.push_str(&format!("  \"{}\"", picker.filter));
     }
-    let count_str = if filtered_count == total {
-        format!(" ({})", total)
-    } else {
-        format!(" ({}/{})", filtered_count, total)
-    };
     meta_parts.push_str(&count_str);
     header_spans.push(Span::styled(meta_parts, Style::default().fg(dim_color())));
 

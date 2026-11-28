@@ -231,31 +231,10 @@ pub(super) fn dispatch_local_command(app: &mut App, trimmed: &str) -> bool {
 fn dispatch_command_sequence(
     app: &mut App,
     input: &str,
-    matches: &[super::slash_command_parser::SlashCommandMatch],
+    matches: &[super::slash_command_parser::Match],
 ) -> bool {
-    let prefix = input[..matches[0].start].trim();
     let mut handled = false;
-
-    for (index, command) in matches.iter().enumerate() {
-        let end = matches
-            .get(index + 1)
-            .map_or(input.len(), |next| next.start);
-        let args = input[command.name_end..end].trim();
-        let command_text = if index == 0 && !prefix.is_empty() {
-            if args.is_empty() {
-                format!("{} {}", &input[command.start..command.name_end], prefix)
-            } else {
-                format!(
-                    "{} {} {}",
-                    &input[command.start..command.name_end],
-                    prefix,
-                    args
-                )
-            }
-        } else {
-            input[command.start..end].trim().to_string()
-        };
-
+    for command_text in super::slash_command_parser::split_command_sequence(input, matches) {
         handled |= dispatch_single_local_command(app, &command_text);
     }
 
@@ -278,7 +257,8 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         }
         return false;
     }
-    super::commands::handle_cancel_command(app, trimmed)
+    app.handle_mode_command(trimmed)
+        || super::commands::handle_cancel_command(app, trimmed)
         || super::commands::handle_help_command(app, trimmed)
         || super::commands::handle_keys_command(app, trimmed)
         || super::commands::handle_ssh_command(app, trimmed)
@@ -468,7 +448,13 @@ mod tests {
     #[test]
     fn both_entry_points_use_the_shared_dispatch_table() {
         for (path, source) in [
-            ("input.rs", include_str!("input.rs")),
+            (
+                "input.rs",
+                concat!(
+                    include_str!("input.rs"),
+                    include_str!("input/submission.rs")
+                ),
+            ),
             ("remote.rs", include_str!("remote.rs")),
         ] {
             assert!(
@@ -592,10 +578,10 @@ mod tests {
         let mut app = crate::tui::app::tests::create_test_app();
         app.is_remote = true;
         app.push_display_message(super::super::DisplayMessage::user("visible remote message"));
-        let session_id = app.session.id.clone();
+        let session_id = app.session.id().to_owned();
         assert!(super::dispatch_local_command(&mut app, "/cls"));
         assert!(app.display_messages.is_empty());
-        assert_eq!(app.session.id, session_id);
+        assert_eq!(app.session.id(), session_id);
         assert!(!app.pending_turn);
         assert!(app.queued_messages.is_empty());
     }

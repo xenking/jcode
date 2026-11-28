@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match event {
                 NariEvent::Transcript(t) => chars = t.chars().count(),
                 NariEvent::Finished(r) => early = Some(r),
+                NariEvent::Interrupted(e) => eprintln!("interrupted (text kept): {e}"),
                 NariEvent::Started => {}
             }
         }
@@ -48,10 +49,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match recording.try_event() {
             Some(NariEvent::Finished(r)) => {
                 timing::mark("finished observed by caller");
-                match r {
-                    Ok(t) => eprintln!("transcript_chars={} (live {chars})", t.chars().count()),
-                    Err(e) => return Err(e.into()),
-                }
+                let t = r?;
+                eprintln!("transcript_chars={} (live {chars})", t.chars().count());
                 break;
             }
             Some(_) => {}

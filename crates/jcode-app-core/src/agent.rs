@@ -1,38 +1,103 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+#[path = "agent/session/advisor_review.rs"]
+mod advisor_review;
+#[path = "agent/recovery/ask_recovery.rs"]
+mod ask_recovery;
+#[path = "agent/context/cache_breaker.rs"]
+mod cache_breaker;
 #[cfg(test)]
+#[path = "agent/context/cache_monitor_tests.rs"]
 mod cache_monitor_tests;
+#[path = "agent/context/compaction.rs"]
 mod compaction;
+#[path = "agent/session/construction.rs"]
+mod construction;
+#[path = "agent/context/context_breakdown.rs"]
+pub(crate) mod context_breakdown;
+#[path = "agent/context/conversation_reset.rs"]
 mod conversation_reset;
+#[path = "agent/context/environment.rs"]
 mod environment;
+#[path = "agent/recovery/idle_hibernation.rs"]
 mod idle_hibernation;
+#[path = "agent/context/inline_output.rs"]
+mod inline_output;
+#[path = "agent/context/inline_tail.rs"]
 mod inline_tail;
+#[path = "agent/recovery/interrupts.rs"]
 mod interrupts;
+#[path = "agent/context/messages.rs"]
 mod messages;
 #[cfg(test)]
+#[path = "agent/session/model_usage_tests.rs"]
 mod model_usage_tests;
+#[path = "agent/tools/parallel_reads.rs"]
+mod parallel_reads;
+#[path = "agent/session/profile.rs"]
+mod profile;
+#[path = "agent/context/setting_log.rs"]
+mod setting_log;
+use profile::effective_tool_selection;
+pub(crate) use setting_log::SettingCause;
+#[path = "agent/context/prompt_context.rs"]
+mod prompt_context;
+#[path = "agent/context/prompting.rs"]
 mod prompting;
-mod provider;
+#[path = "agent/session/provider.rs"]
+pub(crate) mod provider;
+#[path = "agent/recovery/reload_resume.rs"]
+mod reload_resume;
+#[cfg(test)]
+#[path = "agent/recovery/reload_resume_tests.rs"]
+mod reload_resume_tests;
+#[path = "agent/recovery/response_recovery.rs"]
 mod response_recovery;
+#[path = "agent/session/routing.rs"]
+mod routing;
+#[path = "agent/recovery/runtime_recovery.rs"]
 mod runtime_recovery;
+#[path = "agent/session/session_title.rs"]
+mod session_title;
+#[path = "agent/tools/shake_tools.rs"]
+mod shake_tools;
+#[path = "agent/session/status.rs"]
 mod status;
+#[path = "agent/turn/streaming.rs"]
 mod streaming;
 #[cfg(test)]
+#[path = "agent/session/swarm_reminder_tests.rs"]
 mod swarm_reminder_tests;
+#[path = "agent/tools/tool_handoff.rs"]
+mod tool_handoff;
+#[path = "agent/tools/tool_lock.rs"]
+mod tool_lock;
+#[path = "agent/tools/tool_surface.rs"]
+mod tool_surface;
+#[path = "agent/tools/tools.rs"]
 mod tools;
+#[path = "agent/turn/turn_execution.rs"]
 mod turn_execution;
+#[path = "agent/turn/turn_loop_policy.rs"]
+mod turn_loop_policy;
+#[path = "agent/turn/turn_loops.rs"]
 mod turn_loops;
+#[path = "agent/turn/turn_ownership.rs"]
 mod turn_ownership;
+pub(crate) use compaction::PreMoveCompaction;
+pub(crate) use reload_resume::{ResumeOutcome, ResumePlan, last_turn_message_for_recovery};
 pub(crate) use turn_ownership::{
     RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,
 };
+#[path = "agent/turn/turn_streaming_mpsc.rs"]
 mod turn_streaming_mpsc;
+#[path = "agent/session/utils.rs"]
 mod utils;
 
 use self::streaming::{send_stream_keepalive_mpsc, stream_keepalive_ticker};
 use self::tools::{
-    cap_sdk_tool_content_for_history, cap_tool_output_for_history, print_tool_summary,
-    tool_output_side_pane_images, tool_output_to_content_blocks,
+    cap_sdk_tool_content_for_history, cap_tool_output_for_history, label_session_images,
+    print_tool_summary, tool_output_side_pane_images, tool_output_to_content_blocks,
 };
 use self::utils::trace_enabled;
 use crate::build;
@@ -64,7 +129,7 @@ pub use jcode_agent_runtime::{
     SoftInterruptQueue, SoftInterruptSource, StreamError,
 };
 
-const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "desktop_selfdev", "communicate"];
+const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "desktop_selfdev", "desktop", "communicate"];
 static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyLock::new(|| {
     crate::build::get_repo_dir()
         .map(|repo_dir| {
@@ -78,9 +143,20 @@ static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyL
 static WORKING_GIT_STATE_CACHE: LazyLock<StdMutex<HashMap<PathBuf, Option<GitState>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 const STREAM_KEEPALIVE_PONG_ID: u64 = 0;
+/// Share of the context a cold-cache shake must free to be applied when no
+/// fold follows it. A smaller cut loses tool output for no real saving.
+const COLD_SHAKE_MIN_SAVINGS_PERCENT: usize = 10;
 
-#[path = "agent/cache_request.rs"]
+#[derive(Clone, Copy)]
+enum CompactionBoundary {
+    Request,
+    Idle,
+}
+
+#[path = "agent/context/cache_request.rs"]
 mod cache_request;
+#[path = "agent/tools/tool_replay.rs"]
+mod tool_replay;
 use cache_request::kv_cache_request_event;
 
 impl Agent {
@@ -136,12 +212,18 @@ impl Agent {
         };
         let provider = self.kv_cache_provider_identity();
         let route = crate::kv_cache_monitor::RequestRoute {
-            cache_ttl_secs: crate::provider::cache_ttl_for_provider_model(&provider, Some(model)),
+            // Codex OAuth publishes no retention. The cold-cache estimate lets
+            // a long idle gap explain its miss instead of reading as unknown.
+            cache_ttl_secs: crate::provider::cache_ttl_for_provider_model(&provider, Some(model))
+                .or_else(|| {
+                    crate::provider::shake_cache_ttl_for_provider_model(&provider, Some(model))
+                }),
             ttl_is_estimate: crate::provider::cache_ttl_is_estimate(&provider),
             provider,
             model: model.to_string(),
             upstream_provider: self.last_upstream_provider.clone(),
             account: self.kv_cache_account_identity(),
+            reasoning_effort: self.provider.reasoning_effort(),
         };
         let signature = crate::kv_cache_monitor::RequestSignature {
             system_static_hash: *system_static_hash,
@@ -152,6 +234,55 @@ impl Agent {
             message_count: *message_count,
         };
         self.kv_cache_monitor.begin_request(route, signature);
+    }
+
+    /// Add the completed request to the durable per-route usage totals.
+    fn record_request_usage(
+        &self,
+        request_id: &str,
+        (input, output, cache_read, cache_creation): (
+            Option<u64>,
+            Option<u64>,
+            Option<u64>,
+            Option<u64>,
+        ),
+        miss: Option<&ServerEvent>,
+    ) {
+        let total = self.effective_context_tokens_from_usage(
+            input.unwrap_or(0),
+            cache_read,
+            cache_creation,
+        );
+        let cached_input = cache_read.unwrap_or(0);
+        let (miss_reason, missed_tokens) = match miss {
+            Some(ServerEvent::KvCacheMiss {
+                reason,
+                missed_tokens,
+                ..
+            }) => (Some(reason.clone()), *missed_tokens),
+            _ => (None, 0),
+        };
+        let record = jcode_base::request_usage::RequestRecord {
+            request_id: request_id.to_owned(),
+            session_id: self.session.id().to_owned(),
+            provider: self.provider.name().to_owned(),
+            model: self.provider.model(),
+            api_method: self
+                .session
+                .route_api_method()
+                .unwrap_or_default()
+                .to_owned(),
+            cached_input,
+            uncached_input: total.saturating_sub(cached_input),
+            output: output.unwrap_or(0),
+            miss_reason,
+            missed_tokens,
+        };
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = jcode_base::request_usage::record(&record) {
+                logging::warn(&format!("Cannot record request usage: {error:#}"));
+            }
+        });
     }
 
     /// Classify the completed request's usage. Returns the event to send when
@@ -168,7 +299,29 @@ impl Agent {
             cache_read,
             cache_creation,
         );
-        let miss = self.kv_cache_monitor.finish_request(reusable, cache_read)?;
+        // The whole prefix this request carried. A request can never read back
+        // more cache than the content it sent, so a materially smaller request
+        // is a content drop, not evidence that the provider evicted a prefix it
+        // never received.
+        let prefix = crate::compaction::effective_context_tokens_from_usage(
+            self.provider.name(),
+            input,
+            cache_read,
+            cache_creation,
+        );
+        let miss =
+            self.kv_cache_monitor
+                .finish_request_with_prefix(reusable, Some(prefix), cache_read);
+        if !self.session.is_ephemeral()
+            && reusable > 0
+            && let Err(error) = self.kv_cache_monitor.save_checkpoint(self.session.id())
+        {
+            logging::warn(&format!(
+                "Failed to save KV cache baseline for {}: {error}",
+                self.session.id()
+            ));
+        }
+        let miss = miss?;
         let expected_refresh = matches!(
             miss.reason,
             crate::kv_cache_monitor::MissReason::Compaction
@@ -181,7 +334,7 @@ impl Agent {
         };
         let diagnostic = format!(
             "{label} session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?} detail={:?}",
-            self.session.id,
+            self.session.id(),
             miss.reason.id(),
             miss.reason.harness_caused(),
             miss.missed_tokens,
@@ -207,43 +360,26 @@ impl Agent {
     }
 }
 
-fn log_agent_provider_stream_lifecycle(
-    level: logging::LogLevel,
-    agent: &Agent,
-    phase: &str,
-    api_start: Instant,
-    fields: Vec<(&str, String)>,
-) {
-    let mut owned = vec![
-        ("phase".to_string(), phase.to_string()),
-        ("provider".to_string(), agent.provider.name().to_string()),
-        ("model".to_string(), agent.provider.model()),
-        ("session_id".to_string(), agent.session.id.clone()),
-        (
-            "provider_session_id".to_string(),
-            agent
-                .provider_session_id
-                .clone()
-                .unwrap_or_else(|| "none".to_string()),
-        ),
-        (
-            "connection_type".to_string(),
-            agent
-                .last_connection_type
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-        ),
-        (
-            "elapsed_ms".to_string(),
-            api_start.elapsed().as_millis().to_string(),
-        ),
-    ];
-    owned.extend(
-        fields
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value)),
-    );
-    logging::event(level, "AGENT_PROVIDER_STREAM_LIFECYCLE", owned);
+/// Usage refresh clients need after a compaction shrinks the transcript.
+///
+/// Clients derive the context-usage percentage from the last usage report, and
+/// a compaction makes that report describe content that no longer exists. Send
+/// the post-compaction size as an ordinary usage report so the composer pill,
+/// the sidebar and the mobile header follow the compaction instead of staying
+/// at the pre-compaction figure. The summarizing provider call carries no
+/// meaningful cache state, so the cache counters are zero rather than inherited.
+pub(crate) fn compaction_context_usage_event(
+    post_tokens: Option<u64>,
+    effective_budget: Option<usize>,
+) -> Option<ServerEvent> {
+    let post_tokens = post_tokens?;
+    Some(ServerEvent::TokenUsage {
+        input: post_tokens,
+        output: 0,
+        cache_read_input: Some(0),
+        cache_creation_input: Some(0),
+        effective_budget,
+    })
 }
 
 /// Token usage from the last API request
@@ -258,6 +394,8 @@ pub struct TokenUsage {
 #[derive(Debug, Clone)]
 struct RewindUndoSnapshot {
     messages: Vec<StoredMessage>,
+    compaction: Option<Arc<crate::session::StoredCompactionState>>,
+    removed_compaction_events: Vec<(usize, crate::session::StoredReplayEvent)>,
     provider_session_id: Option<String>,
     session_provider_session_id: Option<String>,
     visible_message_count: usize,
@@ -272,12 +410,21 @@ pub struct Agent {
     active_skill: Option<String>,
     allowed_tools: Option<HashSet<String>>,
     disabled_tools: HashSet<String>,
+    /// Tool selection before the session's agent profile narrows it. The
+    /// effective `allowed_tools`/`disabled_tools` are recomputed from this
+    /// whenever the session (and so its profile) changes.
+    base_tool_selection: (Option<HashSet<String>>, HashSet<String>),
     /// Generation-scoped ownership of this Agent's global tool-policy entry.
     _tool_policy_registration: crate::tool::SessionToolPolicyRegistration,
-    /// MCP top-level definition exposure policy captured when the session starts.
-    mcp_tools_mode: crate::config::McpToolsMode,
+    /// The tool list the provider has seen, frozen for prompt-cache stability.
+    tool_lock: tool_lock::ToolLock,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
+    /// The routing service has another account for this session, so a spent
+    /// allowance or rejected credential must reach it on the first occurrence,
+    /// not after the provider's own same-account retries. A throttle that
+    /// clears shortly is still retried in place, which keeps the prompt cache.
+    routing_fail_fast_limits: bool,
     /// Last upstream provider (OpenRouter) observed for this session
     last_upstream_provider: Option<String>,
     /// Last observed transport/connection type for this session
@@ -299,54 +446,23 @@ pub struct Agent {
     background_tool_signal: InterruptSignal,
     /// Signal to gracefully stop generation (checkpoint partial response and exit)
     graceful_shutdown: InterruptSignal,
+    /// Whether this process generated the stored session title. Lets the third
+    /// turn refine its own title without ever replacing a caller-chosen one.
+    auto_title_owned: bool,
     /// Client-side cache tracking for detecting append-only violations
     cache_tracker: CacheTracker,
     /// Classifies provider-reported KV cache misses for every client.
     kv_cache_monitor: crate::kv_cache_monitor::KvCacheMonitor,
+    cache_breaker: cache_breaker::CacheBreaker,
     /// Last token usage from API request (for debug socket queries)
     last_usage: TokenUsage,
-    /// Locked tool list: once the first API request is sent, freeze the tool list
-    /// to avoid cache invalidation when MCP tools arrive asynchronously.
-    /// Cleared on compaction/reset.
-    locked_tools: Option<Vec<ToolDefinition>>,
-    /// One-shot guard for the async MCP-registration race (#206).
-    ///
-    /// MCP servers connect on a background task and register `mcp__*` tools
-    /// seconds after the session starts (we deliberately do NOT block the first
-    /// turn on MCP connection, so the user can talk to the agent immediately).
-    /// The first turn therefore locks a snapshot without MCP tools. We allow
-    /// exactly one rebuild to pick them up — an intentional, one-time provider
-    /// prompt-cache miss. Once that rebuild happens (or we confirm there are no
-    /// MCP tools to wait for), this is set so the per-turn registry scan stops.
-    /// Reset whenever the tool list is intentionally unlocked.
-    mcp_late_register_resolved: bool,
+    sent_tool_surface: Option<tool_replay::ToolSurface>,
+    compaction_persist_pending: bool,
     /// Before/after token counts from the last context-limit auto-recovery,
     /// consumed when the turn loop announces the compaction to clients.
     last_recovery_compaction: Option<(u64, u64, usize)>,
-    /// Whether `locked_tools` was built for provider-native deferred MCP
-    /// loading. A mid-session model/provider switch can change that
-    /// capability; the snapshot must then be rebuilt, or the new provider
-    /// would get a surface built for the other path (for example
-    /// `mcp_search` without `mcp_call` or any MCP tools).
-    locked_tools_native_deferred: bool,
-    /// MCP tools already described to the model, either in the locked tool
-    /// snapshot or by a late-tool transcript announcement.
-    announced_mcp_tools: HashSet<String>,
-    /// Transcript index already scanned for MCP tools described there.
-    announced_mcp_scan_index: usize,
-    /// AGENTS.md is session bootstrap input. Keep the captured text stable so
-    /// tool writes do not mutate the provider's cacheable prefix mid-session.
-    agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
-    /// The "Available Skills" system-prompt section is session bootstrap input
-    /// too. Installing a skill mid-session must not rewrite the cached system
-    /// prefix (that forces a KV cache miss on everything after it), so the
-    /// list is frozen here and later installs are announced in the transcript.
-    prompt_skills_snapshot: Vec<crate::prompt::SkillInfo>,
-    /// Skill names already described to the model, either in the frozen
-    /// system-prompt list or by a late-skill transcript announcement.
-    announced_skills: HashSet<String>,
-    /// Transcript index already scanned for late-skill announcements.
-    announced_skills_scan_index: usize,
+    /// Frozen system-prompt inputs and the skills announced since.
+    prompt: prompt_context::PromptContext,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// One-step undo snapshot captured before the most recent rewind.
@@ -355,14 +471,10 @@ pub struct Agent {
     stdin_request_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::tool::StdinInputRequest>>,
     /// Canonical reducer-backed view of runtime provider/model selection.
     provider_runtime_state: ProviderRuntimeState,
-    /// When true, this session is an inline swarm worker: stream a throttled
-    /// output tail to the global bus so the coordinator's inline gallery can
-    /// render a live viewport. Off for normal sessions to avoid bus traffic.
-    inline_output_tap: bool,
-    /// Rolling activity tail (text + tool markers) for the inline output tap.
-    /// Persists across turns so the coordinator's viewport never blanks at
-    /// turn boundaries or freezes during long tool calls.
-    inline_tail: inline_tail::InlineTailBuffer,
+    /// Presentation layer: the worker output tail published to a swarm coordinator.
+    inline_output: inline_tail::InlineOutput,
+    /// A daemon wake may drive a runtime restored after idle unload without a client.
+    pub(crate) restored_from_idle_unload: bool,
     /// Prevent duplicate content uploads when shutdown/finalization is invoked
     /// more than once for the same in-memory agent.
     transcript_telemetry_sent: bool,
@@ -371,6 +483,14 @@ pub struct Agent {
     /// it never begins or ends one (that was a phantom zero-turn session plus
     /// sync file I/O on every reconnect's accept path).
     telemetry_session_deferred: bool,
+    /// Whether reasoning effort was explicitly chosen by the user or restored from a saved session.
+    reasoning_effort_user_override: bool,
+    /// What the chat log last said about provider, model, effort and mode.
+    setting_log: setting_log::SettingLog,
+    /// Why the next setting change happens, when the caller knows.
+    setting_cause: Option<SettingCause>,
+    /// Whether the Jarvis default reasoning effort (`none`) has already been applied to this session.
+    jarvis_default_effort_applied: bool,
     /// One logical runtime session, independent of the process-global legacy
     /// telemetry slot and of any TUI clients viewing this agent.
     concurrency_session: Option<crate::telemetry::ConcurrencySession>,
@@ -386,7 +506,7 @@ impl Agent {
     }
 
     pub(crate) fn claim_server_turn(&self) -> Result<TurnLease> {
-        self.turn_ownership.claim()
+        self.turn_ownership.claim(self.session.id())
     }
 
     pub(crate) fn validate_server_turn(&self, lease: &TurnLease) -> Result<()> {
@@ -394,31 +514,29 @@ impl Agent {
     }
 
     fn refresh_agents_md_snapshot(&mut self) {
-        let working_dir = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new);
-        self.agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
+        let working_dir = self.session.working_dir().map(std::path::Path::new);
+        self.prompt.reset_sources(
+            crate::prompt::load_agents_md_files_from_dir(working_dir),
+            working_dir,
+        );
         self.refresh_prompt_skills_snapshot();
     }
 
     /// Re-capture the frozen skills list. Only called at session boundaries
     /// (new/restored session, working directory change), never mid-turn.
     fn refresh_prompt_skills_snapshot(&mut self) {
-        self.prompt_skills_snapshot = self.current_prompt_skill_infos();
-        self.announced_skills = self
-            .prompt_skills_snapshot
-            .iter()
-            .map(|skill| skill.name.clone())
-            .collect();
-        self.announced_skills_scan_index = 0;
+        let skills = self.current_prompt_skill_infos();
+        self.prompt.set_skills(skills);
     }
 
     fn current_prompt_skill_infos(&self) -> Vec<crate::prompt::SkillInfo> {
-        self.current_skills_snapshot()
-            .list()
-            .iter()
+        Self::prompt_skill_infos(&self.current_skills_snapshot())
+    }
+
+    fn prompt_skill_infos(skills: &SkillRegistry) -> Vec<crate::prompt::SkillInfo> {
+        skills
+            .list_for_model()
+            .into_iter()
             .map(|skill| crate::prompt::SkillInfo {
                 name: skill.name.clone(),
                 description: skill.description.clone(),
@@ -444,17 +562,25 @@ impl Agent {
         disabled_tools: HashSet<String>,
     ) -> Self {
         let t = Instant::now();
-        provider.set_session_id(&session.id);
+        provider.set_session_id(session.id());
         let skills = SkillRegistry::shared_snapshot();
         let skills_ms = t.elapsed().as_millis();
         let tool_config = &crate::config::config().tools;
-        let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
+        let working_dir = session.working_dir().map(std::path::Path::new);
         let t = Instant::now();
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
+        let static_prompt = prompt_context::StaticPromptState::bootstrap(working_dir);
         let agents_md_ms = t.elapsed().as_millis();
+        let prompt = prompt_context::PromptContext::new(agents_md_snapshot, static_prompt);
         let initial_provider_model = provider.model();
+        let base_tool_selection = (allowed_tools, disabled_tools);
+        let (allowed_tools, disabled_tools) = effective_tool_selection(
+            &base_tool_selection,
+            session.agent_profile(),
+            session.pinned_skill_names(),
+        );
         let tool_policy_registration = crate::tool::register_session_tool_policy(
-            &session.id,
+            session.id(),
             allowed_tools.clone(),
             disabled_tools.clone(),
         );
@@ -467,9 +593,11 @@ impl Agent {
             active_skill: None,
             allowed_tools,
             disabled_tools,
+            base_tool_selection,
             _tool_policy_registration: tool_policy_registration,
-            mcp_tools_mode: tool_config.mcp_tools,
+            tool_lock: tool_lock::ToolLock::new(tool_config.mcp_tools),
             provider_session_id: None,
+            routing_fail_fast_limits: false,
             last_upstream_provider: None,
             last_connection_type: None,
             last_status_detail: None,
@@ -480,31 +608,35 @@ impl Agent {
             soft_interrupt_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_tool_signal: InterruptSignal::new(),
             graceful_shutdown: InterruptSignal::new(),
+            auto_title_owned: false,
             cache_tracker: CacheTracker::new(),
             kv_cache_monitor: Default::default(),
+            cache_breaker: Default::default(),
             last_usage: TokenUsage::default(),
-            locked_tools: None,
-            mcp_late_register_resolved: false,
+            sent_tool_surface: None,
+            compaction_persist_pending: false,
             last_recovery_compaction: None,
-            locked_tools_native_deferred: false,
-            announced_mcp_tools: HashSet::new(),
-            announced_mcp_scan_index: 0,
-            agents_md_snapshot,
-            prompt_skills_snapshot: Vec::new(),
-            announced_skills: HashSet::new(),
-            announced_skills_scan_index: 0,
+            prompt,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
             provider_runtime_state: ProviderRuntimeState::observed(initial_provider_model),
-            inline_output_tap: false,
-            inline_tail: inline_tail::InlineTailBuffer::default(),
+            inline_output: inline_tail::InlineOutput::default(),
+            restored_from_idle_unload: false,
             transcript_telemetry_sent: false,
             telemetry_session_deferred: false,
+            reasoning_effort_user_override: false,
+            setting_log: setting_log::SettingLog::default(),
+            setting_cause: None,
+            jarvis_default_effort_applied: false,
             concurrency_session: None,
         };
         let t = Instant::now();
         agent.refresh_prompt_skills_snapshot();
+        // An existing session keeps the inputs its prompt was built from.
+        agent.adopt_recorded_prompt_inputs();
+        agent.restore_pinned_skill();
+        agent.refresh_tool_call_snapshot();
         logging::info(&format!(
             "[TIMING] agent build_base: skills={skills_ms}ms, agents_md={agents_md_ms}ms, prompt_skills={}ms",
             t.elapsed().as_millis()
@@ -523,11 +655,7 @@ impl Agent {
             .try_read()
             .map(|skills| Arc::new(skills.clone()))
             .unwrap_or_else(|_| self.skills.clone());
-        let working_dir = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new);
+        let working_dir = self.session.working_dir().map(std::path::Path::new);
         Arc::new(SkillRegistry::effective_for_working_dir(
             &global,
             working_dir,
@@ -542,159 +670,10 @@ impl Agent {
             .collect()
     }
 
-    pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
-        Self::new_with_initial_working_dir(provider, registry, None)
-    }
-
-    pub(crate) fn new_with_initial_working_dir(
-        provider: Arc<dyn Provider>,
-        registry: Registry,
-        working_dir: Option<&str>,
-    ) -> Self {
-        Self::new_with_initial_ownership(provider, registry, working_dir, None, true)
-    }
-
-    /// A connection may only be a viewer attaching to an existing Agent.
-    /// Do not count its provisional session before that choice is resolved.
-    pub(crate) fn new_provisional_with_initial_working_dir(
-        provider: Arc<dyn Provider>,
-        registry: Registry,
-        working_dir: Option<&str>,
-    ) -> Self {
-        Self::new_with_initial_ownership(provider, registry, working_dir, None, false)
-    }
-
-    pub(crate) fn new_with_parent_and_initial_working_dir(
-        provider: Arc<dyn Provider>,
-        registry: Registry,
-        working_dir: Option<&str>,
-        parent_id: Option<String>,
-    ) -> Self {
-        Self::new_with_initial_ownership(provider, registry, working_dir, parent_id, true)
-    }
-
-    fn new_with_initial_ownership(
-        provider: Arc<dyn Provider>,
-        registry: Registry,
-        working_dir: Option<&str>,
-        parent_id: Option<String>,
-        track_concurrency: bool,
-    ) -> Self {
-        let start = Instant::now();
-        let mut marks: Vec<(&'static str, u128)> = Vec::with_capacity(10);
-        let mut lap = Instant::now();
-        let mut mark = |name: &'static str, lap: &mut Instant| {
-            marks.push((name, lap.elapsed().as_millis()));
-            *lap = Instant::now();
-        };
-        let tool_selection = crate::config::config().tools.selection();
-        let mut session = Session::create(parent_id, None);
-        if let Some(working_dir) = working_dir {
-            session.working_dir = Some(working_dir.to_string());
-        }
-        mark("session", &mut lap);
-        let mut agent = Self::build_base(
-            provider,
-            registry,
-            session,
-            tool_selection.allowed_tools,
-            tool_selection.disabled_tools,
-        );
-        mark("build_base", &mut lap);
-        // activate_concurrency_tracking writes the presence markers when the
-        // session is committed. A provisional agent replaced by a resumed
-        // session never touches the marker files.
-        agent.session.mark_active_unregistered();
-        mark("mark_active", &mut lap);
-        agent.session.model = Some(agent.provider_model());
-        agent.session.provider_key = agent.provider_key_for_new_session();
-        agent.reconcile_explicit_provider_pin_route();
-        mark("provider", &mut lap);
-        // A provisional Agent is usually replaced by a resumed session (every
-        // reconnect after a reload), so do not fork the git/hardware probes
-        // for its context message until it actually becomes the session.
-        if track_concurrency {
-            agent.session.ensure_initial_session_context_message();
-        }
-        mark("context_msg", &mut lap);
-        agent.seed_compaction_from_session();
-        mark("compaction", &mut lap);
-        agent.log_env_snapshot("create");
-        mark("env_snapshot", &mut lap);
-        agent.fire_session_lifecycle_hook("session_start", "create");
-        if track_concurrency {
-            agent.activate_concurrency_tracking();
-        }
-        mark("hooks_concurrency", &mut lap);
-        let breakdown = marks
-            .iter()
-            .map(|(name, ms)| format!("{name}={ms}ms"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        logging::info(&format!("[TIMING] agent_new breakdown: {breakdown}"));
-        let setup_ms = start.elapsed().as_millis();
-        let telemetry_start = Instant::now();
-        if track_concurrency {
-            agent.begin_telemetry_session();
-        } else {
-            agent.telemetry_session_deferred = true;
-        }
-        logging::info(&format!(
-            "[TIMING] agent_new: setup={}ms, telemetry={}ms, total={}ms",
-            setup_ms,
-            telemetry_start.elapsed().as_millis(),
-            start.elapsed().as_millis(),
-        ));
-        agent
-    }
-
-    pub fn new_with_session(
-        provider: Arc<dyn Provider>,
-        registry: Registry,
-        session: Session,
-        allowed_tools: Option<HashSet<String>>,
-    ) -> Self {
-        let tool_selection = if let Some(allowed_tools) = allowed_tools {
-            crate::config::ToolSelection {
-                allowed_tools: Some(allowed_tools),
-                disabled_tools: HashSet::new(),
-            }
-        } else {
-            crate::config::config().tools.selection()
-        };
-        let mut agent = Self::build_base(
-            provider,
-            registry,
-            session,
-            tool_selection.allowed_tools,
-            tool_selection.disabled_tools,
-        );
-        // begin_concurrency_tracking below writes the presence markers.
-        agent.session.mark_active_unregistered();
-        if agent.session.provider_key.is_none() {
-            agent.session.provider_key = agent.provider_key_for_new_session();
-        }
-        agent.restore_session_model_from_session();
-        agent.restore_reasoning_effort_from_session();
-        agent.session.ensure_initial_session_context_message();
-        agent.sync_memory_dedup_state_from_session();
-        agent.seed_compaction_from_session();
-        agent.log_env_snapshot("attach");
-        agent.fire_session_lifecycle_hook("session_start", "attach");
-        agent.begin_concurrency_tracking();
-        crate::telemetry::begin_session_with_parent(
-            agent.provider.name(),
-            &agent.provider.model(),
-            agent.session.parent_id.clone(),
-            false,
-        );
-        agent
-    }
-
     fn seed_compaction_from_session(&mut self) {
         logging::info(&format!(
             "seed_compaction_from_session: session has {} messages",
-            self.session.messages.len()
+            self.session.message_count()
         ));
         let compaction = self.registry.compaction();
         let mut manager = match compaction.try_write() {
@@ -706,16 +685,7 @@ impl Agent {
                 return;
             }
         };
-        manager.reset();
-        manager.set_context_cap_override(self.session.context_cap);
-        manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
-        let budget = self.provider.context_window();
-        manager.set_budget(budget);
-        if let Some(state) = self.session.compaction.as_ref() {
-            manager.restore_persisted_stored_state_with(state, &self.session.messages);
-        } else {
-            manager.seed_restored_stored_messages_with(&self.session.messages);
-        }
+        self.reset_compaction_manager_from_session(&mut manager);
         let sanitized_state = if manager.discard_oversized_openai_native_compaction() {
             Some(manager.persisted_state())
         } else {
@@ -723,18 +693,50 @@ impl Agent {
         };
         logging::info(&format!(
             "seed_compaction_from_session: seeded compaction with {} messages",
-            self.session.messages.len()
+            self.session.message_count()
         ));
         drop(manager);
         if let Some(state) = sanitized_state {
-            self.session.compaction = state;
+            self.session.adopt_compaction(state);
             self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
+        }
+    }
+
+    fn reset_compaction_manager_from_session(
+        &self,
+        manager: &mut crate::compaction::CompactionManager,
+    ) {
+        manager.reset();
+        manager.set_context_cap_override(self.session.context_cap());
+        manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
+        manager.set_budget(self.provider.context_window());
+        // The cold-cache clock must survive the reload that created this
+        // manager; otherwise every restored session looks like it never made a
+        // request and the cache-expiry shake is skipped on a fully cold prompt.
+        manager.seed_last_provider_request_at(self.persisted_last_provider_request_at());
+        if (self.provider.name().eq_ignore_ascii_case("anthropic")
+            || self.provider.name().eq_ignore_ascii_case("claude"))
+            && let Some(previous) = self.session.cache_clock().last_domain.as_ref()
+            && self.request_cache_domain().switch_from(previous).is_none()
+            && let Some(hit) = crate::cache_keepalive::load_usage(self.session.id())
+                .and_then(|usage| usage.last_hit)
+            && let Some(at) = chrono::DateTime::from_timestamp_millis(hit.at_ms)
+        {
+            let model = self.provider.model();
+            if model.strip_suffix("[1m]").unwrap_or(&model) == hit.model {
+                manager.note_cache_keepalive(at.into());
+            }
+        }
+        if let Some(state) = self.session.compaction() {
+            manager.restore_persisted_stored_state_with(&state, &self.session);
+        } else {
+            manager.seed_restored_stored_messages_with(&self.session);
         }
     }
 
     fn sync_memory_dedup_state_from_session(&self) {
         crate::memory::sync_injected_memories(
-            &self.session.id,
+            self.session.id(),
             &self.session.injected_memory_ids(),
         );
     }
@@ -762,49 +764,61 @@ impl Agent {
             age_ms,
             memory.memory_ids.clone(),
         );
-        if let Err(err) = self.session.save() {
-            logging::warn(&format!(
-                "Failed to persist memory injection for session {}: {}",
-                self.session.id, err
-            ));
-        }
     }
 
-    fn memory_injection_message(memory: &crate::memory::PendingMemory) -> Message {
-        Message::user(&format!(
-            "<system-reminder>\n{}\n</system-reminder>",
-            memory.prompt
-        ))
+    /// Model-facing User role, but never a human input in the transcript.
+    fn append_model_reminder(&mut self, text: &str) -> Message {
+        let mut message = Message::user(text);
+        self.add_message_with_display_role(
+            Role::User,
+            message.content.clone(),
+            Some(StoredDisplayRole::System),
+        );
+        message.timestamp = self.session.last_message().and_then(|m| m.timestamp);
+        message
     }
 
     pub(super) fn prepare_memory_injection_message(
         &mut self,
+        history: &[Message],
         memory: &crate::memory::PendingMemory,
-    ) -> (Message, bool) {
-        let message = Self::memory_injection_message(memory);
-        let persist = crate::config::config().features.persist_memory_injections;
-        if persist {
-            self.add_message_with_display_role(
-                Role::User,
-                message.content.clone(),
-                Some(StoredDisplayRole::System),
-            );
-            self.persist_session_best_effort("persisted memory injection message");
+    ) -> Option<(Message, bool)> {
+        let text = format!("<system-reminder>\n{}\n</system-reminder>", memory.prompt);
+        // Pending-memory dedup expires. The active provider history is the
+        // authority on whether these exact bytes are still present, even
+        // after process restart. Compaction may remove them from that view.
+        if history.iter().rev().any(|message| {
+            matches!(message.content.as_ref(), [ContentBlock::Text { text: previous, .. }] if previous == &text)
+        }) {
+            return None;
         }
-        (message, persist)
+        let persist = crate::config::config().features.persist_memory_injections;
+        // Capture the index for the human-facing recall card before appending
+        // the provider block. Save both in the same journal update.
+        self.record_memory_injection_in_session(memory);
+        let message = if persist {
+            self.append_model_reminder(&text)
+        } else {
+            Message::user(&text)
+        };
+        self.persist_session_best_effort("memory injection");
+        Some((message, persist))
     }
 
     fn persist_session_best_effort(&mut self, context: &str) {
         if let Err(err) = self.session.save() {
             logging::warn(&format!(
                 "Failed to persist {} for session {}: {}",
-                context, self.session.id, err
+                context,
+                self.session.id(),
+                err
             ));
         }
     }
 
     fn reset_runtime_state_for_session_change(&mut self) {
-        self.active_skill = None;
+        self.refresh_tool_call_snapshot();
+        self.restore_pinned_skill();
         self.last_upstream_provider = None;
         self.last_connection_type = None;
         self.last_status_detail = None;
@@ -818,65 +832,63 @@ impl Agent {
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
         self.last_usage = TokenUsage::default();
-        self.locked_tools = None;
-        self.mcp_late_register_resolved = false;
+        self.tool_lock.unlock();
+        self.sent_tool_surface = None;
+        self.compaction_persist_pending = false;
+        self.tool_lock.rearm_late_register();
         self.rewind_undo_snapshot = None;
-    }
-
-    /// Synchronize the remote client's selected skill, accepting only names
-    /// present in the daemon's own registry snapshot.
-    pub(super) fn set_remote_active_skill(&mut self, active_skill: Option<String>) -> bool {
-        let skills = self.current_skills_snapshot();
-        let recognized = active_skill
-            .as_ref()
-            .is_none_or(|name| skills.get(name).is_some());
-        let next = active_skill.filter(|name| skills.get(name).is_some());
-        if next != self.active_skill {
-            self.active_skill = next;
-            self.announce_active_skill();
-        }
-        recognized
-    }
-
-    /// Record the newly active skill's instructions as a hidden transcript
-    /// message. The system prompt stays byte-identical across skill changes.
-    pub(crate) fn announce_active_skill(&mut self) {
-        let Some(name) = self.active_skill.clone() else {
-            return;
-        };
-        let skills = self.current_skills_snapshot();
-        let Some(skill) = skills.get(&name) else {
-            return;
-        };
-        let text = format!(
-            "<system-reminder>\n# Active Skill\n\n{}\n</system-reminder>",
-            skill.get_prompt().trim()
-        );
-        self.add_message_with_display_role(
-            Role::User,
-            vec![ContentBlock::Text {
-                text,
-                cache_control: None,
-            }],
-            Some(StoredDisplayRole::System),
-        );
-        self.persist_session_best_effort("active skill announcement");
     }
 
     fn sync_session_compaction_state_from_manager(
         &mut self,
         manager: &crate::compaction::CompactionManager,
     ) {
-        let new_state = manager.persisted_state();
-        if self.session.compaction != new_state {
-            self.session.compaction = new_state;
-            if let Err(err) = self.session.save() {
-                logging::error(&format!(
-                    "Failed to persist compaction state for session {}: {}",
-                    self.session.id, err
-                ));
-            }
+        if let Err(err) = self.persist_compaction_checkpoint(manager) {
+            logging::error(&format!(
+                "Failed to persist compaction state for session {}: {}",
+                self.session.id(),
+                err
+            ));
         }
+    }
+
+    fn persist_compaction_checkpoint(
+        &mut self,
+        manager: &crate::compaction::CompactionManager,
+    ) -> Result<()> {
+        if !manager.persisted_state_matches(self.session.compaction().as_deref()) {
+            self.session.adopt_compaction(manager.persisted_state());
+            self.compaction_persist_pending = true;
+        }
+        if self.compaction_persist_pending {
+            self.session
+                .save()
+                .map_err(|err| err.context("persisting provider compaction checkpoint"))?;
+            self.compaction_persist_pending = false;
+        }
+        Ok(())
+    }
+
+    /// Append the transcript divider for a compaction that was just applied.
+    ///
+    /// The row lives in the persisted replay log, so it survives reloads and is
+    /// delivered to every client instead of only the connection that happened to
+    /// witness the completion. `method` names what replaced the folded history:
+    /// the artifact kind is what a reader needs to know, not the trigger label.
+    fn record_compaction_divider(&mut self, event: &crate::compaction::CompactionEvent) {
+        if event.trigger == crate::compaction::CACHE_EXPIRY_COMPACTION_TRIGGER {
+            let expired_request = self.persisted_last_provider_request_at().map(Into::into);
+            self.session.apply_cache_clock(crate::session::CacheClock {
+                last_expiry_compaction_for: expired_request,
+                ..self.session.cache_clock()
+            });
+        }
+        let summary = self
+            .session
+            .compaction()
+            .map(|state| state.summary_text.clone());
+        self.session
+            .record_compaction_event(event, event.method.as_deref(), summary.as_deref());
     }
 
     fn apply_openai_native_compaction(
@@ -893,81 +905,316 @@ impl Agent {
             .ok()
             .map(|manager| manager.token_estimate_with(self.session.provider_messages()) as u64);
         let encrypted_content_len = encrypted_content.len();
+        let history = self.session.provider_messages();
+        let readable = crate::compaction::native_compaction_transcript_summary(
+            &history[..compacted_count.min(history.len())],
+        );
         let (summary_text, openai_encrypted_content) =
             if crate::provider::openai_request::openai_encrypted_content_is_sendable(
                 &encrypted_content,
             ) {
-                (String::new(), Some(encrypted_content))
+                (readable.unwrap_or_default(), Some(encrypted_content))
             } else {
                 logging::warn(&format!(
                     "Discarding oversized OpenAI native compaction payload before persist ({} chars)",
                     encrypted_content_len,
                 ));
                 (
-                    crate::provider::openai_request::openai_encrypted_content_fallback_summary(
-                        encrypted_content_len,
-                    ),
+                    crate::compaction::oversized_native_summary(encrypted_content_len, readable),
                     None,
                 )
             };
         let state = crate::session::StoredCompactionState {
             summary_text,
-            openai_encrypted_content,
+            plan_context: None,
+            openai_encrypted_content: openai_encrypted_content.map(Into::into),
             snapcompact: None,
             covers_up_to_turn: compacted_count,
             original_turn_count: compacted_count,
             compacted_count,
         };
 
-        self.session.compaction = Some(state.clone());
+        self.session.adopt_compaction(Some(state.clone()));
         let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
             manager.set_active_model(Some(self.provider.name()), Some(&self.provider.model()));
             manager.set_budget(self.provider.context_window());
-            manager.restore_persisted_stored_state_with(&state, &self.session.messages);
+            manager.restore_persisted_stored_state_with(&state, &self.session);
             post_tokens =
                 Some(manager.token_estimate_with(self.session.provider_messages()) as u64);
         }
 
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
-        self.locked_tools = None;
-        self.mcp_late_register_resolved = false;
+        self.tool_lock.unlock();
+        self.tool_lock.rearm_late_register();
         self.provider_session_id = None;
-        self.session.provider_session_id = None;
+        self.session.forget_provider_session();
+        if self.session.pinned_skill().is_some() {
+            self.active_skill = self.session.pinned_skill().map(str::to_owned);
+            self.announce_active_skill();
+        }
         self.session.save()?;
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                 "native_compaction_applied",
                 "provider_native_compaction_persisted",
             )
-            .with_session_id(self.session.id.clone())
+            .with_session_id(self.session.id().to_owned())
             .force_attribution(),
         );
         Ok((pre_tokens, post_tokens))
     }
 
-    /// Shake hook: before LLM compaction or on the first request after the
-    /// provider prompt cache expired. Never while the cache is warm.
-    fn maybe_shake_before_request(&mut self, manager: &mut crate::compaction::CompactionManager) {
-        let now = std::time::Instant::now();
-        let model = self.provider.model();
-        let ttl =
-            crate::provider::shake_cache_ttl_for_provider_model(self.provider.name(), Some(&model));
-        let plan = manager.plan_shake(self.session.provider_messages(), now, ttl);
-        let Some((reason, cfg)) = plan else {
-            return;
-        };
-        let start = manager.active_start(self.session.provider_messages());
-        let outcome = self.session.shake_stored_messages(start, &cfg);
-        manager.record_shake(reason, outcome);
-        if outcome != crate::compaction::ShakeOutcome::NoChange {
-            self.persist_session_best_effort("shake compaction");
+    /// Prompt-cache TTL for cache-expiry triggers: `[compaction] cache_ttl_secs`
+    /// when set, else the conservative provider estimate (None = never expires).
+    fn cache_expiry_ttl_secs(&self, manager: &crate::compaction::CompactionManager) -> Option<u64> {
+        let configured = manager.effective_config().cache_ttl_secs;
+        if configured > 0 {
+            return Some(configured);
         }
+        let model = self.provider.model();
+        crate::provider::shake_cache_ttl_for_provider_model(self.provider.name(), Some(&model))
     }
 
-    async fn note_shake_provider_response(&self, cache_read_tokens: Option<u64>) {
-        let now = std::time::Instant::now();
+    fn cache_expiry_already_compacted(
+        &self,
+        manager: &crate::compaction::CompactionManager,
+        now: std::time::SystemTime,
+        ttl: Option<u64>,
+    ) -> bool {
+        self.session
+            .last_cache_expiry_compaction_for()
+            .is_some_and(|compacted_for| {
+                manager.expired_cache_response(now, ttl) == Some(compacted_for.into())
+            })
+    }
+
+    /// Only an expired provider cache permits an in-place shake. Ordinary
+    /// compaction applies shake to its private summarizer input instead.
+    /// `fold_instead` skips the cold-cache shake because the cold fold will
+    /// reduce this request alone (see `cold_shake_reaches_request_target`).
+    ///
+    /// `fold_planned` says a cold-cache fold will reduce this request anyway.
+    /// Without one, a cold shake has to earn its place: on 2026-11-20 it cut
+    /// three tool outputs out of a 102K context to save 4K (4%). Below
+    /// [`COLD_SHAKE_MIN_SAVINGS_PERCENT`] the history is left alone and the
+    /// transcript says the cache went cold instead.
+    fn maybe_shake_at(
+        &mut self,
+        manager: &mut crate::compaction::CompactionManager,
+        now: std::time::SystemTime,
+        boundary: CompactionBoundary,
+        fold_instead: bool,
+        fold_planned: bool,
+    ) -> Option<(String, Option<CompactionEvent>)> {
+        let ttl = self.cache_expiry_ttl_secs(manager);
+        // Method order is remote, snapcompact, handoff, shake, soft: when
+        // snapcompact can archive this compaction the bitmap archive wins, and
+        // no pre-compaction shake runs.
+        let snapcompact_preferred =
+            manager.effective_config().snapcompact && self.provider.supports_image_input();
+        let plan = manager.plan_shake_with(
+            self.session.provider_messages(),
+            now,
+            ttl,
+            snapcompact_preferred,
+        );
+        let (reason, mut cfg) = plan?;
+        if reason != crate::compaction::ShakeReason::CacheExpiry
+            || (fold_instead
+                || manager.attempted_cache_expiry_compaction()
+                || self.cache_expiry_already_compacted(manager, now, ttl))
+        {
+            return None;
+        }
+        let started = Instant::now();
+        let start = manager.active_start(self.session.provider_messages());
+        let tokens_before = manager.effective_token_count_with(self.session.provider_messages());
+        if !fold_planned {
+            cfg.min_savings_tokens = cfg
+                .min_savings_tokens
+                .max(tokens_before * COLD_SHAKE_MIN_SAVINGS_PERCENT / 100);
+        }
+        let outcome = self.session.shake_stored_messages(start, &cfg);
+        manager.record_shake(reason, outcome);
+        let tokens_after = manager.effective_token_count_with(self.session.provider_messages());
+        logging::info(&format!(
+            "[compaction] strategy={} tokens_before={} tokens_after={} changed={}",
+            reason.label(),
+            tokens_before,
+            tokens_after,
+            outcome != crate::compaction::ShakeOutcome::NoChange,
+        ));
+        // A shake rewrites the provider-facing prefix exactly like a
+        // compaction, so it reports through the same event and divider. Clients
+        // used to learn nothing: only the log line hinted that the cold request
+        // had been reduced.
+        let event = match outcome {
+            crate::compaction::ShakeOutcome::Shaken {
+                regions_elided,
+                tokens_saved,
+            } => Some(CompactionEvent {
+                trigger: reason.label().to_string(),
+                method: Some("shake".to_string()),
+                pre_tokens: Some(tokens_before as u64),
+                post_tokens: Some(tokens_after as u64),
+                tokens_saved: Some(tokens_saved as u64),
+                duration_ms: Some(started.elapsed().as_millis() as u64),
+                messages_dropped: None,
+                messages_compacted: Some(regions_elided),
+                summary_chars: None,
+                active_messages: None,
+            }),
+            crate::compaction::ShakeOutcome::NoChange => None,
+        };
+        if let Some(event) = event.as_ref() {
+            // Record the divider here instead of through the caller's single
+            // compaction-event slot: a hard compact triggered right after the
+            // shake would overwrite that slot and leave the shake invisible.
+            self.note_compaction_applied();
+            self.record_compaction_divider(event);
+            self.session.apply_cache_clock(crate::session::CacheClock {
+                last_expiry_compaction_for: manager
+                    .expired_cache_response(now, ttl)
+                    .map(Into::into),
+                ..self.session.cache_clock()
+            });
+            self.persist_session_best_effort("shake compaction");
+        }
+        if event.is_some() {
+            let detail = format!(
+                "🧊 Cache cold · {} · ~{}K → ~{}K tok",
+                reason.label(),
+                tokens_before / 1000,
+                tokens_after / 1000,
+            );
+            return Some((detail, event));
+        }
+        // Nothing was trimmed. When a fold follows, its divider tells the
+        // story; otherwise report the estimated cold request size once.
+        if fold_planned || matches!(boundary, CompactionBoundary::Idle) {
+            return None;
+        }
+        // The message estimate leaves out the system prompt and tool schemas,
+        // and the provider's own count lives in memory, so right after a daemon
+        // restart this said "76K" for a 116K prompt (2026-11-25). The cache
+        // checkpoint keeps the last request's real size across the restart.
+        let prompt_tokens = tokens_before.max(
+            self.kv_cache_monitor
+                .last_request_tokens()
+                .and_then(|tokens| usize::try_from(tokens).ok())
+                .unwrap_or(0),
+        );
+        let detail = format!("🧊 Cache cold · ~{}K tok prompt", prompt_tokens / 1000);
+        let already_noted = self.session.replay_events().last().is_some_and(|last| {
+            matches!(
+                &last.kind,
+                crate::session::StoredReplayEventKind::Compaction { method: Some(method), .. }
+                    if method == crate::session::CACHE_COLD_DIVIDER_METHOD
+            ) && (chrono::Utc::now() - last.timestamp).num_seconds() < 120
+        });
+        if already_noted {
+            // A retried request is the same cold cache, not a second one.
+            return Some((detail, None));
+        }
+        let event = CompactionEvent {
+            trigger: reason.label().to_string(),
+            method: Some(crate::session::CACHE_COLD_DIVIDER_METHOD.to_string()),
+            pre_tokens: Some(prompt_tokens as u64),
+            post_tokens: Some(prompt_tokens as u64),
+            tokens_saved: Some(0),
+            duration_ms: None,
+            messages_dropped: None,
+            messages_compacted: None,
+            summary_chars: None,
+            active_messages: None,
+        };
+        self.session
+            .record_compaction_event(&event, event.method.as_deref(), None);
+        self.persist_session_best_effort("cold cache notice");
+        Some((detail, Some(event)))
+    }
+
+    fn prefer_cold_cache_fold(
+        &mut self,
+        manager: &crate::compaction::CompactionManager,
+        target: Option<usize>,
+        fold_planned: bool,
+    ) -> bool {
+        // One cold cache, one reduction. Do not trim a prefix that the fold
+        // would rewrite anyway.
+        fold_planned
+            && target.is_some_and(|target| {
+                !manager.cold_shake_reaches_request_target(self.session.provider_messages(), target)
+            })
+    }
+
+    fn maybe_cache_expiry_compaction(
+        &mut self,
+        manager: &mut crate::compaction::CompactionManager,
+        now: std::time::SystemTime,
+        boundary: CompactionBoundary,
+    ) -> bool {
+        let ttl = self.cache_expiry_ttl_secs(manager);
+        let messages = self.session.provider_messages();
+        if !manager.plan_cache_expiry_compaction(messages, now, ttl) {
+            return false;
+        }
+        let tokens = manager.effective_token_count_with(messages);
+        let started = match boundary {
+            CompactionBoundary::Request => {
+                manager.start_cache_expiry_compaction(messages, self.provider.clone())
+            }
+            CompactionBoundary::Idle => {
+                manager.start_idle_cache_expiry_compaction(messages, self.provider.clone())
+            }
+        };
+        logging::info(&format!(
+            "[compaction] snapcompact_cache_expiry: cache ttl={}s lapsed, tokens_before={}, started={}",
+            ttl.unwrap_or(0),
+            tokens,
+            started,
+        ));
+        started
+    }
+
+    /// Remember the wall clock of the request that is about to leave.
+    ///
+    /// The compaction manager's cold-cache clock is a `SystemTime` for exactly
+    /// this reason: a daemon reload, `exec` or resume starts a new process, and
+    /// the persisted session is the only place that timestamp can come from.
+    fn note_provider_request_sent(&mut self) {
+        self.session.apply_cache_clock(crate::session::CacheClock {
+            last_request_at: Some(chrono::Utc::now()),
+            last_domain: Some(self.request_cache_domain()),
+            ..self.session.cache_clock()
+        });
+    }
+
+    /// The last provider request time, from the session file when possible.
+    ///
+    /// Older sessions have no stored value, so fall back to the timestamp of
+    /// the last assistant message: it was written right after that request.
+    fn persisted_last_provider_request_at(&self) -> Option<std::time::SystemTime> {
+        self.session
+            .last_provider_request_at()
+            .or_else(|| {
+                self.session
+                    .iter_messages()
+                    .rev()
+                    .find(|message| matches!(message.role, Role::Assistant))
+                    .and_then(|message| message.timestamp)
+            })
+            .map(std::time::SystemTime::from)
+    }
+
+    async fn note_shake_provider_response(&mut self, cache_read_tokens: Option<u64>) {
+        let now = std::time::SystemTime::now();
+        self.session.apply_cache_clock(crate::session::CacheClock {
+            last_request_at: Some(chrono::DateTime::<chrono::Utc>::from(now)),
+            ..self.session.cache_clock()
+        });
         self.registry
             .compaction()
             .write()
@@ -975,94 +1222,301 @@ impl Agent {
             .note_provider_response(now, cache_read_tokens);
     }
 
-    fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
-        if self.provider.supports_compaction() || self.session.compaction.is_some() {
+    async fn messages_for_provider(
+        &mut self,
+        event_tx: Option<&crate::stream_batching::BatchingSender>,
+    ) -> Result<(Vec<Message>, Option<CompactionEvent>)> {
+        self.announce_prompt_file_changes()?;
+        let route_switch = self.request_cache_domain_switch();
+        if route_switch.is_some()
+            || self.provider.supports_compaction()
+            || self.session.compaction().is_some()
+        {
             let compaction = self.registry.compaction();
-            match compaction.try_write() {
-                Ok(mut manager) => {
-                    let discarded_oversized_native =
-                        manager.discard_oversized_openai_native_compaction();
-                    if self.provider.uses_jcode_compaction() {
-                        self.maybe_shake_before_request(&mut manager);
+            {
+                // Never fall back to the full transcript if a diagnostics
+                // reader happens to hold the manager at this boundary.
+                let mut manager = compaction.write().await;
+                let discarded_oversized_native =
+                    manager.discard_oversized_openai_native_compaction();
+                let model = self.provider.model();
+                if route_switch.is_some() {
+                    // Route changes can refresh the budget only opportunistically.
+                    // Budget this request against the target under the held lock.
+                    manager.set_budget_for_model(
+                        self.provider.context_window(),
+                        self.provider.name(),
+                        &model,
+                    );
+                }
+                let accepts_native =
+                    crate::compaction::openai_native_replay_route(self.provider.name(), &model);
+                let supports_archive = crate::compaction::snapcompact_pages_usable(
+                    self.provider.supports_image_input(),
+                    &model,
+                );
+                let recovered_native = manager.recover_native_text(
+                    self.session.provider_messages(),
+                    accepts_native && route_switch.is_none(),
+                );
+                if manager.take_missing_native_summary_warning(accepts_native) {
+                    self.warn_missing_native_compaction_summary(event_tx);
+                }
+                let now = std::time::SystemTime::now();
+                let ttl = self.cache_expiry_ttl_secs(&manager);
+                let switched_route_budget = if let Some(reason) = route_switch {
+                    Some(
+                        self.compact_before_route_switch(&mut manager, &model, reason, event_tx)
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+                // A completed cold reduction covers the old prefix. A large
+                // new user message is handled by the normal context cap, not
+                // by paying for a second reduction of the same cold cache.
+                if route_switch.is_none()
+                    && !self.is_swarm_worker()
+                    && self.provider.uses_jcode_compaction()
+                    && !self.cache_expiry_already_compacted(&manager, now, ttl)
+                {
+                    let cold_tokens_before =
+                        manager.effective_token_count_with(self.session.provider_messages());
+                    let target = manager.cache_expiry_request_target(
+                        self.session.provider_messages(),
+                        now,
+                        ttl,
+                    );
+                    let fold_planned = target.is_some()
+                        && manager.plan_cache_expiry_compaction(
+                            self.session.provider_messages(),
+                            now,
+                            ttl,
+                        );
+                    let fold_instead = self.prefer_cold_cache_fold(&manager, target, fold_planned);
+                    if fold_instead {
+                        logging::info(&format!(
+                            "[compaction] cold cache: shake alone cannot reach ~{}K from ~{}K, folding instead",
+                            target.unwrap_or(0) / 1000,
+                            cold_tokens_before / 1000,
+                        ));
                     }
-                    let messages = {
-                        let all_messages = self.session.provider_messages();
-                        if self.provider.uses_jcode_compaction() {
-                            let action =
-                                manager.ensure_context_fits(all_messages, self.provider.clone());
-                            match action {
-                                crate::compaction::CompactionAction::BackgroundStarted {
-                                    trigger,
-                                } => {
-                                    logging::info(&format!(
-                                        "Background compaction started ({})",
-                                        trigger
-                                    ));
-                                }
-                                crate::compaction::CompactionAction::HardCompacted(dropped) => {
-                                    logging::warn(&format!(
-                                        "Emergency hard compact: dropped {} messages (context was critical)",
-                                        dropped
-                                    ));
-                                }
-                                crate::compaction::CompactionAction::None => {}
+                    if let Some((detail, event)) = self.maybe_shake_at(
+                        &mut manager,
+                        now,
+                        CompactionBoundary::Request,
+                        fold_instead,
+                        fold_planned,
+                    ) {
+                        logging::info(&detail);
+                        if let Some(tx) = event_tx {
+                            let _ = tx.send(ServerEvent::StatusDetail { detail });
+                            // The divider is already persisted; tell attached
+                            // clients now so the shake is visible immediately.
+                            if let Some(event) = event.as_ref() {
+                                let _ = tx.send(crate::compaction::compaction_server_event(event));
                             }
                         }
-                        manager.messages_for_api_with_vision(
-                            all_messages,
-                            self.provider.supports_image_input(),
+                    }
+                    self.maybe_cache_expiry_compaction(
+                        &mut manager,
+                        std::time::SystemTime::now(),
+                        CompactionBoundary::Request,
+                    );
+                    // Expiry can cross the boundary while local shake runs.
+                    // Recheck before allowing an asynchronously-started fold
+                    // to race the foreground request.
+                    let target = target.or_else(|| {
+                        manager.cache_expiry_request_target(
+                            self.session.provider_messages(),
+                            std::time::SystemTime::now(),
+                            ttl,
                         )
-                    };
-                    let event = manager.take_compaction_event();
-                    if event.is_some() || discarded_oversized_native {
-                        self.sync_session_compaction_state_from_manager(&manager);
+                    });
+                    if let Some(target) = target {
+                        self.wait_for_request_compaction(&mut manager).await?;
+                        let after =
+                            manager.effective_token_count_with(self.session.provider_messages());
+                        anyhow::ensure!(
+                            after < target,
+                            "Cold-cache context is still ~{}K tokens (target <{}K); refusing to resend the oversized prompt: {}",
+                            after / 1000,
+                            target / 1000,
+                            manager
+                                .take_compaction_error()
+                                .unwrap_or_else(|| "protected history could not be reduced".into())
+                        );
+                        let detail = format!(
+                            "🧊 Cache cold · reduced ~{}K → ~{}K tok before sending",
+                            cold_tokens_before / 1000,
+                            after / 1000
+                        );
+                        logging::info(&detail);
+                        if let Some(tx) = event_tx {
+                            let _ = tx.send(ServerEvent::StatusDetail { detail });
+                        }
                     }
-                    if event.is_some() {
-                        self.note_compaction_applied();
-                        self.persist_session_best_effort("compaction completion");
+                }
+                if !self.is_swarm_worker() && self.provider.uses_jcode_compaction() {
+                    let all_messages = self.session.provider_messages();
+                    let action = manager.ensure_context_fits(all_messages, self.provider.clone());
+                    match action {
+                        crate::compaction::CompactionAction::BackgroundStarted { trigger } => {
+                            logging::info(&format!("Background compaction started ({})", trigger));
+                        }
+                        crate::compaction::CompactionAction::HardCompacted(dropped) => {
+                            logging::warn(&format!(
+                                "Emergency hard compact: dropped {} messages (context was critical)",
+                                dropped
+                            ));
+                        }
+                        crate::compaction::CompactionAction::None => {}
                     }
-                    let user_count = messages
+                }
+                let replay = manager.messages_for_api_session(
+                    &mut self.session,
+                    supports_archive,
+                    accepts_native,
+                );
+                let mut messages = replay.messages;
+                self.compaction_persist_pending |= replay.appended_plan_update.is_some();
+                if self.compaction_persist_pending
+                    || discarded_oversized_native
+                    || recovered_native
+                    || replay.checkpoint_changed
+                {
+                    self.persist_compaction_checkpoint(&manager)?;
+                    manager.take_decisions_updated();
+                }
+                let mut event = manager.take_compaction_event();
+                if let Some(event) = event.as_mut()
+                    && let Some((before, after)) = switched_route_budget
+                        .as_ref()
+                        .and_then(|budget| budget.reduction)
+                {
+                    event.trigger = crate::compaction::ROUTE_SWITCH_COMPACTION_TRIGGER.into();
+                    event.pre_tokens = Some(before);
+                    event.post_tokens = Some(after);
+                    event.tokens_saved = Some(before.saturating_sub(after));
+                }
+                if replay.warn_missing_native_summary {
+                    self.warn_missing_native_compaction_summary(event_tx);
+                }
+                if let Some(event) = event.as_ref() {
+                    self.note_compaction_applied();
+                    self.record_compaction_divider(event);
+                    self.persist_session_best_effort("compaction completion");
+                    if self.session.pinned_skill().is_some() {
+                        let replay = manager.messages_for_api_session(
+                            &mut self.session,
+                            supports_archive,
+                            accepts_native,
+                        );
+                        messages = replay.messages;
+                        if replay.appended_plan_update.is_some() {
+                            self.compaction_persist_pending = true;
+                            self.persist_compaction_checkpoint(&manager)?;
+                        }
+                    }
+                }
+                Self::log_provider_message_count("compaction", &messages);
+                let messages = Self::bounded_outbound_images(messages);
+                if let Some(budget) = switched_route_budget {
+                    let target = budget.limit;
+                    let family = manager.token_family();
+                    let tokens = messages
                         .iter()
-                        .filter(|message| matches!(message.role, Role::User))
-                        .count();
-                    let assistant_count = messages.len().saturating_sub(user_count);
-                    logging::info(&format!(
-                        "messages_for_provider (compaction): returning {} messages (user={}, assistant={})",
-                        messages.len(),
-                        user_count,
-                        assistant_count,
-                    ));
-                    return (messages, event);
+                        .map(|message| crate::compaction::message_token_estimate(family, message))
+                        .sum();
+                    let projected = crate::compaction::estimate_compaction_tokens(
+                        family,
+                        None,
+                        tokens,
+                        manager.token_budget(),
+                    );
+                    anyhow::ensure!(
+                        projected < target,
+                        "The projected request to {model} still needs ~{}K tokens (target <{}K); refusing to send it",
+                        projected / 1000,
+                        target / 1000,
+                    );
                 }
-                Err(_) => {
-                    logging::info("messages_for_provider: compaction lock failed, using session");
-                }
-            };
+                return Ok((messages, event));
+            }
         }
 
         let all_messages = self.session.provider_messages();
-        let messages = all_messages.to_vec();
-        let user_count = messages
+        let messages = Self::bounded_outbound_images(all_messages.to_vec());
+        Self::log_provider_message_count("session", &messages);
+        Ok((messages, None))
+    }
+
+    fn log_provider_message_count(source: &str, messages: &[Message]) {
+        logging::debug_lazy(|| {
+            let users = messages.iter().filter(|msg| msg.role == Role::User).count();
+            format!(
+                "messages_for_provider ({source}): returning {} messages (user={users}, other={})",
+                messages.len(),
+                messages.len() - users,
+            )
+        });
+    }
+
+    /// Bound the inline screenshot payload of one outbound request.
+    ///
+    /// Screenshot decay used to run from `Session::append_stored_message`, so
+    /// appending one more screenshot rewrote messages that earlier requests had
+    /// already sent. Any rewrite invalidates the provider prompt cache from the
+    /// first rewritten message to the end of the prompt: on 2026-11-15 a
+    /// computer-use turn rebuilt a ~360K-token prefix mid-turn that way, and the
+    /// user's `/btw` side question was in flight at the same moment, so the fork
+    /// took the blame.
+    ///
+    /// The stored transcript is now read-only while a turn runs. Only the request
+    /// copy is trimmed, and only once its payload genuinely approaches the
+    /// provider's body limit, so an ordinary screenshot stream never changes a
+    /// message that has already been sent.
+    fn bounded_outbound_images(mut messages: Vec<Message>) -> Vec<Message> {
+        let total: usize = messages
             .iter()
-            .filter(|message| matches!(message.role, Role::User))
-            .count();
-        let assistant_count = messages.len().saturating_sub(user_count);
-        logging::info(&format!(
-            "messages_for_provider (session): returning {} messages (user={}, assistant={})",
-            messages.len(),
-            user_count,
-            assistant_count,
-        ));
-        (messages, None)
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::Image { data, .. } => Some(data.len()),
+                _ => None,
+            })
+            .sum();
+        let budget = crate::compaction::TOOL_IMAGE_DECAY_KEEP_CHARS;
+        if total <= budget {
+            return messages;
+        }
+        let mut contents: Vec<&mut jcode_message_types::SharedContent> = messages
+            .iter_mut()
+            .map(|message| &mut message.content)
+            .collect();
+        // Trim in steps: a cut that follows every new screenshot rewrites an
+        // already-sent message on each request and rebuilds the prompt cache.
+        let stripped = crate::compaction::strip_oldest_images_in_steps(
+            &mut contents,
+            budget,
+            crate::compaction::OUTBOUND_IMAGE_TRIM_STEP_CHARS,
+        );
+        drop(contents);
+        if stripped > 0 {
+            logging::warn(&format!(
+                "Outbound image payload {total} chars exceeds the {budget} char budget; stripped {stripped} older screenshot(s) from this request only"
+            ));
+        }
+        messages
     }
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {
+        self.note_provider_request_sent();
         if !self.should_track_client_cache() {
             return;
         }
 
         let fast_snapshot =
-            if !self.provider.uses_jcode_compaction() && self.session.compaction.is_none() {
+            if !self.provider.uses_jcode_compaction() && self.session.compaction().is_none() {
                 let previous_count = self.cache_tracker.previous_message_count();
                 let prefix_hashes = self.session.provider_message_prefix_hashes();
                 let current_count = prefix_hashes.len();
@@ -1104,7 +1558,46 @@ impl Agent {
     }
 
     fn repair_missing_tool_outputs(&mut self) -> usize {
-        if self.tool_output_scan_index > self.session.messages.len() {
+        self.repair_missing_tool_outputs_with(TOOL_OUTPUT_MISSING_TEXT, true)
+    }
+
+    /// Called only after the stopped turn future has been dropped. Its
+    /// foreground tool has been aborted and cannot publish a result anymore.
+    pub(crate) fn repair_force_stopped_tools(
+        &mut self,
+        start_index: usize,
+    ) -> Vec<(String, String)> {
+        let results: std::collections::HashSet<String> = self
+            .session
+            .iter_messages()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let pending = self
+            .session
+            .iter_messages()
+            .skip(start_index)
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { id, name, .. } if !results.contains(id) => {
+                    Some((id.clone(), name.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        self.reset_tool_output_tracking();
+        self.tool_output_scan_index = start_index.min(self.session.message_count());
+        if self.repair_missing_tool_outputs_with("[Tool stopped by user]", false) == 0 {
+            self.persist_session_best_effort("force-stopped turn");
+        }
+        pending
+    }
+
+    fn repair_missing_tool_outputs_with(&mut self, text: &str, skip_inflight: bool) -> usize {
+        if self.tool_output_scan_index > self.session.message_count() {
             self.reset_tool_output_tracking();
         }
 
@@ -1112,7 +1605,7 @@ impl Agent {
         let mut new_result_ids = Vec::new();
         let mut assistant_tool_uses: Vec<(usize, Vec<String>)> = Vec::new();
 
-        for (index, msg) in self.session.messages.iter().enumerate().skip(scan_start) {
+        for (index, msg) in self.session.iter_messages().enumerate().skip(scan_start) {
             match msg.role {
                 Role::User => {
                     for block in &msg.content {
@@ -1151,7 +1644,7 @@ impl Agent {
                 // its real result is on the way, and synthesizing a
                 // placeholder now produces a duplicate tool_result that
                 // Anthropic rejects outright. See `tool::inflight`.
-                if crate::tool::inflight::is_tool_in_flight(&id) {
+                if skip_inflight && crate::tool::inflight::is_tool_in_flight(&id) {
                     logging::info(&format!(
                         "Skipping missing tool-output repair for {id}: tool is still executing"
                     ));
@@ -1164,7 +1657,7 @@ impl Agent {
             }
         }
 
-        self.tool_output_scan_index = self.session.messages.len();
+        self.tool_output_scan_index = self.session.message_count();
 
         let mut repaired = 0usize;
         let mut inserted = 0usize;
@@ -1172,13 +1665,16 @@ impl Agent {
             for (offset, id) in missing_for_message.iter().enumerate() {
                 let tool_block = ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
-                    content: TOOL_OUTPUT_MISSING_TEXT.to_string(),
+                    content: text.to_string(),
                     is_error: Some(true),
                 };
                 let stored_message = StoredMessage {
+                    codemode: None,
+                    ask: None,
+                    attachment_data: None,
                     id: id::new_id("message"),
                     role: Role::User,
-                    content: vec![tool_block],
+                    content: vec![tool_block].into(),
                     display_role: None,
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,
@@ -1192,14 +1688,14 @@ impl Agent {
             inserted += missing_for_message.len();
         }
 
-        self.tool_output_scan_index = self.session.messages.len();
+        self.tool_output_scan_index = self.session.message_count();
 
         if repaired > 0 {
             self.persist_session_best_effort("missing tool-output repair");
             self.cache_tracker.reset();
             self.kv_cache_monitor.reset();
-            self.locked_tools = None;
-            self.mcp_late_register_resolved = false;
+            self.tool_lock.unlock();
+            self.tool_lock.rearm_late_register();
         }
 
         repaired
@@ -1212,15 +1708,14 @@ impl Agent {
     }
 
     pub fn session_id(&self) -> &str {
-        &self.session.id
+        self.session.id()
     }
 
     /// Desktop self-development is selected by the session checkout, including
     /// restored sessions. It must not set the CLI canary/reload flags.
     pub fn is_desktop_selfdev(&self) -> bool {
         self.session
-            .working_dir
-            .as_deref()
+            .working_dir()
             .map(std::path::Path::new)
             .and_then(jcode_selfdev_types::desktop_repo_root)
             .is_some()
@@ -1228,17 +1723,7 @@ impl Agent {
 
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
         if working_dir.is_some() {
-            if self.session.original_working_dir.is_none()
-                && self.session.working_dir != working_dir
-                && self
-                    .session
-                    .messages
-                    .iter()
-                    .any(|message| message.role == Role::User)
-            {
-                self.session.original_working_dir = self.session.working_dir.clone();
-            }
-            self.session.working_dir = working_dir;
+            self.session.move_working_dir(working_dir);
             self.unlock_tools();
             self.session.refresh_initial_session_context_message();
         }
@@ -1268,7 +1753,7 @@ impl Agent {
         crate::telemetry::begin_session_with_parent(
             self.provider.name(),
             &self.provider.model(),
-            self.session.parent_id.clone(),
+            self.session.parent_id().map(str::to_owned),
             false,
         );
     }
@@ -1277,7 +1762,7 @@ impl Agent {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_closed();
-        if !self.session.messages.is_empty() {
+        if !self.session.has_no_messages() {
             self.persist_session_best_effort("session close state");
         }
         self.upload_transcript_telemetry(end_reason);
@@ -1300,7 +1785,7 @@ impl Agent {
             return;
         }
         let mut event = crate::hooks::HookEvent::new(event_name)
-            .session_id(self.session.id.clone())
+            .session_id(self.session.id().to_owned())
             .field("SOURCE", source)
             .field("MODEL", self.provider_model());
         if let Some(cwd) = self.working_dir() {
@@ -1313,7 +1798,7 @@ impl Agent {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_crashed(message);
-        if !self.session.messages.is_empty() {
+        if !self.session.has_no_messages() {
             self.persist_session_best_effort("session crash state");
         }
         self.upload_transcript_telemetry(crate::telemetry::SessionEndReason::Unknown);
@@ -1338,7 +1823,7 @@ impl Agent {
         }
         // Provisional agents defer their presence markers, telemetry session,
         // and context message until committed.
-        if self.session.status == crate::session::SessionStatus::Active {
+        if self.session.status() == crate::session::SessionStatus::Active {
             self.session.register_presence_markers();
         }
         if self.telemetry_session_deferred {
@@ -1349,8 +1834,8 @@ impl Agent {
             self.seed_compaction_from_session();
         }
         self.concurrency_session = Some(crate::telemetry::begin_concurrency_session(
-            &self.session.id,
-            self.session.parent_id.as_deref(),
+            self.session.id(),
+            self.session.parent_id(),
         ));
     }
 
@@ -1360,13 +1845,13 @@ impl Agent {
         }
     }
 
-    /// Detach the concurrency telemetry guard so the caller can finish it off
-    /// a latency-sensitive path. `finish` performs a blocking delivery (up to
-    /// ~800ms) that must not run under server-wide locks.
-    pub(crate) fn take_concurrency_session(
-        &mut self,
-    ) -> Option<crate::telemetry::ConcurrencySession> {
-        self.concurrency_session.take()
+    /// Finish concurrency telemetry on a blocking worker. `finish` performs a
+    /// blocking delivery (up to ~800ms) that must not run on a latency-sensitive
+    /// path or under server-wide locks.
+    pub(crate) fn finish_concurrency_tracking_in_background(&mut self) {
+        if let Some(mut concurrency) = self.concurrency_session.take() {
+            tokio::task::spawn_blocking(move || concurrency.finish());
+        }
     }
 
     #[cfg(test)]
@@ -1375,7 +1860,7 @@ impl Agent {
     }
 
     fn upload_transcript_telemetry(&mut self, end_reason: crate::telemetry::SessionEndReason) {
-        if self.transcript_telemetry_sent || self.session.messages.is_empty() {
+        if self.transcript_telemetry_sent || self.session.has_no_messages() {
             return;
         }
         // Keep code and ordinary transcript content intact, but reuse the
@@ -1383,7 +1868,7 @@ impl Agent {
         // text, reasoning, tool inputs, and tool results before leaving the
         // machine.
         let redacted_session = self.session.redacted_for_export();
-        let Ok(messages) = serde_json::to_value(&redacted_session.messages) else {
+        let Ok(messages) = serde_json::to_value(redacted_session.cloned_messages()) else {
             crate::logging::warn("failed to serialize consented transcript telemetry");
             return;
         };
@@ -1397,13 +1882,76 @@ impl Agent {
         }
     }
 
-    /// Get the last token usage from the most recent API request
-    pub fn last_usage(&self) -> &TokenUsage {
-        &self.last_usage
+    /// The most recent API request's token usage, as reported to debug and
+    /// runtime-command clients.
+    pub fn last_usage_json(&self) -> serde_json::Value {
+        serde_json::to_value(&self.last_usage).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// The most recent request's usage as the typed run-report field.
+    pub fn last_usage_report(&self) -> TokenUsage {
+        self.last_usage.clone()
+    }
+
+    /// [`Self::last_usage_json`] pretty-printed with the usage fields in
+    /// declaration order.
+    pub fn last_usage_pretty(&self) -> String {
+        serde_json::to_string_pretty(&self.last_usage).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// The most recent request's usage under the short keys the swarm
+    /// member list uses.
+    pub fn last_usage_brief(&self) -> serde_json::Value {
+        serde_json::json!({
+            "input": self.last_usage.input_tokens,
+            "output": self.last_usage.output_tokens,
+            "cache_read": self.last_usage.cache_read_input_tokens,
+            "cache_write": self.last_usage.cache_creation_input_tokens,
+        })
     }
 
     pub fn token_usage_totals(&self) -> crate::protocol::TokenUsageTotals {
         self.session.token_usage_totals()
+    }
+}
+
+impl Agent {
+    pub(in crate::agent) fn log_agent_provider_stream_lifecycle(
+        level: logging::LogLevel,
+        agent: &Agent,
+        phase: &str,
+        api_start: Instant,
+        fields: impl FnOnce() -> Vec<(&'static str, String)>,
+    ) {
+        if !level.is_enabled() {
+            return;
+        }
+        let mut owned = vec![
+            ("phase", phase.to_string()),
+            ("provider", agent.provider.name().to_string()),
+            ("model", agent.provider.model()),
+            ("session_id", agent.session.id().to_string()),
+            (
+                "connection_type",
+                agent
+                    .last_connection_type
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            ),
+            ("elapsed_ms", api_start.elapsed().as_millis().to_string()),
+        ];
+        if phase != "stream_complete" || logging::LogLevel::Debug.is_enabled() {
+            owned.push((
+                "provider_session_id",
+                agent
+                    .provider_session_id
+                    .as_deref()
+                    .unwrap_or("none")
+                    .to_owned(),
+            ));
+        }
+        owned.extend(fields());
+        logging::event(level, "AGENT_PROVIDER_STREAM_LIFECYCLE", owned);
     }
 }
 

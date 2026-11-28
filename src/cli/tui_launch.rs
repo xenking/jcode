@@ -97,6 +97,7 @@ mod turn_envelope_tests {
 
     fn envelope(event: ServerEvent) -> ServerEvent {
         ServerEvent::TurnEvent {
+            text_frames: None,
             identity: TurnIdentity {
                 runtime_generation: "runtime-test".into(),
                 turn_id: 7,
@@ -142,6 +143,7 @@ pub async fn run_tui_client(
     remote_working_dir: Option<String>,
     onboarding_sim: bool,
     update_sim: bool,
+    initial_model_spec: Option<String>,
 ) -> Result<()> {
     startup_profile::mark("tui_client_enter");
     let (terminal, tui_runtime) = init_tui_runtime()?;
@@ -198,7 +200,11 @@ pub async fn run_tui_client(
     }
     startup_profile::mark("terminal_title");
 
-    let mut app = tui::App::new_for_remote_with_options(resume_session.clone(), fresh_spawn);
+    let mut app = tui::App::new_for_remote_with_initial_model(
+        resume_session.clone(),
+        fresh_spawn,
+        initial_model_spec,
+    );
     if should_show_server_spawning(server_spawning).await {
         app.set_server_spawning();
     }
@@ -257,6 +263,7 @@ pub async fn run_tui_client(
             print_session_resume_hint(session_id);
         }
         crate::tui::herdr::release();
+        crate::tui::rex::release();
         return Ok(());
     }
 
@@ -284,6 +291,7 @@ pub async fn run_tui_client(
         // The user quit (reload/update exec back into jcode in this pane and
         // keep reporting, so they must not release it).
         crate::tui::herdr::release();
+        crate::tui::rex::release();
     }
 
     Ok(())
@@ -345,7 +353,7 @@ pub async fn run_replay_command(
                 .iter()
                 .map(|pane| {
                     serde_json::json!({
-                        "session_id": pane.session.id,
+                        "session_id": pane.session.id(),
                         "session_name": pane.session.short_name,
                         "timeline": pane.timeline,
                     })
@@ -480,7 +488,7 @@ pub async fn run_replay_command(
         return Ok(());
     }
 
-    let session_name = session.short_name.as_deref().unwrap_or(&session.id);
+    let session_name = session.short_name.as_deref().unwrap_or(session.id());
     let icon = id::session_icon(session_name);
 
     if let Some(output) = video_output {
@@ -728,7 +736,7 @@ pub fn list_sessions() -> Result<()> {
             let exe = picker_resume_exe()?;
             let mut session_cwd = std::env::current_dir()?;
             if let Ok(sess) = session::Session::load(session_id)
-                && let Some(dir) = sess.working_dir.as_deref()
+                && let Some(dir) = sess.working_dir()
                 && std::path::Path::new(dir).is_dir()
             {
                 session_cwd = std::path::PathBuf::from(dir);
@@ -758,7 +766,7 @@ pub fn list_sessions() -> Result<()> {
                 if let jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } =
                     &resolved_target
                     && let Ok(sess) = session::Session::load(session_id)
-                    && let Some(dir) = sess.working_dir.as_deref()
+                    && let Some(dir) = sess.working_dir()
                     && std::path::Path::new(dir).is_dir()
                 {
                     session_cwd = std::path::PathBuf::from(dir);
@@ -791,7 +799,7 @@ pub fn list_sessions() -> Result<()> {
                     if let jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } =
                         &resolved_target
                         && let Ok(sess) = session::Session::load(session_id)
-                        && let Some(dir) = sess.working_dir.as_deref()
+                        && let Some(dir) = sess.working_dir()
                         && std::path::Path::new(dir).is_dir()
                     {
                         session_cwd = std::path::PathBuf::from(dir);
@@ -849,7 +857,7 @@ pub fn list_sessions() -> Result<()> {
                 if let jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } =
                     &resolved_target
                     && let Ok(sess) = session::Session::load(session_id)
-                    && let Some(dir) = sess.working_dir.as_deref()
+                    && let Some(dir) = sess.working_dir()
                     && std::path::Path::new(dir).is_dir()
                 {
                     session_cwd = std::path::PathBuf::from(dir);
@@ -907,7 +915,7 @@ pub fn list_sessions() -> Result<()> {
             for session_id in recovered {
                 let mut session_cwd = cwd.clone();
                 if let Ok(sess) = session::Session::load(&session_id)
-                    && let Some(dir) = sess.working_dir.as_deref()
+                    && let Some(dir) = sess.working_dir()
                     && std::path::Path::new(dir).is_dir()
                 {
                     session_cwd = std::path::PathBuf::from(dir);

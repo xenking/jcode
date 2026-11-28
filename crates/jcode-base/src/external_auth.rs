@@ -46,9 +46,11 @@ pub fn prompt_to_trust_external_auth(
         path.display()
     );
     eprintln!("jcode will only read that source in place after you approve it.");
-    eprintln!("It will not move, delete, or rewrite the original auth there.");
+    eprintln!(
+        "It will not move or delete the original auth there; refreshed tokens may be written back to it."
+    );
     eprint!("Trust this auth source for future jcode sessions? [y/N]: ");
-    io::stdout().flush()?;
+    io::stderr().flush()?;
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
@@ -67,6 +69,8 @@ enum ExternalAuthReviewAction {
     /// `CLAUDE_CODE_OAUTH_TOKEN` env var), which have no stable on-disk path.
     ClaudeCodeNative,
     GeminiCli,
+    /// Grok CLI `auth.json`: trusting it lets jcode read AND refresh that file.
+    GrokBuild,
     Copilot(auth::copilot::ExternalCopilotAuthSource),
     Cursor(auth::cursor::ExternalCursorAuthSource),
 }
@@ -135,6 +139,7 @@ impl ExternalAuthReviewCandidate {
             ExternalAuthReviewAction::ClaudeCode => vec![("claude", METHOD)],
             ExternalAuthReviewAction::ClaudeCodeNative => vec![("claude", METHOD)],
             ExternalAuthReviewAction::GeminiCli => vec![("gemini", METHOD)],
+            ExternalAuthReviewAction::GrokBuild => Vec::new(),
             ExternalAuthReviewAction::Copilot(_) => vec![("copilot", METHOD)],
             ExternalAuthReviewAction::Cursor(_) => vec![("cursor", METHOD)],
             ExternalAuthReviewAction::SharedExternal(source) => {
@@ -162,6 +167,7 @@ fn provider_id_for_label(label: &str) -> Option<&'static str> {
         "OpenAI/Codex" => Some("openai"),
         "Claude" => Some("claude"),
         "Gemini" => Some("gemini"),
+        "Grok Build" => Some("grok-build"),
         "Antigravity" => Some("antigravity"),
         "GitHub Copilot" => Some("copilot"),
         "OpenRouter/API-key providers" => Some("openrouter"),
@@ -330,6 +336,18 @@ pub fn detected_external_auth_review_candidates() -> Result<Vec<ExternalAuthRevi
         });
     }
 
+    // Existence only: the file is not opened until the user trusts it.
+    if let Some(path) = auth::grok_build::auth_json_path()
+        && path.exists()
+    {
+        candidates.push(ExternalAuthReviewCandidate {
+            provider_summary: "Grok Build".to_string(),
+            source_name: "Grok CLI".to_string(),
+            path,
+            action: ExternalAuthReviewAction::GrokBuild,
+        });
+    }
+
     if let Some(source) = auth::copilot::preferred_external_auth_source()
         && !matches!(
             source,
@@ -359,7 +377,12 @@ pub fn detected_external_auth_review_candidates() -> Result<Vec<ExternalAuthRevi
 
 pub fn parse_external_auth_review_selection(input: &str, count: usize) -> Result<Vec<usize>> {
     let trimmed = input.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty()
+        || matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "n" | "no" | "none" | "skip"
+        )
+    {
         return Ok(Vec::new());
     }
     if matches!(trimmed.to_ascii_lowercase().as_str(), "a" | "all") {
@@ -367,7 +390,7 @@ pub fn parse_external_auth_review_selection(input: &str, count: usize) -> Result
     }
 
     let mut selected = Vec::new();
-    for part in trimmed.split(',') {
+    for part in trimmed.split(|c: char| c == ',' || c.is_whitespace()) {
         let value = part.trim();
         if value.is_empty() {
             continue;
@@ -420,7 +443,7 @@ fn prompt_to_review_external_auth_sources(
 
     eprintln!();
     eprint!("Approve sources [a=all, Enter=skip, example: 1,3]: ");
-    io::stdout().flush()?;
+    io::stderr().flush()?;
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
@@ -431,24 +454,39 @@ fn prompt_to_review_external_auth_sources(
 /// stay idempotent: re-running onboarding (or importing again) must never undo
 /// or duplicate a decision the user already made.
 fn external_auth_review_candidate_trusted(candidate: &ExternalAuthReviewCandidate) -> bool {
-    use crate::config::Config;
     match candidate.action {
         ExternalAuthReviewAction::SharedExternal(source) => auth::external::source_allowed(source),
         ExternalAuthReviewAction::CodexLegacy => auth::codex::legacy_auth_allowed(),
-        ExternalAuthReviewAction::ClaudeCode => Config::external_auth_source_allowed_for_path(
-            auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID,
-            &candidate.path,
-        ),
+        ExternalAuthReviewAction::ClaudeCode => {
+            crate::auth::external_trust::source_allowed_for_path(
+                auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID,
+                &candidate.path,
+            )
+        }
         ExternalAuthReviewAction::ClaudeCodeNative => auth::claude::native_source_allowed(),
-        ExternalAuthReviewAction::GeminiCli => Config::external_auth_source_allowed_for_path(
-            auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
-            &candidate.path,
-        ),
+        ExternalAuthReviewAction::GeminiCli => {
+            crate::auth::external_trust::source_allowed_for_path(
+                auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
+                &candidate.path,
+            )
+        }
+        ExternalAuthReviewAction::GrokBuild => {
+            crate::auth::external_trust::source_allowed_for_path(
+                auth::grok_build::GROK_CLI_AUTH_SOURCE_ID,
+                &candidate.path,
+            )
+        }
         ExternalAuthReviewAction::Copilot(source) => {
-            Config::external_auth_source_allowed_for_path(source.source_id(), &candidate.path)
+            crate::auth::external_trust::source_allowed_for_path(
+                source.source_id(),
+                &candidate.path,
+            )
         }
         ExternalAuthReviewAction::Cursor(source) => {
-            Config::external_auth_source_allowed_for_path(source.source_id(), &candidate.path)
+            crate::auth::external_trust::source_allowed_for_path(
+                source.source_id(),
+                &candidate.path,
+            )
         }
     }
 }
@@ -483,6 +521,7 @@ fn approve_external_auth_review_candidate(
             }
         }
         ExternalAuthReviewAction::GeminiCli => auth::gemini::trust_cli_auth_for_future_use()?,
+        ExternalAuthReviewAction::GrokBuild => auth::grok_build::trust_cli_auth_for_future_use()?,
         ExternalAuthReviewAction::Copilot(source) => {
             auth::copilot::trust_external_auth_source(source)?
         }
@@ -496,42 +535,42 @@ fn approve_external_auth_review_candidate(
 fn revoke_external_auth_review_candidate(candidate: &ExternalAuthReviewCandidate) -> Result<()> {
     match candidate.action {
         ExternalAuthReviewAction::SharedExternal(source) => {
-            crate::config::Config::revoke_external_auth_source_for_path(
+            crate::auth::external_trust::revoke_source_for_path(
                 source.source_id(),
                 &candidate.path,
             )?
         }
         ExternalAuthReviewAction::CodexLegacy => {
-            crate::config::Config::revoke_external_auth_source_for_path(
+            crate::auth::external_trust::revoke_source_for_path(
                 auth::codex::LEGACY_CODEX_AUTH_SOURCE_ID,
                 &candidate.path,
             )?
         }
         ExternalAuthReviewAction::ClaudeCode => {
-            crate::config::Config::revoke_external_auth_source_for_path(
+            crate::auth::external_trust::revoke_source_for_path(
                 auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID,
                 &candidate.path,
             )?
         }
-        ExternalAuthReviewAction::ClaudeCodeNative => {
-            crate::config::Config::revoke_external_auth_source(
-                auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
-            )?
-        }
-        ExternalAuthReviewAction::GeminiCli => {
-            crate::config::Config::revoke_external_auth_source_for_path(
-                auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
-                &candidate.path,
-            )?
-        }
+        ExternalAuthReviewAction::ClaudeCodeNative => crate::auth::external_trust::revoke_source(
+            auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
+        )?,
+        ExternalAuthReviewAction::GeminiCli => crate::auth::external_trust::revoke_source_for_path(
+            auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
+            &candidate.path,
+        )?,
+        ExternalAuthReviewAction::GrokBuild => crate::auth::external_trust::revoke_source_for_path(
+            auth::grok_build::GROK_CLI_AUTH_SOURCE_ID,
+            &candidate.path,
+        )?,
         ExternalAuthReviewAction::Copilot(source) => {
-            crate::config::Config::revoke_external_auth_source_for_path(
+            crate::auth::external_trust::revoke_source_for_path(
                 source.source_id(),
                 &candidate.path,
             )?
         }
         ExternalAuthReviewAction::Cursor(source) => {
-            crate::config::Config::revoke_external_auth_source_for_path(
+            crate::auth::external_trust::revoke_source_for_path(
                 source.source_id(),
                 &candidate.path,
             )?
@@ -545,7 +584,7 @@ fn revoke_external_auth_review_candidate(candidate: &ExternalAuthReviewCandidate
 /// failing the import.
 fn token_freshness_note(expires_at_ms: i64) -> String {
     let now_ms = chrono::Utc::now().timestamp_millis();
-    if expires_at_ms <= now_ms {
+    if expires_at_ms > 0 && expires_at_ms <= now_ms {
         " The access token is expired; jcode will refresh it on first use, or run /login if that fails.".to_string()
     } else {
         String::new()
@@ -590,14 +629,28 @@ async fn validate_openai_import() -> Result<String> {
 
 async fn validate_gemini_import() -> Result<String> {
     let tokens = auth::gemini::load_tokens()?;
+    if tokens.access_token.trim().is_empty() && tokens.refresh_token.trim().is_empty() {
+        anyhow::bail!("Gemini source did not expose a usable access or refresh token.");
+    }
     Ok(format!(
         "Loaded Gemini credentials.{}",
         token_freshness_note(tokens.expires_at)
     ))
 }
 
+async fn validate_grok_build_import() -> Result<String> {
+    if auth::grok_build::load_credential().is_some() {
+        Ok("Loaded Grok Build credentials.".to_string())
+    } else {
+        anyhow::bail!("Grok CLI auth.json has no usable Grok Build login.")
+    }
+}
+
 async fn validate_antigravity_import() -> Result<String> {
     let tokens = auth::antigravity::load_tokens()?;
+    if tokens.access_token.trim().is_empty() && tokens.refresh_token.trim().is_empty() {
+        anyhow::bail!("Antigravity source did not expose a usable access or refresh token.");
+    }
     Ok(format!(
         "Loaded Antigravity credentials.{}",
         token_freshness_note(tokens.expires_at)
@@ -612,19 +665,25 @@ async fn validate_copilot_import() -> Result<String> {
 }
 
 async fn validate_cursor_import() -> Result<String> {
-    let has_api_key = auth::cursor::has_cursor_api_key();
-    let has_vscdb = auth::cursor::has_cursor_vscdb_token();
-    if has_api_key || has_vscdb {
+    let has_api_key = auth::cursor::load_api_key().is_ok();
+    let (has_auth_file, has_vscdb) = auth::cursor::trusted_external_token_sources();
+    if has_api_key || has_auth_file || has_vscdb {
         Ok(format!(
-            "Cursor native source loaded (api_key={}, vscdb_token={}).",
-            has_api_key, has_vscdb
+            "Cursor native source loaded (api_key={}, auth_file={}, vscdb_token={}).",
+            has_api_key, has_auth_file, has_vscdb
         ))
     } else {
         anyhow::bail!("Cursor source did not expose a usable auth token.")
     }
 }
 
-fn validate_openrouter_like_import() -> Result<String> {
+fn validate_shared_api_key_import(source: auth::external::ExternalAuthSource) -> Result<String> {
+    let envs = auth::external::source_api_key_envs(source);
+    for env_key in &envs {
+        if auth::external::load_api_key_for_env(env_key).is_some() {
+            return Ok(format!("Loaded API key for `{}`.", env_key));
+        }
+    }
     for (env_key, env_file) in crate::provider_catalog::openrouter_like_api_key_sources() {
         if crate::provider_catalog::load_api_key_from_env_or_config(&env_key, &env_file).is_some() {
             return Ok(format!("Loaded API key for `{}`.", env_key));
@@ -635,7 +694,9 @@ fn validate_openrouter_like_import() -> Result<String> {
 
 async fn validate_shared_external_import(
     source: auth::external::ExternalAuthSource,
-) -> Result<String> {
+) -> Result<(String, Vec<(&'static str, &'static str)>)> {
+    let mut details = Vec::new();
+    let mut validated_labels = Vec::new();
     let mut errors = Vec::new();
     for label in auth::external::source_provider_labels(source) {
         let result = match label {
@@ -644,30 +705,59 @@ async fn validate_shared_external_import(
             "Gemini" => validate_gemini_import().await,
             "Antigravity" => validate_antigravity_import().await,
             "GitHub Copilot" => validate_copilot_import().await,
-            "OpenRouter/API-key providers" => validate_openrouter_like_import(),
+            "OpenRouter/API-key providers" => validate_shared_api_key_import(source),
             _ => continue,
         };
         match result {
-            Ok(detail) => return Ok(detail),
+            Ok(detail) => {
+                details.push(detail);
+                if let Some(id) = telemetry_provider_id_for_label(label) {
+                    validated_labels.push((id, "import"));
+                }
+            }
             Err(err) => errors.push(format!("{}: {}", label, err)),
         }
+    }
+    if !details.is_empty() {
+        return Ok((details.join(" "), validated_labels));
+    }
+    if errors.is_empty() {
+        anyhow::bail!("Source did not contain any supported credentials.");
     }
     anyhow::bail!(errors.join("; "))
 }
 
 async fn validate_external_auth_review_candidate(
     candidate: &ExternalAuthReviewCandidate,
-) -> Result<String> {
+) -> Result<(String, Vec<(&'static str, &'static str)>)> {
     match candidate.action {
         ExternalAuthReviewAction::SharedExternal(source) => {
             validate_shared_external_import(source).await
         }
-        ExternalAuthReviewAction::CodexLegacy => validate_openai_import().await,
-        ExternalAuthReviewAction::ClaudeCode => validate_claude_import().await,
-        ExternalAuthReviewAction::ClaudeCodeNative => validate_claude_import().await,
-        ExternalAuthReviewAction::GeminiCli => validate_gemini_import().await,
-        ExternalAuthReviewAction::Copilot(_) => validate_copilot_import().await,
-        ExternalAuthReviewAction::Cursor(_) => validate_cursor_import().await,
+        ExternalAuthReviewAction::CodexLegacy => Ok((
+            validate_openai_import().await?,
+            candidate.telemetry_auth_labels(),
+        )),
+        ExternalAuthReviewAction::ClaudeCode | ExternalAuthReviewAction::ClaudeCodeNative => Ok((
+            validate_claude_import().await?,
+            candidate.telemetry_auth_labels(),
+        )),
+        ExternalAuthReviewAction::GeminiCli => Ok((
+            validate_gemini_import().await?,
+            candidate.telemetry_auth_labels(),
+        )),
+        ExternalAuthReviewAction::GrokBuild => Ok((
+            validate_grok_build_import().await?,
+            candidate.telemetry_auth_labels(),
+        )),
+        ExternalAuthReviewAction::Copilot(_) => Ok((
+            validate_copilot_import().await?,
+            candidate.telemetry_auth_labels(),
+        )),
+        ExternalAuthReviewAction::Cursor(_) => Ok((
+            validate_cursor_import().await?,
+            candidate.telemetry_auth_labels(),
+        )),
     }
 }
 
@@ -723,13 +813,17 @@ pub async fn run_external_auth_auto_import_candidates(
             continue;
         };
         let already_trusted = external_auth_review_candidate_trusted(candidate);
-        approve_external_auth_review_candidate(candidate, already_trusted)?;
+        if let Err(err) = approve_external_auth_review_candidate(candidate, already_trusted) {
+            outcome.messages.push(format!(
+                "✕ {} (from {}): {}",
+                candidate.provider_summary, candidate.source_name, err
+            ));
+            continue;
+        }
         match validate_external_auth_review_candidate(candidate).await {
-            Ok(detail) => {
+            Ok((detail, labels)) => {
                 outcome.imported += 1;
-                outcome
-                    .imported_auth_labels
-                    .extend(candidate.telemetry_auth_labels());
+                outcome.imported_auth_labels.extend(labels);
                 outcome.messages.push(format!(
                     "✓ {} (from {}): {}",
                     candidate.provider_summary, candidate.source_name, detail
@@ -765,6 +859,7 @@ pub fn provider_connected_in_jcode(status: &auth::AuthStatus, provider_id: &str)
         "antigravity" => status.antigravity == Available,
         "copilot" => status.copilot == Available,
         "cursor" => status.cursor == Available,
+        "grok-build" => status.grok_build == Available,
         "openrouter" => status.openrouter == Available,
         _ => false,
     }
@@ -845,7 +940,7 @@ mod rerun_safety_tests {
     }
 
     fn gemini_trusted() -> bool {
-        crate::config::Config::external_auth_source_allowed_for_path(
+        crate::auth::external_trust::source_allowed_for_path(
             auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
             &gemini_path(),
         )
@@ -897,6 +992,167 @@ mod rerun_safety_tests {
             .unwrap();
         assert_eq!(outcome.imported, 0);
         assert!(!gemini_trusted());
+    }
+
+    #[test]
+    fn parse_selection_accepts_whitespace_and_skip_words() {
+        assert_eq!(
+            parse_external_auth_review_selection("1 3", 3).unwrap(),
+            vec![0, 2]
+        );
+        assert_eq!(
+            parse_external_auth_review_selection("1, 2", 3).unwrap(),
+            vec![0, 1]
+        );
+        assert!(
+            parse_external_auth_review_selection("skip", 3)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            parse_external_auth_review_selection("none", 3)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            parse_external_auth_review_selection("n", 3)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn pi_claude_oauth_imports_and_loads_without_opencode() {
+        let _lock = crate::storage::lock_test_env();
+        let _home = TempHome::new();
+        let pi_path = crate::storage::user_home_path(".pi/agent/auth.json").unwrap();
+        std::fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+        let expires = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        std::fs::write(
+            &pi_path,
+            serde_json::json!({
+                "anthropic": {
+                    "type": "oauth",
+                    "access": "sk-ant-oat01-pi-access",
+                    "refresh": "sk-ant-ort01-pi-refresh",
+                    "expires": expires
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let candidates = pending_external_auth_review_candidates().unwrap();
+        let pi_idx = candidates
+            .iter()
+            .position(|c| c.source_name() == "pi auth.json")
+            .expect("pi auth.json should be detected");
+        let outcome = run_external_auth_auto_import_candidates(&candidates, &[pi_idx])
+            .await
+            .unwrap();
+        assert_eq!(outcome.imported, 1, "messages: {:?}", outcome.messages);
+        assert!(outcome.imported_auth_labels.contains(&("claude", "import")));
+        let creds = auth::claude::load_credentials().expect("Claude creds should load from pi");
+        assert_eq!(creds.access_token, "sk-ant-oat01-pi-access");
+    }
+
+    #[tokio::test]
+    async fn shared_source_with_direct_anthropic_api_key_validates_on_import() {
+        let _lock = crate::storage::lock_test_env();
+        let _home = TempHome::new();
+        let opencode_path =
+            crate::storage::user_home_path(".local/share/opencode/auth.json").unwrap();
+        std::fs::create_dir_all(opencode_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &opencode_path,
+            serde_json::json!({
+                "anthropic": {
+                    "type": "api",
+                    "key": "sk-ant-api03-opencode-test-key"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let candidates = pending_external_auth_review_candidates().unwrap();
+        let oc_idx = candidates
+            .iter()
+            .position(|c| c.source_name() == "OpenCode auth.json")
+            .expect("OpenCode auth.json should be detected");
+        let outcome = run_external_auth_auto_import_candidates(&candidates, &[oc_idx])
+            .await
+            .unwrap();
+        assert_eq!(outcome.imported, 1, "messages: {:?}", outcome.messages);
+        assert!(
+            outcome
+                .messages
+                .iter()
+                .any(|m| m.contains("ANTHROPIC_API_KEY")),
+            "messages: {:?}",
+            outcome.messages
+        );
+    }
+
+    #[test]
+    fn shared_source_with_only_unknown_provider_key_is_not_detected() {
+        let _lock = crate::storage::lock_test_env();
+        let _home = TempHome::new();
+        let opencode_path =
+            crate::storage::user_home_path(".local/share/opencode/auth.json").unwrap();
+        std::fs::create_dir_all(opencode_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &opencode_path,
+            serde_json::json!({
+                "unknown-custom-vendor": {
+                    "type": "api",
+                    "key": "secret-123"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(
+            pending_external_auth_review_candidates()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!auth::AuthStatus::has_any_untrusted_external_auth());
+    }
+
+    #[tokio::test]
+    async fn cursor_auth_file_validates_on_import() {
+        let _lock = crate::storage::lock_test_env();
+        let _home = TempHome::new();
+        let cursor_path = auth::cursor::cursor_auth_file_path().unwrap();
+        std::fs::create_dir_all(cursor_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cursor_path,
+            serde_json::json!({
+                "accessToken": "cursor-test-access-token"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let candidates = pending_external_auth_review_candidates().unwrap();
+        let cursor_idx = candidates
+            .iter()
+            .position(|c| c.provider_summary() == "Cursor")
+            .expect("Cursor auth.json should be detected");
+        let outcome = run_external_auth_auto_import_candidates(&candidates, &[cursor_idx])
+            .await
+            .unwrap();
+        assert_eq!(outcome.imported, 1, "messages: {:?}", outcome.messages);
+        assert!(
+            outcome
+                .messages
+                .iter()
+                .any(|m| m.contains("auth_file=true")),
+            "messages: {:?}",
+            outcome.messages
+        );
     }
 }
 

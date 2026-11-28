@@ -353,9 +353,61 @@ pub async fn transform_tool_input(
     current
 }
 
-/// True when running inside a hook process (recursion guard).
+/// Set when this process is a hook subprocess (recursion guard) or when a test
+/// build has opted out of real hook execution.
+const HOOKS_DISABLED_ENV: &str = "JCODE_HOOKS_DISABLED";
+
+/// Set by a test that wants the machine's hooks to run for its duration.
+const ALLOW_HOOKS_IN_TEST_ENV: &str = "JCODE_TEST_ALLOW_HOOKS";
+
+/// True when hooks must not run: inside a hook process (recursion guard), or in a
+/// test build that has not opted in.
+///
+/// Unit tests run the production config loader, which reads the developer's
+/// `~/.jcode/config.toml`, so without this every test inherits the machine's
+/// hooks. Two things go wrong when they do. A paused-clock test that measures a
+/// tool call also absorbs each hook's *timeout* as virtual seconds (measured:
+/// 28s instead of the tool's 8s on a machine with two `pre_tool` commands and a
+/// 10s `post_tool_feedback` timeout), and a hook's side effects land in whatever
+/// test happens to be running. `cargo test` enables `test-isolated-hooks` through
+/// this crate's dev-dependency in jcode-app-core; a test that asserts hook
+/// behavior opts back in with [`TestHooksGuard::allow`].
 fn hooks_suppressed() -> bool {
-    std::env::var_os("JCODE_HOOKS_DISABLED").is_some()
+    if std::env::var_os(HOOKS_DISABLED_ENV).is_some() {
+        return true;
+    }
+    // `cfg(test)` keeps this crate's own unit tests working: their subject *is* a
+    // hook. Everything else that builds with the feature is a downstream test
+    // target, and those must not run the machine's hooks.
+    cfg!(feature = "test-isolated-hooks")
+        && !cfg!(test)
+        && std::env::var_os(ALLOW_HOOKS_IN_TEST_ENV).is_none()
+}
+
+/// Lets one test run the machine's real hooks, for tests whose subject *is* a
+/// hook. Callers hold `crate::storage::lock_test_env()` for the guard's lifetime
+/// so a concurrent test cannot observe hooks enabled.
+#[doc(hidden)]
+pub struct TestHooksGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl TestHooksGuard {
+    #[doc(hidden)]
+    pub fn allow() -> Self {
+        let previous = std::env::var_os(ALLOW_HOOKS_IN_TEST_ENV);
+        crate::env::set_var(ALLOW_HOOKS_IN_TEST_ENV, "1");
+        Self { previous }
+    }
+}
+
+impl Drop for TestHooksGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::env::set_var(ALLOW_HOOKS_IN_TEST_ENV, value),
+            None => crate::env::remove_var(ALLOW_HOOKS_IN_TEST_ENV),
+        }
+    }
 }
 
 fn expand_home(program: &str) -> PathBuf {
@@ -381,6 +433,64 @@ fn truncate_bytes(value: &str, limit: usize) -> &str {
 /// Tool input JSON truncated to the size exported in `JCODE_HOOK_TOOL_INPUT`.
 pub fn truncate_tool_input(tool_input_json: &str) -> &str {
     truncate_bytes(tool_input_json, TOOL_INPUT_ENV_LIMIT)
+}
+
+/// Serialize only the UTF-8 prefix exported in `JCODE_HOOK_TOOL_INPUT`.
+///
+/// Like [`truncate_tool_input`], this prefix is intentionally not necessarily
+/// complete, valid JSON. Serialization stops at the byte limit, without allocating
+/// the discarded suffix. Accepting only `Value` avoids interrupting arbitrary
+/// user-defined serializers with observable side effects.
+pub fn tool_input_json_prefix(value: &serde_json::Value) -> String {
+    json_prefix(value, TOOL_INPUT_ENV_LIMIT)
+}
+
+fn json_prefix(value: &serde_json::Value, limit: usize) -> String {
+    struct PrefixWriter {
+        bytes: Vec<u8>,
+        limit: usize,
+        stopped: bool,
+    }
+    impl std::io::Write for PrefixWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let remaining = self.limit - self.bytes.len();
+            let take = remaining.min(bytes.len());
+            self.bytes.extend_from_slice(&bytes[..take]);
+            if take < bytes.len() || self.bytes.len() == self.limit {
+                self.stopped = true;
+                // Deliberate sentinel: abort serde's traversal, not a short write
+                // that write_all would retry and continue serializing.
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+            }
+            Ok(take)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = PrefixWriter {
+        bytes: Vec::with_capacity(limit.min(128)),
+        limit,
+        stopped: false,
+    };
+    let result = serde_json::to_writer(&mut writer, value);
+    if let Err(error) = result {
+        assert!(
+            writer.stopped && error.is_io(),
+            "unexpected Value serialization failure: {error}"
+        );
+    }
+    // The limit may cut an emitted multibyte character. Keep exactly the same
+    // preceding character boundary as truncate_tool_input, including limits 0..3.
+    match String::from_utf8(writer.bytes) {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            let end = error.utf8_error().valid_up_to();
+            let mut bytes = error.into_bytes();
+            bytes.truncate(end);
+            String::from_utf8(bytes).expect("JSON prefix is valid UTF-8")
+        }
+    }
 }
 
 /// JSON payload mirroring the env fields, exported as `JCODE_HOOK_PAYLOAD`.
@@ -742,3 +852,7 @@ async fn run_post_tool_feedback_command(
 #[allow(clippy::await_holding_lock)]
 #[path = "hooks_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "hooks_json_prefix_tests.rs"]
+mod json_prefix_tests;

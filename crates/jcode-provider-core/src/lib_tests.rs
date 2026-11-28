@@ -4,6 +4,8 @@ use super::*;
 struct SimpleFailureProvider {
     error_event: bool,
     fail: bool,
+    resolved_model: Option<String>,
+    retry: bool,
     model_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -28,6 +30,26 @@ impl Provider for SimpleFailureProvider {
                 cache_creation_input_tokens: None,
             }),
         ];
+        if self.retry {
+            events.push(Ok(StreamEvent::ResolvedModel {
+                model: "discarded-model".into(),
+            }));
+            events.push(Ok(StreamEvent::RetryRollback { attempt: 1, max: 2 }));
+            events.push(Ok(StreamEvent::TextDelta("retried".into())));
+            events.push(Ok(StreamEvent::TokenUsage {
+                input_tokens: Some(9),
+                output_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            }));
+        }
+        // Actual identity can arrive after usage.
+        if let Some(model) = &self.resolved_model {
+            events.push(Ok(StreamEvent::ResolvedModel {
+                model: model.clone(),
+            }));
+            events.push(Ok(StreamEvent::ResolvedModel { model: "  ".into() }));
+        }
         if self.fail {
             events.push(if self.error_event {
                 Ok(StreamEvent::Error {
@@ -83,8 +105,13 @@ async fn simple_completion_failure_preserves_partial_usage_and_source() {
     assert_eq!(failure.usage.input_tokens, Some(42));
     assert_eq!(failure.usage.output_tokens, None);
     assert_eq!(failure.usage.cache_read_input_tokens, Some(12));
-    assert_eq!(failure.provider, "upstream");
-    assert_eq!(failure.model, "test-model");
+    assert_eq!(failure.provider, "route");
+    assert_eq!(failure.model, "requested-alias");
+    assert_eq!(
+        failure.usage.requested_model.as_deref(),
+        Some("requested-alias")
+    );
+    assert_eq!(failure.usage.resolved_model, None);
     assert!(
         error
             .chain()
@@ -129,6 +156,53 @@ async fn simple_completion_success_returns_usage_once() {
     assert_eq!(text, "partial");
     assert_eq!(usage.input_tokens, Some(42));
     assert_eq!(usage.output_tokens, Some(7));
+    assert_eq!(usage.requested_model.as_deref(), Some("requested-alias"));
+    assert_eq!(usage.resolved_model, None);
+}
+
+#[tokio::test]
+async fn simple_completion_preserves_alias_and_late_actual_model_on_success_and_failure() {
+    for fail in [false, true] {
+        let provider = SimpleFailureProvider {
+            fail,
+            resolved_model: Some(" actual-snapshot ".into()),
+            ..Default::default()
+        };
+        let result = provider
+            .complete_simple_with_usage("prompt", "system")
+            .await;
+        let usage = match result {
+            Ok((_, usage)) => usage,
+            Err(error) => error
+                .downcast_ref::<SimpleCompletionError>()
+                .unwrap()
+                .usage
+                .clone(),
+        };
+        assert_eq!(usage.requested_model.as_deref(), Some("requested-alias"));
+        assert_eq!(usage.resolved_model.as_deref(), Some("actual-snapshot"));
+        assert_eq!(usage.input_tokens, Some(42));
+    }
+}
+
+#[tokio::test]
+async fn simple_completion_retry_resets_actual_model_and_usage() {
+    for resolved in [None, Some("retry-model".to_owned())] {
+        let provider = SimpleFailureProvider {
+            retry: true,
+            resolved_model: resolved.clone(),
+            ..Default::default()
+        };
+        let (text, usage) = provider
+            .complete_simple_with_usage("prompt", "system")
+            .await
+            .unwrap();
+        assert_eq!(text, "retried");
+        assert_eq!(usage.input_tokens, Some(9));
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.requested_model.as_deref(), Some("requested-alias"));
+        assert_eq!(usage.resolved_model, resolved);
+    }
 }
 
 #[test]
@@ -388,6 +462,8 @@ impl Provider for SnapshotTestProvider {
 
     fn model_routes(&self) -> Vec<ModelRoute> {
         vec![ModelRoute {
+            speed_options: Vec::new(),
+            reasoning_efforts: None,
             model: "snapshot-model".to_string(),
             provider: "Snapshot".to_string(),
             api_method: "snapshot-api".to_string(),
@@ -395,6 +471,8 @@ impl Provider for SnapshotTestProvider {
             detail: "test route".to_string(),
             usage: None,
             cheapness: None,
+            account: None,
+            icon: None,
         }]
     }
 
@@ -435,6 +513,8 @@ fn runtime_key_distinguishes_openrouter_from_direct_compatible_profile() {
 #[test]
 fn route_selection_preserves_runtime_identity_from_model_route() {
     let selection = RouteSelection::from_model_route(&ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "openrouter/owl-alpha".to_string(),
         provider: "OpenRouter".to_string(),
         api_method: "openrouter".to_string(),
@@ -442,12 +522,16 @@ fn route_selection_preserves_runtime_identity_from_model_route() {
         detail: "https://openrouter.ai/api/v1".to_string(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     });
     assert_eq!(selection.model, "openrouter/owl-alpha");
     assert_eq!(selection.runtime_key, RuntimeKey::OpenRouter);
     assert_eq!(selection.api_method, "openrouter");
 
     let selection = RouteSelection::from_model_route(&ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "nvidia/example".to_string(),
         provider: "NVIDIA NIM".to_string(),
         api_method: "openai-compatible:nvidia-nim".to_string(),
@@ -455,6 +539,8 @@ fn route_selection_preserves_runtime_identity_from_model_route() {
         detail: "https://integrate.api.nvidia.com/v1".to_string(),
         usage: None,
         cheapness: None,
+        account: None,
+        icon: None,
     });
     assert_eq!(
         selection.runtime_key,
@@ -468,6 +554,8 @@ fn route_selection_preserves_runtime_identity_from_model_route() {
 #[test]
 fn grok_build_route_selection_is_a_first_class_runtime() {
     let selection = RouteSelection::from_model_route(&ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "grok-4.6".to_string(),
         provider: "Grok Build".to_string(),
         api_method: "grok-build-acp".to_string(),
@@ -475,12 +563,16 @@ fn grok_build_route_selection_is_a_first_class_runtime() {
         detail: "Grok Build subscription via Jcode-managed ACP".to_string(),
         cheapness: None,
         usage: None,
+        account: None,
+        icon: None,
     });
     assert_eq!(selection.runtime_key, RuntimeKey::GrokBuild);
     assert_eq!(selection.runtime_key.stable_id(), "grok-build");
     assert_eq!(selection.routed_model_spec(), "grok-build:grok-4.6");
 
     let prefixed = RouteSelection::from_model_route(&ModelRoute {
+        speed_options: Vec::new(),
+        reasoning_efforts: None,
         model: "grok-build:grok-4.6".to_string(),
         provider: "Grok Build".to_string(),
         api_method: "grok-build-acp".to_string(),
@@ -488,6 +580,8 @@ fn grok_build_route_selection_is_a_first_class_runtime() {
         detail: String::new(),
         cheapness: None,
         usage: None,
+        account: None,
+        icon: None,
     });
     assert_eq!(prefixed.routed_model_spec(), "grok-build:grok-4.6");
 }

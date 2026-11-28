@@ -1,17 +1,18 @@
 //! Per-account banked usage resets for compact status displays.
 //!
-//! OpenAI banked resets live in the OpenAI usage cache. Claude session-limit
-//! reset offers are fetched alongside usage but are not part of `UsageData`,
-//! so the last observed offer is remembered here per account label.
+//! Both account rows and usage reports derive resets from the same cached
+//! per-account provider response, not independent observations.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 /// Banked resets known for one saved account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountBankedResets {
-    /// Resets that can be claimed right now.
+    /// Unexpired saved resets, including those not currently usable.
     pub available: u64,
+    /// Number currently usable, when reported.
+    pub usable: Option<u64>,
+    pub cached_source: Option<String>,
     /// RFC3339 time the next reset becomes available when none are left.
     pub next_available_at: Option<String>,
     /// RFC3339 expiry of the soonest-expiring claimable reset, when reported.
@@ -36,43 +37,68 @@ impl AccountBankedResets {
     }
 }
 
-fn anthropic_offers() -> &'static Mutex<HashMap<String, AccountBankedResets>> {
-    static OFFERS: OnceLock<Mutex<HashMap<String, AccountBankedResets>>> = OnceLock::new();
-    OFFERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Remember the latest Claude reset offer for a login. `None` means the login
-/// is not in the reset program, which clears any earlier observation.
-pub(super) fn record_anthropic_offer(
-    label: &str,
-    offer: Option<&jcode_usage_types::AnthropicLimitResetOffer>,
-) {
-    let label = label.trim();
-    if label.is_empty() {
-        return;
-    }
-    if let Ok(mut map) = anthropic_offers().lock() {
-        match offer {
-            Some(offer) => {
-                map.insert(
-                    label.to_string(),
-                    AccountBankedResets {
-                        available: u64::from(offer.available),
-                        next_available_at: (!offer.available)
-                            .then(|| offer.next_available_at.clone())
-                            .flatten(),
-                        expires_at: None,
-                    },
-                );
-            }
-            None => {
-                map.remove(label);
-            }
+/// The line above a Claude login's bars, `✦ 2 resets · 1 usable · expires 15d`,
+/// with why held resets cannot be spent yet and a mark for an observation
+/// another tool cached. `None` when the login holds none.
+pub fn anthropic_resets_line(banked: &jcode_usage_types::AnthropicBankedResets) -> Option<String> {
+    let mut line = super::resets_summary(
+        banked.available_count,
+        Some(banked.usable_count),
+        banked.expires_at.as_deref(),
+    )?;
+    if banked.usable_count == 0
+        && let Some(reason) = banked.reason.as_deref()
+    {
+        line.push_str(&format!(" · not usable now ({reason}"));
+        if let Some(until) = banked.cooldown_until.as_deref() {
+            line.push_str(&format!(", ready in {}", super::format_reset_compact(until)));
         }
+        line.push(')');
     }
+    if banked.cached_source.is_some() {
+        line.push_str(" · imported");
+    }
+    Some(line)
 }
 
-/// Cached banked resets for a saved account. Never probes or blocks.
+/// The held-resets line for any provider report that carries resets.
+pub fn provider_resets_line(provider: &super::ProviderUsage) -> Option<String> {
+    if let Some(credits) = &provider.openai_reset_credits {
+        return super::resets_summary(
+            credits.available_count,
+            None,
+            AccountBankedResets::earliest_expiry(&credits.available_expirations).as_deref(),
+        );
+    }
+    provider
+        .anthropic_banked_resets
+        .as_ref()
+        .and_then(anthropic_resets_line)
+}
+
+fn anthropic_account_resets(
+    offer: Option<&jcode_usage_types::AnthropicLimitResetOffer>,
+    banked: Option<&jcode_usage_types::AnthropicBankedResets>,
+) -> Option<AccountBankedResets> {
+    if offer.is_none() && banked.is_none() {
+        return None;
+    }
+    let session = offer.is_some_and(|offer| offer.available);
+    // Saved grants and the independent weekly session offer are different
+    // programs and must not be added together.
+    let available = banked.map_or(u64::from(session), |b| b.available_count);
+    Some(AccountBankedResets {
+        available,
+        usable: banked.map(|b| b.usable_count),
+        cached_source: banked.and_then(|b| b.cached_source.clone()),
+        next_available_at: (available == 0)
+            .then(|| offer.and_then(|offer| offer.next_available_at.clone()))
+            .flatten(),
+        expires_at: banked.and_then(|b| b.expires_at.clone()),
+    })
+}
+
+/// Cached banked resets for a saved account. Never performs a network probe.
 pub fn cached_account_banked_resets(
     provider: super::MultiAccountProviderKind,
     label: &str,
@@ -83,7 +109,28 @@ pub fn cached_account_banked_resets(
     }
     match provider {
         super::MultiAccountProviderKind::Anthropic => {
-            try_cache_lock(anthropic_offers())?.get(label).cloned()
+            let value = super::disk_cache::reset_status(&format!("label:{label}"));
+            let offer = value
+                .as_ref()
+                .and_then(|v| super::anthropic_reset::offer_from_status(v, Some(label)));
+            let banked = value
+                .as_ref()
+                .and_then(|v| {
+                    super::anthropic_banked::banked_from_status(v, Some(label), chrono::Utc::now())
+                })
+                .or_else(|| {
+                    let account = crate::auth::claude::list_accounts()
+                        .inspect_err(|error| {
+                            crate::logging::debug(&format!(
+                                "Cached banked-reset account unavailable: {error:#}"
+                            ));
+                        })
+                        .ok()?
+                        .into_iter()
+                        .find(|a| a.label == label)?;
+                    super::anthropic_banked::cached_banked_resets(&account.access, Some(label))
+                });
+            anthropic_account_resets(offer.as_ref(), banked.as_ref())
         }
         super::MultiAccountProviderKind::OpenAI => {
             let map = try_cache_lock(super::cache::openai_usage_cache())?;
@@ -95,6 +142,8 @@ pub fn cached_account_banked_resets(
                 .as_ref()
                 .map(|credits| AccountBankedResets {
                     available: credits.available_count,
+                    usable: None,
+                    cached_source: None,
                     next_available_at: None,
                     expires_at: AccountBankedResets::earliest_expiry(
                         &credits.available_expirations,
@@ -146,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_offer_is_recorded_and_cleared() {
+    fn anthropic_account_resets_uses_saved_grants_without_adding_session_offers() {
         let label = "banked-test-account";
         let offer = jcode_usage_types::AnthropicLimitResetOffer {
             account_label: Some(label.into()),
@@ -154,19 +203,35 @@ mod tests {
             next_available_at: Some("2099-01-01T00:00:00Z".into()),
             resets_per_week: 1,
         };
-        record_anthropic_offer(label, Some(&offer));
-        let got =
-            cached_account_banked_resets(super::super::MultiAccountProviderKind::Anthropic, label)
-                .unwrap();
+        let got = anthropic_account_resets(Some(&offer), None).unwrap();
         assert_eq!(got.available, 0);
         assert_eq!(
             got.next_available_at.as_deref(),
             Some("2099-01-01T00:00:00Z")
         );
-        record_anthropic_offer(label, None);
-        assert!(
-            cached_account_banked_resets(super::super::MultiAccountProviderKind::Anthropic, label)
-                .is_none()
+        let banked = jcode_usage_types::AnthropicBankedResets {
+            account_label: Some(label.into()),
+            available_count: 2,
+            usable_count: 1,
+            cached_source: None,
+            expires_at: Some("2099-02-01T00:00:00Z".into()),
+            ..Default::default()
+        };
+        let got = anthropic_account_resets(Some(&offer), Some(&banked)).unwrap();
+        assert_eq!(got.available, 2);
+        assert_eq!(got.usable, Some(1));
+        assert!(got.next_available_at.is_none());
+        assert_eq!(got.expires_at.as_deref(), Some("2099-02-01T00:00:00Z"));
+        let ready_offer = jcode_usage_types::AnthropicLimitResetOffer {
+            available: true,
+            ..offer
+        };
+        assert_eq!(
+            anthropic_account_resets(Some(&ready_offer), Some(&banked))
+                .unwrap()
+                .available,
+            2
         );
+        assert!(anthropic_account_resets(None, None).is_none());
     }
 }

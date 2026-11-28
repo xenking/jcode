@@ -39,12 +39,8 @@ static GLOBAL_ROUTES_MEMO: LazyLock<Mutex<HashMap<String, Arc<RoutesMemoEntry>>>
 /// its result, which they then serve from the shared memo.
 static GLOBAL_ROUTES_BUILD_LOCK: Mutex<()> = Mutex::new(());
 
-/// Bumped whenever provider catalogs change out-of-band (prefetch completion,
-/// forced catalog refresh, auth changes). Invalidates every shared memo entry.
-static CATALOG_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 pub(super) fn catalog_generation() -> u64 {
-    CATALOG_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+    crate::catalog_generation::current()
 }
 
 /// Invalidate every memoized route catalog in the process.
@@ -54,7 +50,7 @@ pub(super) fn catalog_generation() -> u64 {
 /// backstop rather than the mechanism: a completed refresh is reflected on the
 /// next render instead of waiting for the memo to expire.
 pub fn bump_catalog_generation() {
-    CATALOG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::catalog_generation::bump();
 }
 
 pub(super) fn next_catalog_scope() -> u64 {
@@ -79,7 +75,7 @@ impl MultiProvider {
     /// connect bursts and would otherwise defeat the shared memo.
     pub(super) fn invalidate_routes_memo_globally(&self) {
         self.invalidate_routes_memo();
-        CATALOG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::catalog_generation::bump();
     }
 
     /// Key identifying the instance-specific state that feeds the route

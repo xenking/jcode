@@ -170,8 +170,6 @@ pub struct AdaptiveScheduler {
     pub config: AmbientSchedulerConfig,
     /// Exponential backoff multiplier (doubles on rate limit hits).
     backoff_multiplier: u32,
-    /// Whether a user session is currently active.
-    user_active: bool,
 }
 
 impl AdaptiveScheduler {
@@ -180,7 +178,6 @@ impl AdaptiveScheduler {
             usage_log: UsageLog::load(),
             config,
             backoff_multiplier: 1,
-            user_active: false,
         }
     }
 
@@ -246,14 +243,9 @@ impl AdaptiveScheduler {
         self.apply_backoff(interval.clamp(min, max))
     }
 
-    /// Returns `true` if the scheduler thinks ambient should pause (user active).
-    pub fn should_pause(&self) -> bool {
-        self.config.pause_on_active_session && self.user_active
-    }
-
-    /// Mark user session state.
-    pub fn set_user_active(&mut self, active: bool) {
-        self.user_active = active;
+    /// Returns `true` if ambient should pause because a user session is active.
+    pub fn should_pause(&self, user_active: bool) -> bool {
+        self.config.pause_on_active_session && user_active
     }
 
     /// Called when a provider rate limit error occurs.
@@ -461,13 +453,10 @@ mod tests {
             pause_on_active_session: true,
             ..Default::default()
         };
-        let mut scheduler = AdaptiveScheduler::new(config);
+        let scheduler = AdaptiveScheduler::new(config);
 
-        assert!(!scheduler.should_pause());
-        scheduler.set_user_active(true);
-        assert!(scheduler.should_pause());
-        scheduler.set_user_active(false);
-        assert!(!scheduler.should_pause());
+        assert!(!scheduler.should_pause(false));
+        assert!(scheduler.should_pause(true));
     }
 
     #[test]

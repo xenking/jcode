@@ -1,0 +1,659 @@
+//! Server-initiated ("wake") turns for live sessions.
+//!
+//! Several server paths start a full conversation turn in a session without
+//! that session's client sending a message: swarm DM/broadcast wake delivery,
+//! background-task completion wakes, scheduled-task delivery, and post-reload
+//! resume. Those turns must keep the same bookkeeping as client-initiated
+//! turns, otherwise the swarm member status stays "ready/idle" while the agent
+//! is actually streaming and attached TUIs never learn the turn finished.
+//!
+//! This module is the single shared implementation: it marks the member
+//! `running` while the turn streams, flips it back to `ready` (with a
+//! completion report) or `failed` at the end, and fans out a terminal
+//! `Done`/`Error` event (id 0) so attached clients can settle the externally
+//! started turn in their UI.
+
+use super::turn_failover::process_reserved_locked_context_with_server_failover;
+use super::{
+    SwarmEvent, SwarmMember, truncate_detail, update_member_status,
+    update_member_status_with_report,
+};
+use crate::agent::Agent;
+use crate::protocol::ServerEvent;
+use futures::FutureExt;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+#[cfg(test)]
+use tokio::sync::Mutex;
+use tokio::sync::{OwnedMutexGuard, RwLock, broadcast};
+
+use super::SessionAgents;
+
+/// Swarm bookkeeping handles needed to keep member status accurate around a
+/// server-initiated turn.
+#[derive(Clone)]
+pub(super) struct LiveTurnSwarmContext {
+    pub members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+    pub swarms_by_id: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    pub event_history: Arc<RwLock<VecDeque<SwarmEvent>>>,
+    pub event_counter: Arc<AtomicU64>,
+    pub event_tx: broadcast::Sender<SwarmEvent>,
+}
+
+impl LiveTurnSwarmContext {
+    pub(super) fn new(
+        members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+        swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+        event_history: &Arc<RwLock<VecDeque<SwarmEvent>>>,
+        event_counter: &Arc<AtomicU64>,
+        event_tx: &broadcast::Sender<SwarmEvent>,
+    ) -> Self {
+        Self {
+            members: Arc::clone(members),
+            swarms_by_id: Arc::clone(swarms_by_id),
+            event_history: Arc::clone(event_history),
+            event_counter: Arc::clone(event_counter),
+            event_tx: event_tx.clone(),
+        }
+    }
+}
+
+/// How long a wake waits for an agent that holds its lock but runs no turn.
+const IDLE_LOCK_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+const IDLE_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Reserve the agent lock for a wake without queueing behind a running turn.
+///
+/// A client that has only just attached briefly takes the agent lock for its
+/// own bootstrap requests (history, catalog, queue refresh). A wake that lands
+/// in that window used to see "busy" and fall back to a soft interrupt, which an
+/// idle agent never drains, so the wake was lost until the next prompt. The
+/// turn registry knows whether a turn really runs: only then is the lock
+/// treated as busy at once. Otherwise wait a short, bounded grace period.
+async fn lock_idle_agent(
+    session_id: &str,
+    agent: Arc<tokio::sync::Mutex<Agent>>,
+) -> Option<OwnedMutexGuard<Agent>> {
+    let deadline = tokio::time::Instant::now() + IDLE_LOCK_GRACE;
+    loop {
+        if let Ok(guard) = Arc::clone(&agent).try_lock_owned() {
+            return Some(guard);
+        }
+        if crate::turn_cancel_registry::has_active_turn(session_id)
+            || tokio::time::Instant::now() >= deadline
+        {
+            return None;
+        }
+        tokio::time::sleep(IDLE_LOCK_POLL).await;
+    }
+}
+
+/// Reserve the live agent for `session_id` when the session has at least one
+/// live client attachment and its agent is currently idle.
+///
+/// The returned guard *is* the reservation: it stays held until the tracked
+/// turn finishes, so two concurrent wakes cannot both observe the agent as
+/// idle and then serialize behind each other (#1152).
+pub(super) async fn idle_live_agent(
+    session_id: &str,
+    sessions: &SessionAgents,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> Option<OwnedMutexGuard<Agent>> {
+    let agent = super::worker_revive::live_or_revived_agent(session_id, sessions).await?;
+
+    // Headless workers never have a client attachment by design, and members
+    // restored from disk after a server restart carry a closed placeholder
+    // channel. Both are still server-drivable, so they must remain wakeable:
+    // otherwise a wake falls back to a soft-interrupt queue that an idle agent
+    // never drains, and the worker silently stays idle.
+    let can_drive = {
+        let members = swarm_members.read().await;
+        members
+            .get(session_id)
+            .map(|member| {
+                member.is_headless || !member.event_txs.is_empty() || !member.event_tx.is_closed()
+            })
+            .unwrap_or(false)
+    };
+    let agent = lock_idle_agent(session_id, agent).await?;
+    if !can_drive && !agent.restored_from_idle_unload {
+        return None;
+    }
+    // A session that moved to another machine (or a stale copy) cannot run
+    // turns here. Starting one only produces a lease error per wake, so leave
+    // the wake queued for whichever copy is runnable.
+    if agent.session_lease_blocked() {
+        return None;
+    }
+    Some(agent)
+}
+
+/// Content and presentation metadata for a server-initiated turn.
+pub(super) struct LiveTurnInput {
+    pub message: String,
+    pub images: Vec<(String, String)>,
+    pub system_reminder: Option<String>,
+    pub display_role: Option<crate::session::StoredDisplayRole>,
+    pub status_detail: Option<String>,
+}
+
+/// Spawn `message` as a full tracked turn in a live session.
+///
+/// Mirrors the client-initiated turn lifecycle: the swarm member is marked
+/// `running` before the turn starts and `ready` (with a completion report) or
+/// `failed` when it finishes. A synthetic terminal `Done { id: 0 }` (or
+/// `Error { id: 0, .. }`) is fanned out to attached clients so their UI can
+/// finish rendering the externally started turn.
+pub(super) async fn spawn_tracked_live_turn(
+    session_id: &str,
+    agent: OwnedMutexGuard<Agent>,
+    message: String,
+    system_reminder: Option<String>,
+    display_role: Option<crate::session::StoredDisplayRole>,
+    status_detail: Option<String>,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
+    spawn_tracked_live_turn_with_images(
+        session_id,
+        agent,
+        LiveTurnInput {
+            message,
+            images: Vec::new(),
+            system_reminder,
+            display_role,
+            status_detail,
+        },
+        swarm,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn spawn_tracked_live_turn_with_images(
+    session_id: &str,
+    mut agent: OwnedMutexGuard<Agent>,
+    input: LiveTurnInput,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
+    let LiveTurnInput {
+        message,
+        images,
+        system_reminder,
+        display_role,
+        status_detail,
+    } = input;
+    let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
+        return false;
+    };
+    let Ok(turn_lease) = agent.claim_server_turn() else {
+        return false;
+    };
+    if swarm
+        .members
+        .read()
+        .await
+        .get(session_id)
+        .is_some_and(|member| member.report_back_to_session_id.is_some())
+    {
+        agent.tap_inline_output();
+    }
+    update_member_status(
+        session_id,
+        "running",
+        status_detail,
+        &swarm.members,
+        &swarm.swarms_by_id,
+        Some(&swarm.event_history),
+        Some(&swarm.event_counter),
+        Some(&swarm.event_tx),
+    )
+    .await;
+
+    let (fallback, _) = tokio::sync::mpsc::unbounded_channel();
+    let events = super::state::TurnEventChannel::new(
+        session_id.to_string(),
+        Arc::clone(&swarm.members),
+        fallback,
+        &turn_lease,
+    );
+    let event_tx = events.sender();
+    let session_id = session_id.to_string();
+    let (force_handle, force_registration) = futures::future::AbortHandle::new_pair();
+    let force_guard = crate::turn_cancel_registry::register_force_stop(&session_id, force_handle);
+    crate::runtime_activity::spawn_session(&session_id.clone(), async move {
+        let _force_guard = force_guard;
+        let start_message_index = agent.message_count();
+        let pending_queue = agent.soft_interrupt_queue();
+        let outcome = futures::future::Abortable::new(catch_live_turn_panic(async {
+            if !images.is_empty() {
+                return super::turn_failover::process_reserved_locked_message_with_server_failover(
+                    &mut agent,
+                    &turn_lease,
+                    &message,
+                    images,
+                    system_reminder,
+                    event_tx.clone(),
+                )
+                .await;
+            }
+            process_reserved_locked_context_with_server_failover(
+                &mut agent,
+                &turn_lease,
+                &message,
+                system_reminder,
+                display_role.unwrap_or(crate::session::StoredDisplayRole::System),
+                event_tx.clone(),
+            )
+            .await
+        }), force_registration).await;
+        let (result, stop_reason) = match outcome {
+            Ok(result) => result,
+            Err(_) => {
+                for (id, name) in agent.repair_force_stopped_tools(start_message_index) {
+                    let _ = event_tx.send(ServerEvent::ToolDone {
+                        codemode: None,
+                        ask: None,
+                        id,
+                        name,
+                        output: "[Tool stopped by user]".into(),
+                        error: Some("stopped by user".into()),
+                    });
+                }
+                let _ = event_tx.send(ServerEvent::TurnStopped {
+                    reason: crate::protocol::TurnStopReason::Interrupted,
+                    message: "Turn force stopped by user".into(),
+                    provider_stop_reason: None,
+                });
+                let _ = event_tx.send(ServerEvent::Interrupted);
+                (Ok(()), crate::protocol::TurnStopReason::Interrupted)
+            }
+        };
+        let completion_report = agent.recent_assistant_output_tail_after(start_message_index);
+        // Keep the reservation until after the terminal status is published.
+        // Releasing it earlier lets a follow-up wake reserve the agent and
+        // publish `running`, which this turn's later `ready`/`failed` would
+        // then overwrite, hiding the newer turn and suppressing its
+        // coordinator completion notification.
+        let mut reservation = agent;
+        let pending = pending_queue.lock().map(|queue| queue.len()).unwrap_or(0);
+        if pending > 0 {
+            let _ = event_tx.send(ServerEvent::SoftInterruptQueue { pending });
+        }
+        match result {
+            Ok(()) if interrupted_for_reload(&session_id) => {
+                // The reload stopped this turn and persisted an intent so the
+                // next daemon resumes it. A terminal status here would tell
+                // `await_members` the worker finished, and this task keeps
+                // running until the exec replaces the process image.
+                crate::logging::info(&format!(
+                    "Live turn for {session_id} interrupted by reload; leaving status for the recovered turn"
+                ));
+            }
+            Ok(()) => {
+                update_member_status_with_report(
+                    &session_id,
+                    "ready",
+                    None,
+                    completion_report,
+                    &swarm.members,
+                    &swarm.swarms_by_id,
+                    Some(&swarm.event_history),
+                    Some(&swarm.event_counter),
+                    Some(&swarm.event_tx),
+                )
+                .await;
+                let _ = event_tx.send(ServerEvent::Done { id: 0 });
+            }
+            Err(error) => {
+                let message = crate::util::format_error_chain(&error);
+                if let Err(persist_error) = reservation.persist_turn_error(&message) {
+                    crate::logging::error(&format!(
+                        "Could not persist failed live turn for {}: {:#}",
+                        session_id, persist_error
+                    ));
+                }
+                crate::logging::error(&format!(
+                    "Server-initiated turn failed for live session {}: {}",
+                    session_id, message
+                ));
+                update_member_status_with_report(
+                    &session_id,
+                    "failed",
+                    Some(truncate_detail(&error.to_string(), 120)),
+                    completion_report,
+                    &swarm.members,
+                    &swarm.swarms_by_id,
+                    Some(&swarm.event_history),
+                    Some(&swarm.event_counter),
+                    Some(&swarm.event_tx),
+                )
+                .await;
+                let _ = event_tx.send(ServerEvent::TurnStopped {
+                    reason: stop_reason,
+                    message: message.clone(),
+                    provider_stop_reason: None,
+                });
+                let _ = event_tx.send(ServerEvent::Error {
+                    id: 0,
+                    message,
+                    retry_after_secs: None,
+                });
+            }
+        }
+        drop(reservation);
+        events.finish().await;
+        drop(turn_lease);
+    })
+    .is_some()
+}
+
+/// A reload closes admission and persists a recovery intent for every turn it
+/// interrupts before it signals them. Both together mean this turn's tail is
+/// racing the exec, not reporting a finished turn.
+fn interrupted_for_reload(session_id: &str) -> bool {
+    crate::turn_activity::global().snapshot().admissions_closed
+        && super::reload_recovery::has_pending_for_session(session_id)
+}
+
+/// Run `message` immediately as a tracked turn if the session is live and
+/// idle. Returns `true` when the turn was started.
+pub(super) async fn run_live_turn_if_idle(
+    session_id: &str,
+    message: &str,
+    system_reminder: Option<String>,
+    sessions: &SessionAgents,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
+    // A wake that arrives while an update drains waits for it, then starts.
+    crate::turn_activity::global()
+        .wait_new_turns_open(session_id)
+        .await;
+    let Some(agent) = idle_live_agent(session_id, sessions, &swarm.members).await else {
+        return false;
+    };
+    let detail = Some(truncate_detail(message, 120)).filter(|detail| !detail.is_empty());
+    spawn_tracked_live_turn(
+        session_id,
+        agent,
+        message.to_string(),
+        system_reminder,
+        None,
+        detail,
+        swarm,
+    )
+    .await
+}
+
+pub(super) async fn run_live_system_turn_if_idle(
+    session_id: &str,
+    message: &str,
+    sessions: &SessionAgents,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
+    crate::turn_activity::global()
+        .wait_new_turns_open(session_id)
+        .await;
+    let Some(agent) = idle_live_agent(session_id, sessions, &swarm.members).await else {
+        return false;
+    };
+    let detail = Some(truncate_detail(message, 120)).filter(|detail| !detail.is_empty());
+    spawn_tracked_live_turn(
+        session_id,
+        agent,
+        message.to_string(),
+        None,
+        Some(crate::session::StoredDisplayRole::System),
+        detail,
+        swarm,
+    )
+    .await
+}
+
+/// Catch only unwind panics. A killed process cannot emit a trustworthy event.
+async fn catch_live_turn_panic<F>(turn: F) -> (anyhow::Result<()>, crate::protocol::TurnStopReason)
+where
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    use crate::protocol::TurnStopReason;
+    match std::panic::AssertUnwindSafe(turn).catch_unwind().await {
+        Ok(result) => (result, TurnStopReason::Failure),
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            (
+                Err(anyhow::anyhow!("Processing task panicked: {}", message)),
+                TurnStopReason::Crash,
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod stop_reason_tests {
+    use super::catch_live_turn_panic;
+    use crate::protocol::TurnStopReason;
+
+    #[tokio::test]
+    async fn abnormal_stop_classifies_panics_without_parsing_error_strings() {
+        let (result, reason) = catch_live_turn_panic(async { panic!("provider exploded") }).await;
+        assert_eq!(reason, TurnStopReason::Crash);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("provider exploded")
+        );
+        let (result, reason) = catch_live_turn_panic(async {
+            Err(anyhow::anyhow!(
+                "Processing task panicked: just provider text"
+            ))
+        })
+        .await;
+        assert_eq!(reason, TurnStopReason::Failure);
+        assert!(result.is_err());
+        assert!(catch_live_turn_panic(async { Ok(()) }).await.0.is_ok());
+    }
+}
+
+#[cfg(test)]
+#[path = "../../services/background/live_context_tests.rs"]
+mod context_tests;
+
+#[cfg(test)]
+mod durable_error_tests {
+    use super::*;
+    use crate::message::{Message, ToolDefinition};
+    use crate::provider::{EventStream, Provider};
+    use crate::session::Session;
+    use crate::tool::Registry;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    const FAILURE: &str = "invalid_request_error: No tool call found for function call output with call_id call_missing";
+
+    #[derive(Default)]
+    struct FailingProvider(AtomicU64);
+
+    #[async_trait::async_trait]
+    impl Provider for FailingProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!(FAILURE).context("mock HTTP 400"))
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self::default())
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn failed_wake_error_is_durable_before_live_terminal_event() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => crate::env::set_var("JCODE_HOME", value),
+                    None => crate::env::remove_var("JCODE_HOME"),
+                }
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        let provider = Arc::new(FailingProvider::default());
+        let mut agent = Agent::new(provider.clone(), Registry::empty());
+        agent.set_memory_enabled(false);
+        let session_id = agent.session_id().to_string();
+        let agent = Arc::new(Mutex::new(agent));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let member = SwarmMember {
+            session_id: session_id.clone(),
+            event_tx,
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: None,
+            swarm_enabled: true,
+            status: "ready".into(),
+            detail: None,
+            friendly_name: Some("failing-worker".into()),
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".into(),
+            joined_at: Instant::now(),
+            last_status_change: Instant::now(),
+            is_headless: true,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+            task_label: None,
+        };
+        let members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(VecDeque::new()));
+        let event_counter = Arc::new(AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(16);
+        let swarm = LiveTurnSwarmContext::new(
+            &members,
+            &swarms_by_id,
+            &event_history,
+            &event_counter,
+            &swarm_event_tx,
+        );
+        let accepted = agent.lock().await.claim_server_turn().unwrap();
+        assert!(
+            !spawn_tracked_live_turn(
+                &session_id,
+                agent.clone().lock_owned().await,
+                "must not compete".into(),
+                None,
+                Some(crate::session::StoredDisplayRole::System),
+                None,
+                swarm.clone(),
+            )
+            .await,
+            "system display-role path must respect the accepted turn"
+        );
+        assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+        drop(accepted);
+        assert!(
+            spawn_tracked_live_turn(
+                &session_id,
+                agent.clone().lock_owned().await,
+                "wake worker".into(),
+                None,
+                None,
+                None,
+                swarm,
+            )
+            .await
+        );
+
+        let mut stopped = false;
+        let mut wake_entries = 0;
+        let error_message = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = event_rx.recv().await.expect("live turn event stream");
+                let payload = match event {
+                    ServerEvent::TurnEvent { event, .. } => *event,
+                    event => event,
+                };
+                match payload {
+                    ServerEvent::SoftInterruptInjected {
+                        content,
+                        display_role,
+                        ..
+                    } => {
+                        assert_eq!(content, "wake worker");
+                        assert_eq!(display_role.as_deref(), Some("system"));
+                        assert!(!stopped, "input delivery must precede terminal events");
+                        wake_entries += 1;
+                    }
+                    ServerEvent::TurnStopped {
+                        reason, message, ..
+                    } => {
+                        assert_eq!(reason, crate::protocol::TurnStopReason::Failure);
+                        assert!(message.contains(FAILURE));
+                        stopped = true;
+                    }
+                    ServerEvent::Error { id, message, .. } => {
+                        assert_eq!(id, 0);
+                        break message;
+                    }
+                    ServerEvent::Done { .. } => panic!("failed live turn emitted Done"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("failed live turn must terminate");
+        assert!(stopped);
+        assert_eq!(wake_entries, 1);
+        assert_eq!(error_message, format!("mock HTTP 400: {FAILURE}"));
+        assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+        assert_eq!(members.read().await[&session_id].status, "failed");
+
+        // Loading as soon as Error arrives must already show the error. This
+        // exercises the actual spawn path, not only the persistence helper.
+        let loaded = Session::load(&session_id).unwrap();
+        assert_eq!(loaded.replay_events().len(), 1);
+        assert!(
+            !serde_json::to_string(&loaded.cloned_messages())
+                .unwrap()
+                .contains(FAILURE)
+        );
+        let history = crate::session::render_messages(&loaded);
+        let failure = history
+            .iter()
+            .position(|message| message.role == "error")
+            .unwrap();
+        assert_eq!(history[failure].content, error_message);
+        assert_eq!(history[failure - 1].content, "wake worker");
+        assert_eq!(
+            history
+                .iter()
+                .filter(|message| message.role == "error")
+                .count(),
+            1
+        );
+        // Join the agent reservation before dropping the isolated test home.
+        drop(agent.lock().await);
+    }
+}

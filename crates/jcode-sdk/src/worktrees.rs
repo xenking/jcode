@@ -159,7 +159,8 @@ mod tests {
     use tempfile::TempDir;
 
     fn repo() -> (TempDir, String) {
-        let temp = tempfile::tempdir().unwrap();
+        // git reports canonical paths; macOS TMPDIR is under the /var symlink.
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let path = temp.path().join("repo with spaces");
         std::fs::create_dir(&path).unwrap();
         let path = path.to_str().unwrap().to_owned();

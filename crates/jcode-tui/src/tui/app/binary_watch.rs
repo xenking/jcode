@@ -22,6 +22,7 @@ pub(super) fn rearm() {
     PENDING.store(true, Ordering::Release);
 }
 
+#[allow(clippy::needless_return)] // The return is required by the Linux implementation.
 pub(super) fn ensure_started() {
     if STARTED.swap(true, Ordering::AcqRel) {
         return;

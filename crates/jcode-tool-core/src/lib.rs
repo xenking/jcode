@@ -119,6 +119,23 @@ impl ToolContext {
         }
     }
 
+    /// The top-level tool invocation this call belongs to.
+    ///
+    /// [`Self::for_subcall`] composes ids as `"{parent_len}:{parent}:{child}"`,
+    /// so the outermost id is recoverable without a second field. A direct model
+    /// call is its own root; every sub-call of one `batch` or `codemode`
+    /// invocation resolves to the same root. Callers that need "did the model
+    /// issue a new call, or is this a sibling inside the one it already made?"
+    /// compare roots, not ids: sibling sub-calls of one invocation have
+    /// different ids but one root.
+    pub fn root_invocation_id(&self) -> &str {
+        let mut root = self.tool_call_id.as_str();
+        while let Some(parent) = parent_tool_call_id(root) {
+            root = parent;
+        }
+        root
+    }
+
     pub fn resolve_path(&self, path: &Path) -> PathBuf {
         if path.is_absolute() {
             path.to_path_buf()
@@ -130,6 +147,42 @@ impl ToolContext {
     }
 }
 
+/// Decode `"{parent_len}:{parent}:{child}"` back to its parent, if the id has
+/// the shape [`ToolContext::for_subcall`] produces.
+fn parent_tool_call_id(tool_call_id: &str) -> Option<&str> {
+    let (digits, rest) = tool_call_id.split_at(
+        tool_call_id
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(tool_call_id.len()),
+    );
+    // Plain or malformed provider IDs are roots, not failed subcalls.
+    let parent_len: usize = digits.parse().ok()?;
+    let rest = rest.strip_prefix(':')?;
+    let parent = rest.get(..parent_len)?;
+    rest.get(parent_len..)?.strip_prefix(':')?;
+    Some(parent)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionClass {
+    ParallelRead,
+    Barrier,
+}
+
+/// An MCP call waiting on a human decision, see [`Tool::mcp_approval`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpApprovalRequest {
+    /// Configured server name.
+    pub server: String,
+    /// Raw MCP tool name, as the server lists it.
+    pub tool: String,
+    /// The call's arguments, shown to the user as they will be sent.
+    pub arguments: Value,
+    /// Directory the server's project-local config was resolved against; where
+    /// an "always allow" answer finds the file to record itself in.
+    pub project_dir: Option<std::path::PathBuf>,
+}
+
 /// A tool that can be executed by the agent.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -138,6 +191,14 @@ pub trait Tool: Send + Sync {
 
     /// Original MCP identity, independent of the provider-facing registry alias.
     fn mcp_identity(&self) -> Option<(&str, &str)> {
+        None
+    }
+
+    /// Set when this call must not run without a human yes: the harness asks
+    /// the user before dispatching it and refuses it when nobody can answer.
+    /// Enforced in the registry, so every caller (direct, `batch`, `codemode`)
+    /// goes through the same gate.
+    async fn mcp_approval(&self, _input: &Value) -> Option<McpApprovalRequest> {
         None
     }
 
@@ -152,6 +213,24 @@ pub trait Tool: Send + Sync {
 
     /// JSON Schema for the input parameters.
     fn parameters_schema(&self) -> Value;
+
+    /// JSON Schema of the typed result this tool returns in
+    /// [`ToolOutput::structured`], if it has one. Codemode declares such tools
+    /// as `Promise<XOutput>`; every other tool stays `Promise<any>`.
+    fn output_schema(&self) -> Option<Value> {
+        None
+    }
+
+    /// Behaviour hints a server declared for this tool (MCP `annotations`), as
+    /// JSON. Part of a proxy's identity: a refresh must replace a proxy whose
+    /// hints changed, because approval decisions read them.
+    fn mcp_annotations(&self) -> Option<Value> {
+        None
+    }
+
+    fn execution_class(&self, _input: &Value, _ctx: &ToolContext) -> ExecutionClass {
+        ExecutionClass::Barrier
+    }
 
     /// Execute the tool with the given input.
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput>;
@@ -170,6 +249,18 @@ pub trait Tool: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_parent_lengths_never_panic() {
+        for id in [
+            format!("{}:a", usize::MAX),
+            "1:é:child".into(),
+            "3:é".into(),
+        ] {
+            assert!(super::parent_tool_call_id(&id).is_none());
+        }
+        assert_eq!(super::parent_tool_call_id("2:é:child"), Some("é"));
+    }
 
     #[test]
     fn subcall_ids_are_parent_scoped_and_retry_stable() {
@@ -199,6 +290,39 @@ mod tests {
         assert_ne!(first.tool_call_id, second.tool_call_id);
         assert_eq!(first.session_id, second.session_id);
         assert_eq!(first.message_id, second.message_id);
+    }
+
+    #[test]
+    fn root_invocation_id_collapses_subcall_chains() {
+        let context = ToolContext {
+            session_id: "same-session".into(),
+            message_id: "same-message".into(),
+            tool_call_id: "model-call".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::AgentTurn,
+        };
+        // A direct call is its own root.
+        assert_eq!(context.root_invocation_id(), "model-call");
+
+        // Siblings of one invocation share a root even though their ids differ.
+        let first = context.for_subcall("batch-1-tool".into());
+        let second = context.for_subcall("batch-2-tool".into());
+        assert_ne!(first.tool_call_id, second.tool_call_id);
+        assert_eq!(first.root_invocation_id(), "model-call");
+        assert_eq!(second.root_invocation_id(), "model-call");
+
+        // Nested sub-calls still resolve to the model's call.
+        let nested = first.for_subcall("codemode-1-tool".into());
+        assert_eq!(nested.root_invocation_id(), "model-call");
+
+        // An id that is not in the composed shape is left alone.
+        let mut plain = context.clone();
+        plain.tool_call_id = "call_1".into();
+        assert_eq!(plain.root_invocation_id(), "call_1");
+        plain.tool_call_id = "3:abc".into();
+        assert_eq!(plain.root_invocation_id(), "3:abc");
     }
 
     #[test]

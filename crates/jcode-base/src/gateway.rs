@@ -26,6 +26,8 @@ use crate::logging;
 mod auth;
 pub mod control;
 mod registry;
+#[cfg(test)]
+mod scoped_tests;
 use auth::{
     AuthorizedDevice, WsAuth, WsAuthSource, authorize_ws_device, extract_ws_auth, ws_error_response,
 };
@@ -35,31 +37,29 @@ pub use control::{
     PairingInvite, RemoteCommand, RemoteStatus, ToggleOutcome, create_pairing_invite,
     parse_remote_command, revoke_device, set_gateway_enabled,
 };
-pub use jcode_gateway_types::{PairedDevice, PairingCode};
+pub use jcode_gateway_types::{DeviceScope, PairedDevice, PairingCode};
 pub use registry::DeviceRegistry;
 
 /// Default gateway port ("jc" on phone keypad = 52, but we use 7643)
 pub const DEFAULT_PORT: u16 = 7643;
 const WEBSOCKET_KEEPALIVE_INTERVAL_SECS: u64 = 20;
+type PairAttempts = Arc<tokio::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>;
 
-/// Gateway configuration
-#[derive(Debug, Clone)]
-pub struct GatewayConfig {
-    /// TCP port to listen on
-    pub port: u16,
-    /// Bind address (default: 0.0.0.0 for Tailscale access)
-    pub bind_addr: String,
-    /// Whether gateway is enabled
-    pub enabled: bool,
+#[derive(Clone)]
+struct HarnessConnectionState {
+    enabled: bool,
+    daemon_socket: std::path::PathBuf,
+    slots: Arc<tokio::sync::Semaphore>,
 }
 
-impl Default for GatewayConfig {
-    fn default() -> Self {
-        Self {
-            port: DEFAULT_PORT,
-            bind_addr: "0.0.0.0".to_string(),
-            enabled: false,
-        }
+pub use crate::config::GatewayConfig;
+
+/// The configured limit, with 0 meaning the default and a ceiling that keeps a
+/// typo from exhausting the daemon's file descriptors.
+fn harness_connection_limit(configured: usize) -> usize {
+    match configured {
+        0 => jcode_config_types::DEFAULT_MAX_HARNESS_CONNECTIONS,
+        limit => limit.min(256),
     }
 }
 
@@ -78,20 +78,44 @@ impl Default for GatewayConfig {
 pub async fn run_gateway(
     config: GatewayConfig,
     client_tx: tokio::sync::mpsc::UnboundedSender<GatewayClient>,
+    daemon_socket: std::path::PathBuf,
 ) -> Result<()> {
     let addr = format!("{}:{}", config.bind_addr, config.port);
     let listener = TcpListener::bind(&addr).await?;
+    let harness_enabled = config.harness_enabled && listener.local_addr()?.ip().is_loopback();
+    if config.harness_enabled && !harness_enabled {
+        logging::warn("Harness gateway disabled: listener must bind to a loopback address");
+    }
     logging::info(&format!("WebSocket gateway listening on {}", addr));
 
     let registry = Arc::new(tokio::sync::RwLock::new(DeviceRegistry::load()));
+    let pair_attempts: PairAttempts = Arc::default();
+    let harness = HarnessConnectionState {
+        enabled: harness_enabled,
+        daemon_socket,
+        slots: Arc::new(tokio::sync::Semaphore::new(harness_connection_limit(
+            config.max_harness_connections,
+        ))),
+    };
 
     loop {
         let (tcp_stream, peer_addr) = listener.accept().await?;
         let registry = Arc::clone(&registry);
         let client_tx = client_tx.clone();
+        let pair_attempts = Arc::clone(&pair_attempts);
+        let harness = harness.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(tcp_stream, peer_addr, registry, client_tx).await {
+            if let Err(e) = handle_connection(
+                tcp_stream,
+                peer_addr,
+                registry,
+                client_tx,
+                pair_attempts,
+                harness,
+            )
+            .await
+            {
                 logging::error(&format!(
                     "Gateway connection error from {}: {}",
                     peer_addr, e
@@ -111,9 +135,23 @@ async fn handle_connection(
     peer_addr: SocketAddr,
     registry: Arc<tokio::sync::RwLock<DeviceRegistry>>,
     client_tx: tokio::sync::mpsc::UnboundedSender<GatewayClient>,
+    pair_attempts: PairAttempts,
+    harness: HarnessConnectionState,
 ) -> Result<()> {
-    let mut peek_buf = [0u8; 2048];
-    let n = tcp_stream.peek(&mut peek_buf).await?;
+    let mut peek_buf = [0u8; 16384];
+    let n = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let n = tcp_stream.peek(&mut peek_buf).await?;
+            if n == 0 || find_header_end(&peek_buf[..n]).is_some() || n == peek_buf.len() {
+                return Ok::<usize, std::io::Error>(n);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    if n == 0 || find_header_end(&peek_buf[..n]).is_none() {
+        anyhow::bail!("Incomplete gateway request headers");
+    }
     let request_head = String::from_utf8_lossy(&peek_buf[..n]);
 
     let is_websocket = request_head.lines().any(|line| {
@@ -122,9 +160,25 @@ async fn handle_connection(
     });
 
     if is_websocket {
-        handle_ws_connection(tcp_stream, peer_addr, registry, client_tx).await
+        handle_ws_connection(
+            tcp_stream,
+            peer_addr,
+            registry,
+            client_tx,
+            harness.enabled,
+            harness.daemon_socket,
+            harness.slots,
+        )
+        .await
     } else {
-        handle_http(tcp_stream, peer_addr, registry).await
+        handle_http(
+            tcp_stream,
+            peer_addr,
+            registry,
+            harness.enabled,
+            pair_attempts,
+        )
+        .await
     }
 }
 
@@ -148,20 +202,31 @@ async fn handle_ws_connection(
     peer_addr: SocketAddr,
     registry: Arc<tokio::sync::RwLock<DeviceRegistry>>,
     client_tx: tokio::sync::mpsc::UnboundedSender<GatewayClient>,
+    harness_enabled: bool,
+    daemon_socket: std::path::PathBuf,
+    harness_slots: Arc<tokio::sync::Semaphore>,
 ) -> Result<()> {
     // Perform WebSocket handshake with a callback to inspect headers.
     // Prefer Authorization headers, but continue accepting ?token= for browser clients.
     // Token validation happens HERE, before the handshake completes, so
     // revoked/unknown tokens receive a proper 401 instead of a silent
     // accept-then-drop (which clients cannot distinguish from network flakes).
-    let auth = Arc::new(std::sync::Mutex::new(None::<(WsAuth, AuthorizedDevice)>));
+    let auth = Arc::new(std::sync::Mutex::new(
+        None::<(
+            WsAuth,
+            AuthorizedDevice,
+            bool,
+            Option<tokio::sync::OwnedSemaphorePermit>,
+        )>,
+    ));
     let auth_cb = Arc::clone(&auth);
 
     let ws_stream = tokio_tungstenite::accept_hdr_async(
         tcp_stream,
         |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
          response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-            if request.uri().path() != "/ws" {
+            let harness = request.uri().path() == "/harness/v1" && harness_enabled;
+            if request.uri().path() != "/ws" && !harness {
                 return Err(ws_error_response(
                     404,
                     "Not Found",
@@ -170,18 +235,54 @@ async fn handle_ws_connection(
             }
 
             let ws_auth = extract_ws_auth(request)?;
+            if harness
+                && (ws_auth.source != WsAuthSource::Header || request.uri().query().is_some())
+            {
+                return Err(ws_error_response(
+                    401,
+                    "Unauthorized",
+                    "Harness requires Bearer authorization",
+                ));
+            }
             // Reload from disk to pick up newly paired or revoked devices.
-            let device = authorize_ws_device(&DeviceRegistry::load(), &ws_auth.token)?;
+            let registry = DeviceRegistry::load();
+            let device = authorize_ws_device(&registry, &ws_auth.token)?;
+            let expected = if harness {
+                jcode_gateway_types::DeviceScope::Harness
+            } else {
+                jcode_gateway_types::DeviceScope::Phone
+            };
+            if registry
+                .validate_token(&ws_auth.token)
+                .is_none_or(|device| device.scope != expected)
+            {
+                return Err(ws_error_response(401, "Unauthorized", "Wrong token scope"));
+            }
+            let permit = if harness {
+                Some(
+                    Arc::clone(&harness_slots)
+                        .try_acquire_owned()
+                        .map_err(|_| {
+                            ws_error_response(
+                                503,
+                                "Service Unavailable",
+                                "Harness connection limit reached",
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
             let mut guard = auth_cb
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *guard = Some((ws_auth, device));
+            *guard = Some((ws_auth, device, harness, permit));
             Ok(response)
         },
     )
     .await?;
 
-    let (auth, device) = auth
+    let (auth, device, harness, _permit) = auth
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take()
@@ -198,6 +299,7 @@ async fn handle_ws_connection(
 
     {
         let mut reg = registry.write().await;
+        let _lock = DeviceRegistry::lock_for_update()?;
         // Reload from disk so the shared registry matches what we validated.
         *reg = DeviceRegistry::load();
         reg.touch_device(&token);
@@ -213,11 +315,39 @@ async fn handle_ws_connection(
         .map_err(|e| anyhow::anyhow!("Failed to create socket pair: {}", e))?;
 
     // Send the server-side stream to the main server loop for handle_client
-    client_tx.send(GatewayClient {
-        stream: server_stream,
-        device_name: device_name.clone(),
-        device_id,
-    })?;
+    let harness_task = if harness {
+        let (read, write) = server_stream.into_split();
+        let device = device_name.clone();
+        Some(tokio::spawn(async move {
+            // The client only sees the stream close: say why in the daemon log.
+            let run = jcode_harness_api_server::run_bridge_stream(read, write, daemon_socket);
+            match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    logging::warn(&format!(
+                        "Gateway: harness stream for {device} ended: {error:#}"
+                    ));
+                }
+                Err(panic) => {
+                    let what = panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown panic");
+                    logging::error(&format!(
+                        "Gateway: harness stream for {device} panicked: {what}"
+                    ));
+                }
+            }
+        }))
+    } else {
+        client_tx.send(GatewayClient {
+            stream: server_stream,
+            device_name: device_name.clone(),
+            device_id,
+        })?;
+        None
+    };
 
     // Bridge WebSocket frames <-> newline-delimited JSON on the bridge stream
     let (ws_sink, ws_source) = ws_stream.split();
@@ -308,15 +438,37 @@ async fn handle_ws_connection(
     tokio::pin!(unix_to_ws);
     tokio::pin!(keepalive);
 
+    let revoked = async {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let expected = if harness {
+                jcode_gateway_types::DeviceScope::Harness
+            } else {
+                jcode_gateway_types::DeviceScope::Phone
+            };
+            if DeviceRegistry::load()
+                .validate_token(&token)
+                .is_none_or(|device| device.scope != expected)
+            {
+                break;
+            }
+        }
+    };
+
     tokio::select! {
         _ = &mut ws_to_unix => {}
         _ = &mut unix_to_ws => {}
         _ = &mut keepalive => {}
+        _ = revoked => {}
     }
 
     ws_to_unix.abort();
     unix_to_ws.abort();
     keepalive.abort();
+    if let Some(task) = harness_task {
+        task.abort();
+    }
 
     logging::info(&format!("Gateway: {} disconnected", device_name));
     Ok(())
@@ -344,6 +496,8 @@ async fn handle_http(
     mut tcp_stream: tokio::net::TcpStream,
     peer_addr: SocketAddr,
     registry: Arc<tokio::sync::RwLock<DeviceRegistry>>,
+    harness_enabled: bool,
+    pair_attempts: PairAttempts,
 ) -> Result<()> {
     let mut buf = vec![0u8; 8192];
     let mut filled = 0usize;
@@ -420,6 +574,7 @@ async fn handle_http(
                 "status": "ok",
                 "version": jcode_build_meta::version(),
                 "gateway": true,
+                "harness_v1": harness_enabled,
                 "working_dir": default_client_working_dir(),
             });
             http_response(200, "OK", &body.to_string())
@@ -428,7 +583,7 @@ async fn handle_http(
         ("POST", "/pair") => {
             // Extract JSON body (after \r\n\r\n)
             let body_str = request.split("\r\n\r\n").nth(1).unwrap_or("");
-            handle_pair_request(body_str, &registry).await
+            handle_pair_request(body_str, &registry, harness_enabled, &pair_attempts).await
         }
 
         ("OPTIONS", _) => {
@@ -471,6 +626,8 @@ async fn handle_http(
 async fn handle_pair_request(
     body: &str,
     registry: &Arc<tokio::sync::RwLock<DeviceRegistry>>,
+    harness_enabled: bool,
+    pair_attempts: &PairAttempts,
 ) -> Vec<u8> {
     #[derive(serde::Deserialize)]
     struct PairRequest {
@@ -478,6 +635,8 @@ async fn handle_pair_request(
         device_id: String,
         device_name: String,
         apns_token: Option<String>,
+        #[serde(default)]
+        scope: jcode_gateway_types::DeviceScope,
     }
 
     let req: PairRequest = match serde_json::from_str(body) {
@@ -488,20 +647,55 @@ async fn handle_pair_request(
         }
     };
 
+    if req.scope == jcode_gateway_types::DeviceScope::Harness && !harness_enabled {
+        return http_response(
+            403,
+            "Forbidden",
+            r#"{"error":"Harness requires a loopback listener"}"#,
+        );
+    }
+
+    {
+        let mut attempts = pair_attempts.lock().await;
+        let now = std::time::Instant::now();
+        while attempts
+            .front()
+            .is_some_and(|time| now.duration_since(*time) >= Duration::from_secs(60))
+        {
+            attempts.pop_front();
+        }
+        if attempts.len() >= 10 {
+            return http_response(
+                429,
+                "Too Many Requests",
+                r#"{"error":"Too many pairing attempts"}"#,
+            );
+        }
+        attempts.push_back(now);
+    }
+
     let mut reg = registry.write().await;
+    let Ok(_lock) = DeviceRegistry::lock_for_update() else {
+        return http_response(
+            500,
+            "Internal Server Error",
+            r#"{"error":"Pairing registry unavailable"}"#,
+        );
+    };
 
     // Reload from disk - pairing codes are generated by `jcode pair` CLI
     *reg = DeviceRegistry::load();
 
-    if !reg.validate_code(&req.code) {
+    if !reg.validate_code_scoped(&req.code, req.scope) {
         let body = serde_json::json!({"error": "Invalid or expired pairing code"});
         return http_response(401, "Unauthorized", &body.to_string());
     }
 
-    let token = reg.pair_device(
+    let token = reg.pair_device_scoped(
         req.device_id.clone(),
         req.device_name.clone(),
         req.apns_token,
+        req.scope,
     );
 
     logging::info(&format!(

@@ -74,6 +74,27 @@ async fn cloud_import_replaces_live_daemon_cached_bearer() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn unbound_runtime_adopts_rotated_login_without_waiting_for_cached_expiry() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let _sandbox = AccountSandbox::new();
+    let label = save_account("rotation", "old-access", "old-refresh");
+    let provider = AnthropicProvider::new();
+    provider
+        .set_credential_mode(AnthropicCredentialMode::OAuth)
+        .unwrap();
+    assert_eq!(provider.oauth_account_label(), None);
+    assert_eq!(provider.get_access_token().await.unwrap().0, "old-access");
+    auth::refresh_state::record_permanent_rejection("claude", "old-refresh", "invalid_grant")
+        .unwrap();
+    save_account(&label, "rotated-access", "rotated-refresh");
+    assert_eq!(
+        provider.get_access_token().await.unwrap().0,
+        "rotated-access"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn active_oauth_email_follows_cached_unbound_credentials_not_global_account() {
     let _lock = jcode_base::storage::lock_test_env();
     let _sandbox = AccountSandbox::new();

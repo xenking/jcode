@@ -72,8 +72,7 @@ fn test_overnight_start_runs_as_visible_local_turn() {
         );
         let last_message = app
             .session
-            .messages
-            .last()
+            .last_message()
             .expect("overnight prompt message");
         assert!(last_message.content.iter().any(|block| matches!(
             block,

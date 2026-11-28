@@ -4,6 +4,10 @@
 //! the `tools` object, so the model writes against a typed API instead of raw
 //! JSON. Declarations are generated lazily (`types()` / `describeTool`) so a
 //! large MCP catalog never inflates the tool description itself.
+//!
+//! Inputs always come from the tool's parameter schema. Results are typed only
+//! when the tool declares an output schema (an MCP `outputSchema`); every other
+//! tool keeps `Promise<any>`, because its text result has no declared shape.
 
 use super::ToolInfo;
 use serde_json::Value;
@@ -25,9 +29,9 @@ fn property_key(name: &str) -> String {
     }
 }
 
-/// PascalCase type name for a tool's input, e.g. `mcp__fs__read-file` ->
-/// `McpFsReadFileInput`.
-pub fn input_type_name(tool: &str) -> String {
+/// PascalCase stem shared by a tool's type names, e.g. `mcp__fs__read-file` ->
+/// `McpFsReadFile`.
+fn type_stem(tool: &str) -> String {
     let mut out = String::new();
     for part in tool.split(|c: char| !c.is_ascii_alphanumeric()) {
         let mut chars = part.chars();
@@ -39,8 +43,18 @@ pub fn input_type_name(tool: &str) -> String {
     if out.is_empty() || out.starts_with(|c: char| c.is_ascii_digit()) {
         out.insert(0, 'T');
     }
-    out.push_str("Input");
     out
+}
+
+/// Type name for a tool's input, e.g. `mcp__fs__read-file` ->
+/// `McpFsReadFileInput`.
+pub fn input_type_name(tool: &str) -> String {
+    format!("{}Input", type_stem(tool))
+}
+
+/// Type name for a tool's typed result, e.g. `McpFsReadFileOutput`.
+pub fn output_type_name(tool: &str) -> String {
+    format!("{}Output", type_stem(tool))
 }
 
 fn comment(text: &str, indent: &str) -> String {
@@ -61,10 +75,20 @@ fn comment(text: &str, indent: &str) -> String {
 
 /// Render a JSON schema as a TypeScript type expression.
 pub fn schema_to_ts(schema: &Value) -> String {
-    render(schema, 0)
+    render(schema, schema, 0)
 }
 
-fn render(schema: &Value, depth: usize) -> String {
+/// Resolve a local `$ref` (`#/$defs/Name`, `#/definitions/Name`, `#`) against
+/// the schema's root. Remote or malformed references stay unresolved.
+fn resolve_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    let pointer = reference.strip_prefix('#')?;
+    if pointer.is_empty() {
+        return Some(root);
+    }
+    root.pointer(pointer)
+}
+
+fn render(schema: &Value, root: &Value, depth: usize) -> String {
     if depth > MAX_DEPTH {
         return "unknown".into();
     }
@@ -75,6 +99,12 @@ fn render(schema: &Value, depth: usize) -> String {
             "unknown".into()
         };
     };
+    if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
+        // Recursive schemas run into MAX_DEPTH and end in `unknown`.
+        return resolve_ref(root, reference)
+            .map(|target| render(target, root, depth + 1))
+            .unwrap_or_else(|| "unknown".into());
+    }
     if let Some(values) = obj.get("enum").and_then(Value::as_array) {
         let parts: Vec<String> = values
             .iter()
@@ -89,14 +119,20 @@ fn render(schema: &Value, depth: usize) -> String {
     }
     for key in ["anyOf", "oneOf"] {
         if let Some(variants) = obj.get(key).and_then(Value::as_array) {
-            let parts: Vec<String> = variants.iter().map(|v| render(v, depth + 1)).collect();
+            let parts: Vec<String> = variants
+                .iter()
+                .map(|v| render(v, root, depth + 1))
+                .collect();
             if !parts.is_empty() {
                 return parts.join(" | ");
             }
         }
     }
     if let Some(variants) = obj.get("allOf").and_then(Value::as_array) {
-        let parts: Vec<String> = variants.iter().map(|v| render(v, depth + 1)).collect();
+        let parts: Vec<String> = variants
+            .iter()
+            .map(|v| render(v, root, depth + 1))
+            .collect();
         if !parts.is_empty() {
             return parts.join(" & ");
         }
@@ -108,7 +144,7 @@ fn render(schema: &Value, depth: usize) -> String {
             .map(|t| {
                 let mut single = obj.clone();
                 single.insert("type".into(), t.clone());
-                render(&Value::Object(single), depth + 1)
+                render(&Value::Object(single), root, depth + 1)
             })
             .collect();
         return parts.join(" | ");
@@ -121,7 +157,7 @@ fn render(schema: &Value, depth: usize) -> String {
         Some("array") => {
             let item = obj
                 .get("items")
-                .map(|i| render(i, depth + 1))
+                .map(|i| render(i, root, depth + 1))
                 .unwrap_or_else(|| "unknown".into());
             if item.contains(' ') {
                 format!("Array<{item}>")
@@ -130,13 +166,13 @@ fn render(schema: &Value, depth: usize) -> String {
             }
         }
         Some("object") | None if obj.contains_key("properties") || ty.is_some() => {
-            render_object(obj, depth)
+            render_object(obj, root, depth)
         }
         _ => "unknown".into(),
     }
 }
 
-fn render_object(obj: &serde_json::Map<String, Value>, depth: usize) -> String {
+fn render_object(obj: &serde_json::Map<String, Value>, root: &Value, depth: usize) -> String {
     let required: Vec<&str> = obj
         .get("required")
         .and_then(Value::as_array)
@@ -157,7 +193,7 @@ fn render_object(obj: &serde_json::Map<String, Value>, depth: usize) -> String {
             out.push_str(&format!(
                 "{indent}{}{optional}: {};\n",
                 property_key(name),
-                render(prop, depth + 1)
+                render(prop, root, depth + 1)
             ));
         }
     }
@@ -166,7 +202,7 @@ fn render_object(obj: &serde_json::Map<String, Value>, depth: usize) -> String {
         Some(extra @ Value::Object(_)) => {
             out.push_str(&format!(
                 "{indent}[key: string]: {};\n",
-                render(extra, depth + 1)
+                render(extra, root, depth + 1)
             ));
         }
         _ if obj.get("properties").is_none() => {
@@ -189,9 +225,17 @@ pub fn declarations<'a>(tools: impl IntoIterator<Item = &'a ToolInfo>) -> String
             "type {type_name} = {};\n",
             schema_to_ts(&tool.input_schema)
         ));
+        let result = match &tool.output_schema {
+            Some(schema) => {
+                let output_name = output_type_name(&tool.name);
+                types.push_str(&format!("type {output_name} = {};\n", schema_to_ts(schema)));
+                output_name
+            }
+            None => "any".to_string(),
+        };
         members.push_str(&comment(first_paragraph(&tool.description), "  "));
         members.push_str(&format!(
-            "  {}(args: {type_name}): Promise<any>;\n",
+            "  {}(args: {type_name}): Promise<{result}>;\n",
             property_key(&tool.name)
         ));
     }

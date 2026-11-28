@@ -12,11 +12,28 @@ pub(super) fn usage_percent_from_used_limit(used: f64, limit: f64) -> f32 {
     ((used.max(0.0) / limit) * 100.0) as f32
 }
 
+/// The balance first, worded as what is left, like the credits line.
+fn key_limit_line(remaining: f64, limit: f64) -> String {
+    format!("${remaining:.2} left of ${limit:.2}")
+}
+
 pub(super) fn usage_percent_from_remaining_limit(remaining: f64, limit: f64) -> f32 {
     if !remaining.is_finite() || !limit.is_finite() || limit <= 0.0 {
         return 0.0;
     }
     usage_percent_from_used_limit((limit - remaining).max(0.0), limit)
+}
+
+pub(super) fn set_anthropic_banked_status(
+    report: &mut ProviderUsage,
+    banked: Option<AnthropicBankedResets>,
+) {
+    if banked.is_none() {
+        report
+            .extra_info
+            .push(("Banked resets".into(), "Unknown".into()));
+    }
+    report.anthropic_banked_resets = banked;
 }
 
 pub(super) async fn fetch_anthropic_usage_for_token(
@@ -55,7 +72,9 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
     let usage = match cached {
         Some(data) => Ok(data),
-        None => fetch_anthropic_usage_data(access_token.clone(), cache_key).await,
+        None => {
+            fetch_anthropic_usage_data(access_token.clone(), cache_key, Some(&account_label)).await
+        }
     };
     match usage {
         Ok(data) => {
@@ -73,8 +92,26 @@ pub(super) async fn fetch_anthropic_usage_for_token(
                     &access_token,
                     stored.then_some(account_label.as_str()),
                 );
-                super::banked::record_anthropic_offer(&account_label, offer.as_ref());
+                let label = stored.then_some(account_label.as_str());
+                let mut banked =
+                    super::anthropic_banked::cached_banked_resets(&access_token, label);
+                if banked.is_none() {
+                    let key = anthropic_usage_cache_key(&access_token, label);
+                    super::imported_banked::import_for_account(&access_token, &key, label).await;
+                    banked = super::anthropic_banked::cached_banked_resets(&access_token, label);
+                }
+                if banked.is_none()
+                    && let Some(reason) =
+                        super::anthropic_banked::not_evaluated_reason(&access_token, label)
+                {
+                    // Unknown, not zero: say why instead of showing nothing.
+                    report.extra_info.push((
+                        "Saved resets".into(),
+                        format!("not evaluated for this client ({reason})"),
+                    ));
+                }
                 report.anthropic_limit_reset = offer;
+                set_anthropic_banked_status(&mut report, banked);
                 if ineligible {
                     report
                         .extra_info
@@ -149,6 +186,22 @@ pub(super) async fn fetch_openai_usage_report() -> Option<ProviderUsage> {
 
 pub(super) async fn fetch_openai_usage_for_account(
     display_name: String,
+    creds: auth::codex::CodexCredentials,
+    account_label: Option<&str>,
+) -> ProviderUsage {
+    fetch_openai_usage_at(
+        super::openai_seat::API_BASE,
+        display_name,
+        creds,
+        account_label,
+    )
+    .await
+}
+
+/// [`fetch_openai_usage_for_account`] against another ChatGPT API root.
+pub(super) async fn fetch_openai_usage_at(
+    api_base: &str,
+    display_name: String,
     mut creds: auth::codex::CodexCredentials,
     account_label: Option<&str>,
 ) -> ProviderUsage {
@@ -221,10 +274,19 @@ pub(super) async fn fetch_openai_usage_for_account(
     }
 
     let probe_started = Instant::now();
-    let client = crate::provider::shared_http_client();
+    let client = match crate::egress::client("openai", account_label).await {
+        Ok(client) => client,
+        Err(error) => {
+            return ProviderUsage {
+                provider_name: display_name,
+                error: Some(error.to_string()),
+                ..Default::default()
+            };
+        }
+    };
     let request = || {
         let mut builder = client
-            .get(OPENAI_USAGE_URL)
+            .get(format!("{api_base}/wham/usage"))
             .header("Accept", "application/json")
             .header("Authorization", format!("Bearer {}", creds.access_token));
         if let Some(ref account_id) = creds.account_id {
@@ -350,11 +412,19 @@ pub(super) async fn fetch_openai_usage_for_account(
         Vec::new()
     };
 
+    // A workspace seat's monthly credits come from its own endpoint, which
+    // states them for seats whose `/wham/usage` cap is null.
+    let credits = super::openai_seat::with_seat_monthly(
+        parsed.credits,
+        super::openai_seat::read_monthly(&client, api_base, &creds).await,
+    );
+
     let report = ProviderUsage {
         provider_name: display_name,
         limits: parsed.limits,
         extra_info: parsed.extra_info,
         hard_limit_reached: parsed.hard_limit_reached,
+        openai_credit_overage: parsed.credit_overage,
         openai_reset_credits: parsed.available_reset_count.map(|available_count| {
             jcode_usage_types::OpenAiResetCredits {
                 available_count,
@@ -364,8 +434,11 @@ pub(super) async fn fetch_openai_usage_for_account(
             }
         }),
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits,
     };
     store_openai_usage_for_generation(
         generation,
@@ -378,7 +451,11 @@ pub(super) async fn fetch_openai_usage_for_account(
 pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
     let api_key = openrouter_api_key()?;
 
-    let client = crate::provider::shared_http_client();
+    // Credit meters leave from the same egress as OpenRouter inference.
+    let client = crate::egress::transport_for_active_key("openrouter")
+        .await
+        .ok()?
+        .client();
 
     let (key_resp, credits_resp) = tokio::join!(
         client
@@ -393,6 +470,13 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
 
     let mut limits = Vec::new();
     let mut extra_info = Vec::new();
+    // A configured but rejected key must not vanish from /usage: the account
+    // row needs to say why it has no balance instead of looking untested.
+    let auth_error = openrouter_rejected_key(
+        [&key_resp, &credits_resp]
+            .into_iter()
+            .filter_map(|response| response.as_ref().ok().map(|response| response.status())),
+    );
 
     if let Ok(resp) = credits_resp
         && resp.status().is_success()
@@ -457,15 +541,18 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
                 usage_percent: pct,
                 resets_at: None,
             });
-            extra_info.push((
-                "Key limit".to_string(),
-                format!("${:.2} / ${:.2}", remaining, limit),
-            ));
+            extra_info.push(("Key limit".to_string(), key_limit_line(remaining, limit)));
         }
     }
 
     if limits.is_empty() && extra_info.is_empty() {
-        return None;
+        return Some(ProviderUsage {
+            provider_name: "OpenRouter".to_string(),
+            error: Some(
+                auth_error.unwrap_or_else(|| "no usage data returned by OpenRouter".to_string()),
+            ),
+            ..Default::default()
+        });
     }
 
     Some(ProviderUsage {
@@ -473,28 +560,31 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     })
 }
 
+/// A configured OpenRouter key the service refuses to authenticate. Rate
+/// limits and transport failures are not credential problems, so they stay
+/// ordinary errors rather than telling the user to sign in again.
+pub(super) fn openrouter_rejected_key(
+    statuses: impl IntoIterator<Item = reqwest::StatusCode>,
+) -> Option<String> {
+    statuses
+        .into_iter()
+        .find(|status| matches!(status.as_u16(), 401 | 403))
+        .map(|status| format!("OpenRouter rejected the API key ({status})"))
+}
+
 pub(super) fn openrouter_api_key() -> Option<String> {
-    std::env::var("OPENROUTER_API_KEY")
-        .ok()
-        .or_else(|| {
-            let config_path = crate::storage::app_config_dir()
-                .ok()?
-                .join("openrouter.env");
-            crate::storage::harden_secret_file_permissions(&config_path);
-            let content = std::fs::read_to_string(config_path).ok()?;
-            content
-                .lines()
-                .find_map(|line| line.strip_prefix("OPENROUTER_API_KEY="))
-                .map(|k| k.trim().to_string())
-        })
-        .filter(|k| !k.is_empty())
+    crate::provider::openrouter::standard_openrouter_api_key()
 }
 
 /// Antigravity per-model quota report. The backend's `fetchAvailableModels`
@@ -572,10 +662,14 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     })
 }
 
@@ -614,10 +708,14 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
         limits: Vec::new(),
         extra_info: vec![("Key status".to_string(), status)],
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     })
 }
 
@@ -641,6 +739,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
     let response = client
         .post("https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage")
         .header("Authorization", format!("Bearer {}", tokens.access_token))
+        .header("Connect-Protocol-Version", "1")
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .timeout(std::time::Duration::from_secs(10))
@@ -651,13 +750,15 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
     match response {
         Ok(response) if response.status().is_success() => {
             let json: serde_json::Value = response.json().await.unwrap_or_default();
-            let report = cursor_plan_usage_report(&json);
+            let mut report = cursor_plan_usage_report(&json);
+            report.account = auth::account_identity::cursor_identity(cursor_plan_id(&json));
+            crate::routing_meters::publish_cursor_limits(&report.limits);
             // A 200 with neither usage fields nor membership info carries
             // nothing usable; fall back to the key-status probe. Membership
             // without usage still shows the plan label.
             let has_membership =
                 json.get("membershipType").is_some() || json.get("spendLimitUsage").is_some();
-            if report.limits.is_empty() && !has_membership {
+            if report.limits.is_empty() && report.credits.is_none() && !has_membership {
                 return Some(cursor_key_status_report().await);
             }
             Some(report)
@@ -666,18 +767,21 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
     }
 }
 
+/// The plan Cursor reports: `team` for a team spend pool, else the membership type.
+fn cursor_plan_id(json: &serde_json::Value) -> Option<&str> {
+    json.get("spendLimitUsage")
+        .filter(|usage| usage.get("limitType").and_then(|v| v.as_str()) == Some("team"))
+        .map(|_| "team")
+        .or_else(|| json.get("membershipType").and_then(|v| v.as_str()))
+}
+
 pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsage {
     let plan = json
         .get("planUsage")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
-    let membership = json
-        .get("spendLimitUsage")
-        .filter(|usage| usage.get("limitType").and_then(|v| v.as_str()) == Some("team"))
-        .map(|_| "Team")
-        .or_else(|| json.get("membershipType").and_then(|v| v.as_str()))
-        .unwrap_or("Pro");
+    let membership = cursor_plan_id(json).unwrap_or("Pro");
     let mut chars = membership.chars();
     let membership_title: String = match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
@@ -709,23 +813,34 @@ pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsag
         limits,
         extra_info: Vec::new(),
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: super::credits::cursor_credits(json),
     }
 }
 
 /// Fallback key-status probe. The `/v0/me` error body still tells us the key
 /// is live and which plan tier it is on when the usage endpoint is out of
 /// reach.
-async fn cursor_key_status_report() -> ProviderUsage {
+pub(super) async fn cursor_key_status_report() -> ProviderUsage {
     let api_key = match auth::cursor::load_api_key() {
         Ok(api_key) => api_key,
         Err(e) => {
+            // A signed-in login that reaches here got no usage back: the key
+            // advice would point at the wrong credential.
+            let error = if auth::cursor::login::load_login().is_some() {
+                "Cursor returned no usage for this login. Sign in again with `jcode login --provider cursor`.".to_string()
+            } else {
+                format!("Cursor usage unavailable: {}", e)
+            };
             return ProviderUsage {
                 provider_name: "Cursor".to_string(),
-                error: Some(format!("Cursor usage unavailable: {}", e)),
+                error: Some(error),
                 ..Default::default()
             };
         }
@@ -782,10 +897,14 @@ async fn cursor_key_status_report() -> ProviderUsage {
         limits: Vec::new(),
         extra_info,
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     }
 }
 
@@ -905,10 +1024,14 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_credit_overage: false,
         openai_reset_credits: None,
         anthropic_limit_reset: None,
+        anthropic_banked_resets: None,
         error: None,
         last_used_unix_secs: None,
+        account: None,
+        credits: None,
     })
 }
 
@@ -997,5 +1120,15 @@ pub(crate) fn jcode_usage_report(me: &crate::subscription_api::SubscriptionMe) -
         extra_info,
         hard_limit_reached,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod key_limit_tests {
+    use super::key_limit_line;
+
+    #[test]
+    fn a_key_limit_says_what_is_left() {
+        assert_eq!(key_limit_line(4.2, 10.0), "$4.20 left of $10.00");
     }
 }

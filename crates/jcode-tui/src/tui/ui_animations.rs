@@ -97,7 +97,7 @@ pub(crate) fn idle_animation_debug_json() -> serde_json::Value {
             .load(std::sync::atomic::Ordering::Relaxed),
         "full_repaints": IDLE_ANIMATION_FULL_REPAINTS
             .load(std::sync::atomic::Ordering::Relaxed),
-        "last_full_frame_reason": crate::tui::last_full_frame_redraw_reason(),
+        "last_full_frame_reason": crate::tui::redraw_reason::last_full_frame_redraw_reason(),
         "fast_path_blocked": idle_animation_fast_path_blocked_reasons(),
     })
 }
@@ -202,7 +202,8 @@ where
 }
 
 fn disabled_animation_names() -> HashSet<String> {
-    expand_disabled_animation_names(crate::config::config().display.disabled_animations.iter())
+    let prefs = crate::config::config().display.animation_prefs();
+    expand_disabled_animation_names(prefs.disabled.iter())
 }
 
 fn choose_animation_variant_from_disabled<'a>(
@@ -245,6 +246,22 @@ impl IdleBuffers {
             z_buf: Vec::new(),
             size: 0,
         }
+    }
+
+    /// Fill the subpixel grids for one animation variant at `elapsed`.
+    fn sample(&mut self, variant: &str, elapsed: f32, sw: usize, sh: usize) {
+        let (hit, lum_map, z_buf) = (&mut self.hit, &mut self.lum_map, &mut self.z_buf);
+        match variant {
+            "donut" => sample_donut(elapsed, sw, sh, hit, lum_map, z_buf),
+            "orbit_rings" => sample_orbit_rings(elapsed, sw, sh, hit, lum_map, z_buf),
+            "black_hole" => sample_black_hole(elapsed, sw, sh, hit, lum_map, z_buf),
+            _ => sample_gyroscope(elapsed, sw, sh, hit, lum_map, z_buf),
+        }
+    }
+
+    /// Composite the sampled grids into terminal cells over `area`.
+    fn blit(&self, buf: &mut Buffer, area: Rect, sw: usize, time_hue: f32) {
+        blit_idle(buf, area, &self.hit, &self.lum_map, sw, time_hue);
     }
 
     fn resize_and_clear(&mut self, len: usize) {
@@ -320,46 +337,7 @@ pub(crate) fn render_idle_animation(buf: &mut Buffer, area: Rect, elapsed: f32) 
     IDLE_BUF.with(|cell| {
         let mut bufs = cell.borrow_mut();
         bufs.resize_and_clear(sw * sh);
-        let bufs = &mut *bufs;
-
-        let variant = idle_animation_variant();
-        match variant {
-            "donut" => sample_donut(
-                elapsed,
-                sw,
-                sh,
-                &mut bufs.hit,
-                &mut bufs.lum_map,
-                &mut bufs.z_buf,
-            ),
-            "orbit_rings" => sample_orbit_rings(
-                elapsed,
-                sw,
-                sh,
-                &mut bufs.hit,
-                &mut bufs.lum_map,
-                &mut bufs.z_buf,
-            ),
-            "black_hole" => sample_black_hole(
-                elapsed,
-                sw,
-                sh,
-                &mut bufs.hit,
-                &mut bufs.lum_map,
-                &mut bufs.z_buf,
-            ),
-            _ => sample_gyroscope(
-                elapsed,
-                sw,
-                sh,
-                &mut bufs.hit,
-                &mut bufs.lum_map,
-                &mut bufs.z_buf,
-            ),
-        }
-
-        let hit = &bufs.hit;
-        let lum_map = &bufs.lum_map;
+        bufs.sample(idle_animation_variant(), elapsed, sw, sh);
 
         let time_hue = elapsed * 40.0;
 
@@ -371,7 +349,7 @@ pub(crate) fn render_idle_animation(buf: &mut Buffer, area: Rect, elapsed: f32) 
         // plus a Vec<Span>/Vec<Line>/Paragraph allocation on every animation
         // frame (60 FPS) -- the dominant idle-render cost once the samplers were
         // optimized.
-        blit_idle(buf, area, hit, lum_map, sw, time_hue);
+        bufs.blit(buf, area, sw, time_hue);
     });
 }
 

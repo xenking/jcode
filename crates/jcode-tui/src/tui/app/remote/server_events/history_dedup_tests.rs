@@ -7,7 +7,12 @@ use crate::session::{RenderedImage, RenderedImageSource};
 
 fn message(role: &str, content: &str) -> HistoryMessage {
     HistoryMessage {
+        codemode: None,
+        ask: None,
+        tool_duration_ms: None,
+        attachments: Vec::new(),
         response_stats: None,
+        timestamp_ms: None,
         role: role.to_string(),
         content: content.to_string(),
         tool_calls: None,
@@ -17,6 +22,7 @@ fn message(role: &str, content: &str) -> HistoryMessage {
 
 fn image(data: &str) -> RenderedImage {
     RenderedImage {
+        session_image: None,
         history_message_index: None,
         media_type: "image/png".to_string(),
         data: data.to_string(),

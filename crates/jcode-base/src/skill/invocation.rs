@@ -1,4 +1,4 @@
-use super::SkillRegistry;
+use super::{Skill, SkillRegistry};
 
 /// A slash-command skill invocation with an optional trailing prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7,7 +7,27 @@ pub struct SkillInvocation<'a> {
     pub prompt: Option<&'a str>,
 }
 
+impl SkillInvocation<'_> {
+    /// Preserve quoting for consumers that parse words rather than prompt prose.
+    pub fn raw_arguments<'a>(&self, input: &'a str) -> &'a str {
+        input
+            .trim()
+            .strip_prefix('/')
+            .and_then(|input| input.strip_prefix(self.name))
+            .unwrap_or("")
+            .trim()
+    }
+}
+
 impl SkillRegistry {
+    /// List skills discoverable by the model.
+    pub fn list_for_model(&self) -> Vec<&Skill> {
+        self.list()
+            .into_iter()
+            .filter(|skill| skill.is_model_invocable())
+            .collect()
+    }
+
     /// Resolve a slash invocation against registered names, including names
     /// containing spaces. The longest registered name wins; unknown names fall
     /// back to the identifier-shaped result from [`Self::parse_invocation`].
@@ -47,7 +67,7 @@ impl SkillRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skill::{Skill, build_skill_search_text};
+    use crate::skill::build_skill_search_text;
     use std::path::PathBuf;
 
     fn registry(names: &[&str]) -> SkillRegistry {
@@ -55,10 +75,15 @@ mod tests {
         for name in names {
             registry.skills.insert(
                 (*name).to_string(),
-                Skill {
+                std::sync::Arc::new(Skill {
                     name: (*name).to_string(),
                     description: "Test skill".to_string(),
+                    icon: None,
+                    mode: None,
                     allowed_tools: None,
+                    disable_model_invocation: false,
+                    command: None,
+                    arguments: Vec::new(),
                     content: "content".to_string(),
                     path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
                     search_text: std::sync::OnceLock::from(build_skill_search_text(
@@ -66,7 +91,7 @@ mod tests {
                         "Test skill",
                         "content",
                     )),
-                },
+                }),
             );
         }
         registry

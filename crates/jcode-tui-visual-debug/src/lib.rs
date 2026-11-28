@@ -765,20 +765,38 @@ fn write_frame(file: &mut File, frame: &FrameCapture) -> std::io::Result<()> {
 /// Builder for constructing frame captures during rendering
 #[derive(Default)]
 pub struct FrameCaptureBuilder {
-    pub layout: LayoutCapture,
-    pub state: StateSnapshot,
-    pub rendered_text: RenderedText,
-    pub image_regions: Vec<ImageRegionCapture>,
-    pub anomalies: Vec<String>,
-    pub render_timing: Option<RenderTimingCapture>,
-    pub info_widgets: Option<InfoWidgetCapture>,
-    pub render_order: Vec<String>,
+    layout: LayoutCapture,
+    state: StateSnapshot,
+    rendered_text: RenderedText,
+    image_regions: Vec<ImageRegionCapture>,
+    anomalies: Vec<String>,
+    render_timing: Option<RenderTimingCapture>,
+    info_widgets: Option<InfoWidgetCapture>,
+    render_order: Vec<String>,
+    mermaid: Option<Value>,
+    side_panel: Option<Value>,
+    markdown: Option<Value>,
+    theme: Option<Value>,
+    terminal_size: (u16, u16),
+}
+
+/// Subsystem debug blobs attached to a frame once it has been drawn.
+pub struct FrameDiagnostics {
+    pub render_timing: RenderTimingCapture,
     pub mermaid: Option<Value>,
     pub side_panel: Option<Value>,
     pub markdown: Option<Value>,
     pub theme: Option<Value>,
-    terminal_size: (u16, u16),
 }
+
+/// Read-only projection of the inputs to a normal frame.
+pub trait FrameProbe {
+    fn state(&self) -> StateSnapshot;
+    fn rendered(&self) -> RenderedText;
+}
+
+#[cfg(test)]
+mod frame_capture_tests;
 
 impl FrameCaptureBuilder {
     pub fn new(width: u16, height: u16) -> Self {
@@ -786,6 +804,72 @@ impl FrameCaptureBuilder {
             terminal_size: (width, height),
             ..Default::default()
         }
+    }
+
+    pub fn record_frame(&mut self, probe: &impl FrameProbe, layout: LayoutCapture) {
+        self.layout = layout;
+        self.state = probe.state();
+        self.rendered_text = probe.rendered();
+    }
+
+    pub fn record_hibernation(
+        &mut self,
+        input: &str,
+        cursor: usize,
+        scroll: usize,
+        messages: usize,
+        notice: &str,
+    ) {
+        self.state = StateSnapshot {
+            status: "hibernated".into(),
+            input_len: input.len(),
+            input_preview: input.chars().take(200).collect(),
+            cursor_pos: cursor,
+            scroll_offset: scroll,
+            message_count: messages,
+            ..Default::default()
+        };
+        self.rendered_text.status_line = notice.into();
+        self.step("frozen_hibernation_frame");
+    }
+
+    pub fn record_pane_geometry(&mut self, messages: Rect, diagram: Option<Rect>) {
+        self.layout.messages_area = Some(messages.into());
+        self.layout.diagram_area = diagram.map(Into::into);
+    }
+
+    pub fn record_margins(&mut self, margins: MarginsCapture) {
+        self.layout.margins = Some(margins);
+    }
+
+    pub fn record_input(&mut self, display_text: &str, hint: Option<&str>) {
+        self.rendered_text.input_area = display_text.into();
+        self.rendered_text.input_hint = hint.map(str::to_owned);
+    }
+
+    /// Note that a render stage ran, in order.
+    pub fn step(&mut self, stage: &str) {
+        self.render_order.push(stage.to_string());
+    }
+
+    pub fn set_image_regions(&mut self, regions: Vec<ImageRegionCapture>) {
+        self.image_regions = regions;
+    }
+
+    pub fn set_info_widgets(&mut self, info_widgets: InfoWidgetCapture) {
+        self.layout
+            .widget_placements
+            .clone_from(&info_widgets.placements);
+        self.info_widgets = Some(info_widgets);
+    }
+
+    /// Attach timing and subsystem debug data once the frame is drawn.
+    pub fn attach_diagnostics(&mut self, diagnostics: FrameDiagnostics) {
+        self.render_timing = Some(diagnostics.render_timing);
+        self.mermaid = diagnostics.mermaid;
+        self.side_panel = diagnostics.side_panel;
+        self.markdown = diagnostics.markdown;
+        self.theme = diagnostics.theme;
     }
 
     /// Record an anomaly detected during rendering

@@ -3,6 +3,113 @@
 use super::*;
 
 impl App {
+    pub(super) fn record_kv_cache_miss_sample(
+        &mut self,
+        request: &PendingKvCacheRequest,
+        input_tokens: u64,
+    ) {
+        // A first fill without a reusable-prefix baseline is not a proven
+        // cache loss, even with an explicit zero read. Do not label it a miss.
+        let Some(baseline) = request.baseline.as_ref() else {
+            return;
+        };
+        if baseline.input_tokens == 0 {
+            return;
+        }
+        let expected_tokens = if request.provider == baseline.provider {
+            baseline.input_tokens
+        } else {
+            input_tokens
+        };
+
+        // Missing telemetry is not an explicit cache miss. Write-only usage
+        // and providers omitting cached_tokens must not trigger harness alarms.
+        let Some(read_tokens) = self.streaming.streaming_cache_read_tokens else {
+            return;
+        };
+        let missed_tokens = expected_tokens.saturating_sub(read_tokens);
+        let optimal_pct = ratio_pct(read_tokens, expected_tokens);
+        let reason =
+            self.classify_kv_cache_miss_reason(request, baseline, read_tokens, optimal_pct);
+        let low_read = matches!(
+            reason,
+            KvCacheMissReason::LowRead | KvCacheMissReason::ZeroRead
+        );
+        let flagged = if low_read {
+            self.kv_cache
+                .kv_cache_tail
+                .is_miss(&request.provider, expected_tokens, read_tokens)
+                && !Self::kv_cache_warm_read_shortfall(request, baseline, read_tokens)
+        } else {
+            missed_tokens
+                >= crate::kv_cache_monitor::min_missed_tokens_for_provider(&request.provider)
+        };
+        self.kv_cache.kv_cache_tail.observe(
+            &request.provider,
+            expected_tokens,
+            read_tokens,
+            flagged,
+        );
+        if !flagged {
+            return;
+        }
+
+        self.kv_cache.kv_cache_miss_samples.push(KvCacheMissSample {
+            turn_number: request.turn_number,
+            call_index: request.call_index,
+            missed_tokens,
+            reason,
+        });
+        if self.kv_cache.kv_cache_miss_samples.len() > Self::KV_CACHE_MAX_MISS_SAMPLES {
+            let overflow =
+                self.kv_cache.kv_cache_miss_samples.len() - Self::KV_CACHE_MAX_MISS_SAMPLES;
+            self.kv_cache.kv_cache_miss_samples.drain(0..overflow);
+        }
+
+        self.maybe_push_kv_cache_miss_notice(
+            request,
+            reason,
+            missed_tokens,
+            read_tokens,
+            expected_tokens,
+            baseline.completed_at,
+        );
+    }
+
+    pub(super) fn cold_cache_warning_text(
+        config: &crate::config::CompactionConfig,
+        trigger: ColdCacheWarningTrigger,
+        tokens: u64,
+        expired_ago_secs: u64,
+    ) -> String {
+        if config.snapcompact
+            && config.snapcompact_cache_expiry
+            && config.cache_expiry_threshold_tokens > 0
+            && tokens >= config.cache_expiry_threshold_tokens as u64
+        {
+            // Only the daemon can measure the outgoing context after reducing
+            // it. Never present a cached baseline as the next request's size.
+            return "🧊 Prompt cache went cold · context will shrink before the next request"
+                .into();
+        }
+        let token_label = if tokens >= 1_000_000 {
+            format!("{:.1}M", tokens as f64 / 1_000_000.0)
+        } else if tokens >= 1_000 {
+            format!("{}K", tokens / 1_000)
+        } else {
+            tokens.to_string()
+        };
+        match trigger {
+            ColdCacheWarningTrigger::IdleExpiry => format!(
+                "🧊 Prompt cache went cold · next turn may resend ~{token_label} tok · /cache extends"
+            ),
+            ColdCacheWarningTrigger::RequestStart => format!(
+                "🧊 Prompt cache went cold {} ago · this request may resend ~{token_label} tok",
+                crate::tui::format_compact_age(expired_ago_secs),
+            ),
+        }
+    }
+
     pub(super) fn kv_cache_diagnostic_fields(
         &self,
         request: &PendingKvCacheRequest,
@@ -10,6 +117,10 @@ impl App {
     ) -> String {
         let baseline = request.baseline.as_ref();
         let read = self.streaming.streaming_cache_read_tokens;
+        let previous_read = baseline.and_then(|b| b.read_tokens);
+        let read_drop = previous_read
+            .zip(read)
+            .map(|(prior, read)| prior.saturating_sub(read));
         let shortfall = baseline
             .zip(read)
             .map(|(b, r)| b.input_tokens.saturating_sub(r));
@@ -34,6 +145,7 @@ impl App {
             b.provider == request.provider
                 && b.model == request.model
                 && b.upstream_provider == request.upstream_provider
+                && b.account == request.account
         });
         let upstream_matches = baseline.and_then(|b| {
             b.upstream_provider
@@ -59,7 +171,7 @@ impl App {
             (None, _, _) => "no_baseline",
             (_, None, _) => "usage_not_reported",
             (_, _, Some(0)) => "no_shortfall",
-            (_, _, Some(n)) if n < Self::kv_cache_min_missed_tokens(&request.provider) => {
+            (_, _, Some(n)) if n <= self.kv_cache.kv_cache_tail.tolerance(&request.provider) => {
                 "below_miss_threshold"
             }
             _ if generation_matches == Some(false) => "cache_generation_changed",
@@ -68,6 +180,9 @@ impl App {
                 || request.baseline_messages_prefix_matches == Some(false) =>
             {
                 "local_prefix_changed"
+            }
+            (Some(b), Some(read), _) if Self::kv_cache_warm_read_shortfall(request, b, read) => {
+                "warm_read_shortfall"
             }
             _ if static_prefix_matches == Some(true)
                 && request.baseline_messages_prefix_matches == Some(true) =>
@@ -79,7 +194,7 @@ impl App {
         format!(
             "session_id={:?} baseline_provider={:?} baseline_model={:?} baseline_upstream={:?} \
              cache_generation={} baseline_cache_generation={:?} prompt_tokens={} \
-             cache_read_reported={} cache_write_reported={} prefix_shortfall_tokens={:?} prefix_shortfall_pct={:?} \
+             cache_read_reported={} cache_write_reported={} previous_cache_read={:?} read_drop_tokens={:?} prefix_shortfall_tokens={:?} prefix_shortfall_pct={:?} \
              idle_before_request_secs={:?} request_elapsed_ms={:?} request_timing_source={} ttl_state={} requested_ttl_secs={:?} \
              route_metadata_matches={:?} upstream_matches={:?} static_prefix_matches={:?} loss_evidence={} eviction_confirmed=false",
             self.kv_cache_session_id(),
@@ -91,6 +206,8 @@ impl App {
             prompt_tokens,
             read.is_some(),
             self.streaming.streaming_cache_creation_tokens.is_some(),
+            previous_read,
+            read_drop,
             shortfall,
             shortfall_pct,
             idle_secs,

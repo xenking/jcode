@@ -181,6 +181,13 @@ pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
         // verbatim; no fallback to `output` and no guessed default like
         // Wonder/Full (1_007_997) is synthesized here.
         .or_else(|| parse_muse_context_limit(object))
+        // OpenCode Go exposes the serving window at limit.context.
+        .or_else(|| {
+            object
+                .get("limit")
+                .and_then(Value::as_object)
+                .and_then(|limit| first_u64_field(limit, &["context"]))
+        })
         // llama.cpp's /v1/models reports the serving context only inside
         // `meta` (`n_ctx`, with `n_ctx_train` as the trained maximum). Without
         // this, local llama.cpp models fall back to the generic 200K default
@@ -259,6 +266,12 @@ pub(crate) fn parse_input_modalities(object: &serde_json::Map<String, Value>) ->
         .or_else(|| object.get("input"))
         .or_else(|| {
             object
+                .get("modalities")
+                .and_then(Value::as_object)
+                .and_then(|modalities| modalities.get("input"))
+        })
+        .or_else(|| {
+            object
                 .get("metadata")
                 .and_then(Value::as_object)
                 .and_then(|meta| meta.get("muse-code"))
@@ -277,7 +290,13 @@ pub(crate) fn parse_input_modalities(object: &serde_json::Map<String, Value>) ->
         .filter_map(Value::as_str)
         .map(str::trim)
         .filter(|modality| !modality.is_empty())
-        .map(str::to_ascii_lowercase)
+        .map(|modality| {
+            if modality.to_ascii_lowercase().starts_with("image/") {
+                "image".to_string()
+            } else {
+                modality.to_ascii_lowercase()
+            }
+        })
         .collect()
 }
 

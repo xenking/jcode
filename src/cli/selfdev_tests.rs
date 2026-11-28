@@ -127,7 +127,7 @@ async fn test_selfdev_tool_registration() {
 
     let mut session = session::Session::create(None, Some("Test".to_string()));
     session.set_canary("test");
-    assert!(session.is_canary, "Session should be marked as canary");
+    assert!(session.is_canary(), "Session should be marked as canary");
 
     let provider = Arc::new(TestProvider) as Arc<dyn provider::Provider>;
     let registry = tool::Registry::new(provider).await;
@@ -160,11 +160,11 @@ async fn test_selfdev_session_and_registry() {
 
     let mut session = session::Session::create(None, Some("Test E2E".to_string()));
     session.set_canary("test-build");
-    let session_id = session.id.clone();
+    let session_id = session.id().to_owned();
     session.save().expect("Failed to save session");
 
     let loaded = session::Session::load(&session_id).expect("Failed to load session");
-    assert!(loaded.is_canary, "Loaded session should be canary");
+    assert!(loaded.is_canary(), "Loaded session should be canary");
 
     let provider = Arc::new(TestProvider) as Arc<dyn provider::Provider>;
     let registry = tool::Registry::new(provider.clone()).await;
@@ -226,12 +226,18 @@ async fn test_wait_for_reloading_server_returns_false_when_reload_failed() {
 }
 
 #[tokio::test]
-async fn test_wait_for_reloading_server_returns_true_for_live_listener() {
+async fn test_wait_for_reloading_server_returns_true_for_confirmed_generation() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let socket_path = temp.path().join("jcode.sock");
     let _env = set_socket_test_env(&socket_path, temp.path());
-    let _listener = crate::transport::Listener::bind(&socket_path).expect("bind listener");
+    crate::server::write_reload_state(
+        "reload-test",
+        "abcdef123",
+        crate::server::ReloadPhase::SocketReady,
+        None,
+    );
+    let _listener = crate::cli::test_support::reload_identity_listener(&socket_path, "reload-test");
 
     assert!(wait_for_reloading_server().await);
 }
